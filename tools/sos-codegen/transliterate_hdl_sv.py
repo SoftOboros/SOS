@@ -25,6 +25,17 @@ decomposition + chart-top wrapper shape).
 @spec  PCDN-C-004 (guard depth budget = 8 chained operators)
 @spec  PCDN-C-005 (chart annotation wins for encoding)
 @spec  PCDN-C-006 (document-order priority lint rule)
+@spec  PCDN-SOS-08-C-wave2-clock-annotation (resolved 2026-05-23) —
+       `<sos:region clock="..."/>` element form is the canonical
+       declaration site for per-region clock-domain attribution; this
+       walker extracts it from each parallel-child state's
+       `other_element` list (scjson normalises `xmlns:sos` children
+       under that key with `qname=`{NS}region`).
+@spec  PCDN-SOS-08-C-wave2-wrapper-shape (resolved 2026-05-23) —
+       chart-top wrapper consumes `region_modules` entries shaped
+       `{name, module, clock_domain, datamodel_signals, state_width}`;
+       the SV walker now routes through `hdl_common.emit_chart_top_wrapper`
+       with that shape (wave-3 follow-up to wave-2 ratification).
 
 # Wave-2 scope (delta vs wave-1)
 
@@ -226,6 +237,36 @@ class EventIngressNotSupportedError(HdlEmitError):
     """Wave-2 still rejects explicit <raise> / event-egress wiring.
     SOS-08-C §6.4 / §6.5 wire external events via L1
     `sos_message_channel`; wave-3 lands the wiring."""
+
+
+# ---------------------------------------------------------------------------
+# sos: namespace — `<sos:region clock="..."/>` extraction
+# (PCDN-SOS-08-C-wave2-clock-annotation, resolved 2026-05-23).
+#
+# scjson normalises every non-SCXML-namespaced element child into the
+# state node's `other_element` list as `{qname, attributes, text}`.
+# The `sos:` prefix expands to the namespace ratified at SOS-01 §15.
+# ---------------------------------------------------------------------------
+
+
+_SOS_NS = "{http://softoboros.com/scxml-extensions/v1}"
+
+
+def _extract_sos_region_clock(state_node: dict) -> str | None:
+    """Extract clock domain from ``<sos:region clock="..."/>`` child element.
+
+    Returns ``None`` if no annotation present. Per
+    PCDN-SOS-08-C-wave2-clock-annotation (resolved 2026-05-23):
+    element-form is the canonical declaration site for per-region
+    clock domains under the ``sos:`` namespace ratified in SOS-01 §15.
+    """
+    for elem in state_node.get("other_element", []) or []:
+        if elem.get("qname") == _SOS_NS + "region":
+            attrs = elem.get("attributes", {}) or {}
+            clk = attrs.get("clock")
+            if clk:
+                return clk
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -502,12 +543,20 @@ def _normalise_regions(
                 # Each parallel child becomes its own region, carrying
                 # only its own descendants (no sibling cross-talk).
                 states = _states_from_container({"state": [child_state]})
-                # Clock domain: per PCDN-SOS-08-C-001, inherit from parent
-                # unless the child carries an explicit clock annotation
-                # via <sos:region clock="..."/> (lives under scjson as a
-                # `region_clock` or scjson-normalised attribute).
+                # Clock domain resolution order (PCDN-SOS-08-C-001 +
+                # PCDN-SOS-08-C-wave2-clock-annotation, resolved
+                # 2026-05-23):
+                #   1. ``<sos:region clock="..."/>`` child element on
+                #      this region — canonical chart-author surface.
+                #   2. Legacy attribute fallbacks (``clock=``,
+                #      ``region_clock=``) for in-flight charts that
+                #      pre-date the element-form ratification.
+                #   3. Inherit from the parent ``<parallel>``'s
+                #      ``clock=`` attribute, if any.
+                #   4. Default ``"main"`` per PCDN-SOS-08-C-001.
                 clock_domain = (
-                    child_state.get("clock")
+                    _extract_sos_region_clock(child_state)
+                    or child_state.get("clock")
                     or child_state.get("region_clock")
                     or par.get("clock")
                     or "main"
@@ -547,7 +596,15 @@ def _normalise_regions(
             f"chart '{chart_name}' has none."
         )
     initial = _resolve_initial(chart, states)
-    clock_domain = chart.get("clock") or "main"
+    # Single-region path uses the same clock-domain precedence as the
+    # parallel path (PCDN-SOS-08-C-wave2-clock-annotation, 2026-05-23):
+    # element-form ``<sos:region clock=.../>`` on the chart root wins
+    # over the legacy chart-root ``clock=`` attribute.
+    clock_domain = (
+        _extract_sos_region_clock(chart)
+        or chart.get("clock")
+        or "main"
+    )
     return [
         HdlRegion(
             name=chart_name,
@@ -1384,6 +1441,113 @@ def _render_chart_top_local(
     return f"{top_module}.sv", "\n".join(lines)
 
 
+def _build_region_modules_canonical(
+    chart_name: str,
+    regions: list[HdlRegion],
+    region_datamodel_signals: dict[str, list[_DatamodelSignal]],
+) -> list[dict[str, Any]]:
+    """Build the canonical ``region_modules`` list per
+    PCDN-SOS-08-C-wave2-wrapper-shape (resolved 2026-05-23):
+    ``{name, module, clock_domain, datamodel_signals, state_width}``.
+
+    Per-region direction inference: a datamodel signal is ``"out"`` if
+    any state in the region writes it (via ``<onentry>`` / ``<onexit>``
+    ``<assign location="..."/>``); else it is ``"in"`` (the region only
+    reads it, e.g. through a transition guard). Both directions land
+    on the wrapper boundary so the chart-top can wire reads from one
+    region to writes from another (synchronised across clock domains
+    by ``cross_domain_signals``).
+    """
+    region_modules: list[dict[str, Any]] = []
+    for region in regions:
+        # Determine writes / reads for this region by walking its
+        # states once. Mirrors the analysis in
+        # ``_detect_cross_domain_signals`` but per-region.
+        writes: set[str] = set()
+        reads: set[str] = set()
+        for state in region.states:
+            for a in state.onentry_assigns:
+                writes.add(a.location)
+            for a in state.onexit_assigns:
+                writes.add(a.location)
+            for tr in state.transitions:
+                if tr.cond:
+                    for tok in re.findall(
+                        r"\b[A-Za-z_][A-Za-z0-9_]*\b", tr.cond
+                    ):
+                        if tok.lower() not in (
+                            "true", "false", "and", "or", "not",
+                        ):
+                            reads.add(tok)
+
+        signals: list[dict[str, Any]] = []
+        for sig in region_datamodel_signals.get(region.name, []):
+            chart_id = sig.chart_id
+            if chart_id in writes:
+                direction = "out"
+            elif chart_id in reads:
+                direction = "in"
+            else:
+                # Region neither reads nor writes the signal — wave-2
+                # still surfaces it as an output observable per
+                # INV-S-HDL-C-2. Cheap default: "out" matches the
+                # wave-2 per-region module shape (every datamodel
+                # signal is exposed as an output of the FSM).
+                direction = "out"
+            signals.append(
+                {
+                    "name": sig.sv_name,
+                    "width": max(1, sig.width),
+                    "direction": direction,
+                }
+            )
+
+        region_modules.append(
+            {
+                "name": _sanitize_sv_identifier(region.name),
+                "module": _region_module_name(chart_name, region.name),
+                "clock_domain": region.clock_domain or "main",
+                "datamodel_signals": signals,
+                "state_width": max(1, len(region.states)),
+            }
+        )
+    return region_modules
+
+
+def _build_cross_domain_signals_canonical(
+    cross_domain_signals: list[HdlCrossDomainSignal],
+    region_modules: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Adapt ``HdlCrossDomainSignal`` records into the dict shape the
+    canonical helper consumes: ``{name, src_region, dst_region, width,
+    stages}``. The signal name is rewritten into the registered-
+    datamodel form (``data_<sanitised>``) so it matches both the per-
+    region module's port name and the wrapper's CDC wire declaration.
+    Region names are sanitised consistently with
+    ``_build_region_modules_canonical`` so the helper can resolve them
+    against ``region_modules``.
+    """
+    out: list[dict[str, Any]] = []
+    region_name_index = {rm["name"] for rm in region_modules}
+    for sig in cross_domain_signals:
+        src = _sanitize_sv_identifier(sig.src_region)
+        dst = _sanitize_sv_identifier(sig.dst_region)
+        if src not in region_name_index or dst not in region_name_index:
+            # Defensive — should not happen with current detection
+            # rules; skip rather than crash so emission stays robust.
+            continue
+        out.append(
+            {
+                "name": f"data_{_sanitize_sv_identifier(sig.name)}",
+                "src_region": src,
+                "dst_region": dst,
+                "width": max(1, sig.width),
+                "stages": sig.stages,
+            }
+        )
+    return out
+
+
 def _render_chart_top(
     chart_name: str,
     regions: list[HdlRegion],
@@ -1392,23 +1556,44 @@ def _render_chart_top(
 ) -> tuple[str, str]:
     """Emit the chart-top wrapper.
 
-    The orchestrator's prompt pins the wrapper's naming convention:
-      - module name: `<chart>_top`.
-      - region instances: `u_region_<name> : <chart>_region_<name>_fsm`.
-      - per-domain clk_<dom> / rst_<dom> ports.
-
-    `hdl_common.emit_chart_top_wrapper` exists but defaults to a
-    different module-name convention (`sos_region_<name>`) per the §6.2
-    sketch in SOS-08-C — that convention would diverge from the
-    `<chart>_region_<name>_fsm` naming this module emits for the
-    per-region files (and from the VHDL sibling's mirrored convention).
-    To keep cross-dialect byte-equivalence + match the orchestrator's
-    contract, we always use the local emitter for the wrapper.
-
-    If the sibling agent's wave-2.5 reconcile lands a configurable
-    naming hook on `emit_chart_top_wrapper`, this dispatch will adopt
-    it; until then we own the wrapper shape locally.
+    Wave-3 follow-up to wave-2 ratification (2026-05-23): per
+    ``PCDN-SOS-08-C-wave2-wrapper-shape``, ``hdl_common.emit_chart_top_wrapper``
+    is now reshaped to consume the canonical
+    ``{name, module, clock_domain, datamodel_signals, state_width}``
+    region_modules entries and authors the wrapper for both dialects.
+    The SV walker now routes through the helper (VHDL sibling already
+    migrated). The local ``_render_chart_top_local`` is retained as a
+    private fallback so wave-2 emission keeps working if a future
+    helper signature drift breaks the call site.
     """
+    if _emit_chart_top_wrapper is not None:
+        try:
+            region_modules = _build_region_modules_canonical(
+                chart_name, regions, region_datamodel_signals
+            )
+            cds_dicts = _build_cross_domain_signals_canonical(
+                cross_domain_signals, region_modules
+            )
+            # Pass the canonical lowercased+sanitised chart base so the
+            # helper's ``f"{chart_name}_top"`` matches our local
+            # ``_chart_top_module_name`` (lowercased). The trailing
+            # ``_top`` is appended by the helper.
+            top_name = _chart_top_module_name(chart_name)
+            chart_base = top_name[: -len("_top")] if top_name.endswith(
+                "_top"
+            ) else top_name
+            body = _emit_chart_top_wrapper(
+                chart_name=chart_base or "chart",
+                region_modules=region_modules,
+                cross_domain_signals=cds_dicts,
+                dialect=Dialect.SV,
+            )
+            fname = f"{top_name}.sv"
+            return fname, body
+        except Exception:
+            # Signature drift or runtime error — fall back to the
+            # local emitter so wave-2 emission stays unblocked.
+            pass
     return _render_chart_top_local(
         chart_name, regions, region_datamodel_signals, cross_domain_signals
     )

@@ -391,6 +391,43 @@ def _collect_datamodel(container: dict[str, Any]) -> list[HdlDatamodelSignal]:
     return out
 
 
+# --------------------------------------------------------------------------
+# SOS extension namespace: <sos:region clock="..."/> element-form clock
+# annotation per PCDN-SOS-08-C-wave2-clock-annotation (2026-05-23 wave-2
+# walkthrough).  scjson normalises foreign-namespaced child elements into
+# the parent's `other_element` list rather than into the parent's attribute
+# bag, so the wave-2 attribute-form fallback (`region_node.get("clock")`)
+# never sees the element-form annotation.  See `_extract_sos_region_clock`.
+# --------------------------------------------------------------------------
+_SOS_NS = "{http://softoboros.com/scxml-extensions/v1}"
+
+
+def _extract_sos_region_clock(region_node: dict[str, Any]) -> str | None:
+    """Return the clock-domain name from a `<sos:region clock="..."/>`
+    element child of `region_node`, or ``None`` if no such annotation
+    is present.
+
+    Per PCDN-SOS-08-C-wave2-clock-annotation (2026-05-23): the element
+    form `<sos:region clock="clk_fast"/>` is the canonical authoring
+    surface for per-region clock-domain binding.  scjson normalises
+    foreign-namespaced children into `other_element` entries shaped:
+
+        {"qname": "{http://softoboros.com/scxml-extensions/v1}region",
+         "attributes": {"clock": "clk_fast"},
+         "text": ""}
+
+    The legacy attribute form (`<state ... clock="clk_fast">`) is kept
+    as a fallback for backward compatibility with pre-wave-2 fixtures.
+    """
+    for elem in region_node.get("other_element", []) or []:
+        if elem.get("qname", "") == _SOS_NS + "region":
+            attrs = elem.get("attributes", {}) or {}
+            clk = attrs.get("clock")
+            if clk:
+                return clk
+    return None
+
+
 def _normalise_region(
     region_node: dict[str, Any],
     region_name: str,
@@ -406,15 +443,24 @@ def _normalise_region(
 
     `parent_clock` is the clock-domain name inherited from the
     enclosing scope (root chart default = "main" per PCDN-C-001).
+
+    Per PCDN-SOS-08-C-wave2-clock-annotation (2026-05-23): the
+    `<sos:region clock="..."/>` element child is the canonical
+    per-region clock-domain binding; legacy attribute form
+    (`<state clock="...">`) is kept as a fallback.
     """
 
     # Per-region datamodel: <datamodel><data .../> directly under the
     # region.  Shared datamodel is collected at chart root.
     datamodel = _collect_datamodel(region_node)
 
-    # Clock-domain annotation: explicit `clock` attribute on the region
-    # node beats inheritance.  Per PCDN-C-001 the default is parent.
-    clock_domain = region_node.get("clock") or parent_clock or "main"
+    # Clock-domain resolution (PCDN-SOS-08-C-wave2-clock-annotation):
+    #   1. <sos:region clock="..."/> element child (canonical wave-2 form).
+    #   2. legacy `clock=` attribute on the region node (pre-wave-2 fixtures).
+    #   3. inherited parent clock domain (PCDN-C-001 default).
+    #   4. "main" as the chart-root fallback.
+    explicit_clock = _extract_sos_region_clock(region_node) or region_node.get("clock")
+    clock_domain = explicit_clock or parent_clock or "main"
 
     # States: yield every <state> reachable without crossing into a
     # nested <parallel>.
