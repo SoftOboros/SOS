@@ -7,6 +7,12 @@
 //   N_REQS, sync active-high reset, one-hot pointer.  See `sos_arbiter_rr.sv`
 //   header for the full invariant list this module rides.
 //
+//   Per PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved 2026-05-23: this SVA
+//   module accepts a matching GRANT_LATENCY_CYCLES parameter and widens
+//   `eventually_granted[i]` to `##[1:N_REQS+GRANT_LATENCY_CYCLES]` so the
+//   bound liveness property remains valid for both the registered (=1)
+//   and combinational (=0) grant shapes.
+//
 // Cited invariants:
 //   INV-SOS-A, INV-SOS-B, INV-SOS-E, INV-SOS-G, INV-SOS-H  (SOS-07 §6)
 //   INV-S-HDL-1, INV-S-HDL-2, INV-S-HDL-4, INV-S-HDL-5    (SOS-08 §7)
@@ -38,7 +44,11 @@
 `default_nettype none
 
 module sos_arbiter_rr_sva #(
-    parameter int N_REQS
+    parameter int N_REQS,
+    // Mirror of the DUT's GRANT_LATENCY_CYCLES; defaulted to 1 (canonical
+    // shape) so existing bind sites that do not pass it through remain
+    // valid for the registered-grant variant.
+    parameter int GRANT_LATENCY_CYCLES = 1
 ) (
     input  wire                                  clk,
     input  wire                                  rst,
@@ -84,11 +94,11 @@ module sos_arbiter_rr_sva #(
     for (genvar gj = 0; gj < N_REQS; gj++) begin : g_eventually_granted
       property p_eventually_granted;
         @(posedge clk) disable iff (rst)
-          req[gj] |-> ##[1:N_REQS] grant[gj];
+          req[gj] |-> ##[1:N_REQS+GRANT_LATENCY_CYCLES] grant[gj];
       endproperty
       a_eventually_granted : assert property (p_eventually_granted)
         else $error("sos_arbiter_rr: req[%0d] not granted within %0d cycles",
-                    gj, N_REQS);
+                    gj, N_REQS + GRANT_LATENCY_CYCLES);
     end
   endgenerate
 

@@ -4,6 +4,20 @@
     `sos_arbiter_rr`), §5.4 + PCDN-A-007 (one cocotb file per primitive),
     §12 (d) (cocotb gate).
 
+Per PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved 2026-05-23 the DUT exposes a
+`GRANT_LATENCY_CYCLES` parameter (0 or 1).  The test reads the runner's
+`SOS_ARBITER_RR_GRANT_LATENCY` env var (default "1") and shifts the sampling
+window of `grant` relative to the cycle `req` is asserted:
+
+    GRANT_LATENCY_CYCLES = 1 -> sample `grant` one clock edge after `req` rises
+                                 (registered grant, canonical v1 shape).
+    GRANT_LATENCY_CYCLES = 0 -> sample `grant` on the same clock edge `req`
+                                 is asserted (combinational forward).
+
+The cocotb harness exercises whichever variant the elaborator built; the
+runner is responsible for setting the env var consistently with the DUT
+parameter override.
+
 Cited invariants (the testbench exercises behaviours that these invariants
 constrain; SVA bound via `sos_arbiter_rr_bind.sv` runs concurrently):
 
@@ -42,6 +56,8 @@ Notes:
 
 from __future__ import annotations
 
+import os
+
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
@@ -53,6 +69,27 @@ from cocotb.triggers import RisingEdge, Timer
 
 
 CLK_PERIOD_NS = 10
+
+
+def _grant_latency() -> int:
+    """Return the configured grant latency (0 or 1) from the env var.
+
+    Per PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved 2026-05-23 the test runner
+    sets ``SOS_ARBITER_RR_GRANT_LATENCY`` to match the DUT parameter override.
+    Default is ``1`` (canonical registered-grant shape).
+    """
+    raw = os.environ.get("SOS_ARBITER_RR_GRANT_LATENCY", "1")
+    try:
+        v = int(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"SOS_ARBITER_RR_GRANT_LATENCY must be 0 or 1; got {raw!r}"
+        ) from e
+    if v not in (0, 1):
+        raise ValueError(
+            f"SOS_ARBITER_RR_GRANT_LATENCY must be 0 or 1; got {v}"
+        )
+    return v
 
 
 def _n_reqs(dut) -> int:
@@ -129,13 +166,14 @@ async def test_idle_no_grants(dut):
 
 @cocotb.test()
 async def test_single_requester(dut):
-    """A single requester is granted the cycle after assertion."""
+    """A single requester is granted on/after assertion per GRANT_LATENCY_CYCLES."""
     _start_clock(dut)
     await _reset(dut)
     n = _n_reqs(dut)
+    latency = _grant_latency()
 
     for which in range(n):
-        # Idle in between to flush the registered grant.
+        # Idle in between to flush any prior registered grant.
         dut.req.value = 0
         await RisingEdge(dut.clk)
         await RisingEdge(dut.clk)
@@ -143,13 +181,15 @@ async def test_single_requester(dut):
         # Assert only this requester.
         dut.req.value = 1 << which
         await RisingEdge(dut.clk)
-        # 1-cycle register latency: grant fires on the cycle AFTER assertion.
-        await RisingEdge(dut.clk)
+        # Latency = 1: registered grant fires on the cycle AFTER assertion.
+        # Latency = 0: combinational grant visible on the same edge.
+        if latency == 1:
+            await RisingEdge(dut.clk)
         observed = _grant_int(dut)
         idx = _one_hot_index(observed)
         assert idx == which, (
             f"single-requester req[{which}] not granted; "
-            f"observed grant={observed:#b} (idx={idx})"
+            f"observed grant={observed:#b} (idx={idx}) latency={latency}"
         )
 
         # Drop and observe grant returns to 0.
@@ -209,6 +249,7 @@ async def test_rotating_request_pattern(dut):
     _start_clock(dut)
     await _reset(dut)
     n = _n_reqs(dut)
+    latency = _grant_latency()
 
     for shift in range(n):
         # Idle to flush.
@@ -218,21 +259,30 @@ async def test_rotating_request_pattern(dut):
 
         dut.req.value = 1 << shift
         await RisingEdge(dut.clk)
-        await RisingEdge(dut.clk)  # 1-cycle register latency
+        if latency == 1:
+            await RisingEdge(dut.clk)  # 1-cycle register latency
         observed = _grant_int(dut)
         idx = _one_hot_index(observed)
         assert idx == shift, (
             f"rotating pattern shift={shift}: observed grant={observed:#b} "
-            f"(idx={idx})"
+            f"(idx={idx}) latency={latency}"
         )
 
 
 @cocotb.test()
 async def test_last_winner_id_tracks_grants(dut):
-    """`last_winner_id` updates to the index of the most recent winner."""
+    """`last_winner_id` updates to the index of the most recent winner.
+
+    `last_winner_id` is always registered (independent of GRANT_LATENCY_CYCLES):
+    it latches the winning index on the same clock edge `grant_q` does.  When
+    GRANT_LATENCY_CYCLES = 0 the combinational `grant` is visible one cycle
+    earlier than the registered `last_winner_id` settles; the test samples
+    them in the cycle where both are aligned.
+    """
     _start_clock(dut)
     await _reset(dut)
     n = _n_reqs(dut)
+    latency = _grant_latency()
 
     for which in range(n):
         dut.req.value = 0
@@ -241,16 +291,19 @@ async def test_last_winner_id_tracks_grants(dut):
 
         dut.req.value = 1 << which
         await RisingEdge(dut.clk)
-        # Grant registers on the next edge; last_winner_id updates on the
-        # same edge as the grant.
+        # last_winner_id always settles one register-edge after req asserts,
+        # i.e. on the same edge as the registered grant.  Wait that edge.
         await RisingEdge(dut.clk)
-        observed_grant = _grant_int(dut)
         observed_id    = int(dut.last_winner_id.value)
-        # Sanity: grant matches the requested bit.
-        assert observed_grant == (1 << which), (
-            f"grant mismatch for which={which}: {observed_grant:#b}"
-        )
+        # `grant` is visible on the prior edge for latency=0 (already past).
+        # For latency=1 it appears on this same edge.  Sample either way.
+        observed_grant = _grant_int(dut)
+        if latency == 1:
+            # Sanity: registered grant matches the requested bit on this edge.
+            assert observed_grant == (1 << which), (
+                f"grant mismatch for which={which}: {observed_grant:#b}"
+            )
         assert observed_id == which, (
             f"last_winner_id={observed_id} expected {which} "
-            f"(N_REQS={n}, grant={observed_grant:#b})"
+            f"(N_REQS={n}, grant={observed_grant:#b}, latency={latency})"
         )

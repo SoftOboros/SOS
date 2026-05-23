@@ -173,6 +173,44 @@ Per build under `--profile verified-strip`, the codegen tool emits `verified-str
 
 Reviewers point a tool at the audit file to verify each elimination matches a real chart-level proof. The audit-tool implementation is out of scope for SOS-13 (a follow-up phase or a SOS-06-B amendment); the artifact shape MUST be stable enough that the audit-tool can be written separately.
 
+### 7.5 Chart-side discharge-annotation grammar (PCDN-13-discharge-grammar)
+
+This section is **normative**. It ratifies the chart-side syntax by which a `rtos_kernel.scxml` author declares that a named safety check has been discharged for a scope's operations. The grammar's first consumer is the SOS-13 Rust codegen tool (`tools/sos-codegen/transliterate_rust.py`); SOS-01 recognises the element as a permitted SCXML extension via the co-landing [SOS-01 §15](./SOS-01-CONCEPTS.md) amendment.
+
+**Annotation element.** `<sos:discharged check="{name}"/>`, carried as a child of a `<state>`, `<transition>`, `<onentry>`, or `<onexit>` block. The annotation declares that the chart author has discharged the safety check named by `check` for the operations in that scope.
+
+**Frozen `check` value enumeration.** The four ratified `check` values at v1 are:
+
+| `check` value | Discharges (VS-OP id) | Meaning |
+|---|---|---|
+| **`bounds`** | VS-OP-1 | Array/slice bounds check (the index variable is provably in-range at the scope's operations). |
+| **`div-by-zero`** | (future VS-OP — arithmetic) | Integer division denominator is provably non-zero. Not currently in the §7.1 catalogue (per §7.2 arithmetic intrinsics are deferred); annotation accepted now so chart authoring can stabilise ahead of the arithmetic-intrinsic amendment. |
+| **`null`** | VS-OP-2, VS-OP-3 | `Option::unwrap` / `Result::unwrap` is provably `Some` / `Ok`. |
+| **`overflow`** | (future VS-OP — arithmetic) | Integer arithmetic is provably non-overflowing. Same deferred-VS-OP status as `div-by-zero`. |
+
+The enumeration is **frozen at the four values**. Adding a `check` value requires a **Standards Action** §15 amendment per parent CLAUDE.md "Frozen enumerations — registration policy". The registration policy mirrors §7.1's VS-OP catalogue policy.
+
+**Multiplicity.** Zero or more `<sos:discharged>` children MAY appear per parent scope. Each element names exactly one `check` value. A scope MAY declare all four checks discharged via four separate elements; aggregating multiple values into one element (e.g. `check="bounds,null"`) is NOT permitted at v1.
+
+**Scope of effect.** The discharge applies only to the codegen artifact (`tools/sos-codegen/transliterate_rust.py` at v1). It does NOT modify chart semantics — SCXML execution under SOS-02 / SOS-03 conformance vectors is unaffected; bounded reachability proofs proceed as before. The chart author is asserting that the safety check is mechanically discharged at the source-level abstraction; codegen acts on the assertion only when `--profile verified-strip` is active.
+
+**Codegen behaviour.** Per PCDN-13-001 through PCDN-13-005 (resolved in the prior 2026-05-23 ratification entry):
+
+- With `--profile verified-strip` active (globally per §5.3, or per-region per PCDN-001's "both" resolution), each discharged operation is emitted with the unsafe-equivalent (per §7.1), the SAFETY comment (per §8) citing the discharging invariant, and a JSONL audit-log entry (per §7.4) recording the discharge.
+- Without `--profile verified-strip`, the discharge is informative only. The audit log is not written; safe-default emission per `dev-keep` is unchanged. This matches §5.2's default-profile principle: `verified-strip` is opt-in.
+
+**Inheritance.** A `<sos:discharged>` attached to a `<state>` applies to all operations in that state's `<onentry>`, `<onexit>`, and inline `<script>` blocks of transitions whose source is that state. Inheritance does NOT cross state boundaries — a discharge on a parent state does not propagate to child states (each child declares its own discharges if applicable).
+
+**Authority.** The annotation is **read by the SOS-13 codegen tool only**. SOS-01 lint accepts it as a permitted extension element (per the co-landing [SOS-01 §15](./SOS-01-CONCEPTS.md) `<sos:discharged>` extension-element amendment). The W3C SCXML 1.0 XSD treats unknown-namespace elements as permitted via the `<xsd:any namespace="##other"/>` wildcard in the executable-content content model; schema validation per `SCXML-LINT-001` is therefore unaffected.
+
+**Cross-references.**
+
+- §5 (frozen decisions) — the `<sos:discharged>` grammar inherits §5's Standards-Action discipline for its `check` enumeration.
+- §7 (VS-OP unchecked-operation catalogue) — each VS-OP maps to one `check` value per the table above. VS-OP-5 (heapless-vec non-empty access) discharges via the chart's wait-queue / ready-queue invariants and does not require an explicit `<sos:discharged>` since the discharging invariant is the structural INV-S7 / INV-S8 contract rather than a per-scope assertion.
+- §8 (invariant-citation format) — every `unsafe` block emitted under a discharge MUST still carry the §8 SAFETY comment citing the discharging invariant id.
+- [SOS-07 INV-SOS-G](./SOS-07-CONCEPTS.md) — the load-bearing invariant. The `<sos:discharged>` element makes the discharge **explicit at the chart layer**, preventing silent stripping by construction: codegen cannot emit an unchecked op without a corresponding chart-side annotation (or a structural invariant per VS-OP-5). The `<sos:discharged>` grammar is INV-SOS-G's chart-side enforcement mechanism.
+- [SOS-01 §15 — `<sos:discharged>` extension element recognized](./SOS-01-CONCEPTS.md) — the co-landing lint-side recognition that prevents `SCXML-LINT-001` schema-validation failures and reserves the lint rules' validation of the `check` enumeration as a future SOS-13 lint addition.
+
 ## 8. Invariant-citation format
 
 Every `unsafe { ... }` block emitted by the codegen under `--profile verified-strip` MUST carry a doc-comment immediately above the `unsafe` keyword of the shape:
@@ -403,3 +441,15 @@ All 5 PCDNs walked and resolved:
 | **005 — Bench-validation gate** | ✅ **Mandatory 6/6**: no `verified-strip` build is ratified without passing the SOS-03 conformance suite end-to-end. Hard gate prevents shipping unchecked code that hasn't run through the chart-derived proof. Cost is bench cycles per release; already part of SOS-04/05's gate. |
 
 Status: 🟢 **ratified**. SOS-13 implementation work (extending `tools/sos-codegen/transliterate_rust.py` with the `--profile verified-strip` path + audit-trail JSONL emission) unblocked.
+
+### 2026-05-23 — PCDN-13-discharge-grammar ratified (Ira)
+
+User walked the chart-side discharge-annotation grammar in a follow-up PCDN session after the wave-1 implementation of `tools/sos-codegen/transliterate_rust.py` made the discharge surface concrete. The grammar is now §7.5; this entry records the ratification.
+
+**Resolution summary.** The chart-side annotation element is `<sos:discharged check="{name}"/>`, carried as a child of `<state>`, `<transition>`, `<onentry>`, or `<onexit>`. The `check` value enumeration is **frozen at four values** at v1: `bounds` (VS-OP-1), `div-by-zero` (future arithmetic VS-OP), `null` (VS-OP-2 / VS-OP-3), and `overflow` (future arithmetic VS-OP). Registration policy is Standards Action — adding a `check` value requires a §15 amendment, matching §7.1's VS-OP catalogue policy. Multiplicity is zero-or-more per parent scope; each element names exactly one `check`. Inheritance is parent-scope-to-its-own-children only; cross-state propagation is forbidden. The annotation is **read by the SOS-13 codegen tool only**; chart semantics under SOS-02 / SOS-03 are unchanged. Codegen behaviour: under `--profile verified-strip`, each discharged operation emits an unsafe-equivalent + SAFETY comment + JSONL audit log entry; under `dev-keep`, the discharge is informative only.
+
+**Authority boundary.** This entry ratifies SOS-13's ownership of the `<sos:discharged>` grammar (the codegen-side semantics, the `check` enumeration, the inheritance rules). The co-landing [SOS-01 §15 — `<sos:discharged>` extension element recognized](./SOS-01-CONCEPTS.md) amendment ratifies SOS-01's recognition of the element as a permitted SCXML extension and reserves future `check`-enum validation as a SOS-13 lint addition (not SOS-01 v1).
+
+**INV-SOS-G enforcement.** §7.5's load-bearing role is making discharge **explicit at the chart layer**. Silent stripping is prevented by construction: codegen cannot emit an unchecked op without a corresponding chart-side `<sos:discharged>` annotation (or, for VS-OP-5, a structural INV-S7 / INV-S8 invariant). This closes a previously-implicit gap between INV-SOS-G's intent and the wave-1 codegen behaviour.
+
+Status: 🟢 **ratified** (continuing). The wave-1 codegen implementation already uses the grammar; this entry brings the spec text into alignment with the implementation per the spec-before-code discipline (the grammar was implementation-led during the wave-1 PR; this §15 entry retroactively ratifies). No further code change required from this entry alone.

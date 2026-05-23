@@ -4,11 +4,19 @@
 -- @spec docs/concepts/SOS-08-A-CONCEPTS.md §6.2 (instantiation example)
 --       INV-S-HDL-A-3  vendor-shim wrapper is byte-identical
 --       INV-S-HDL-A-5  mandatory parameters, no defaults
+--       PCDN-A-fifo-READ_LATENCY  resolved 2026-05-23 — READ_LATENCY generic
+--       PCDN-A-fifo-RESET_MEM     resolved 2026-05-23 — RESET_MEM generic
 --
 -- Minimal instantiation of sos_fifo_sync. Shows parameter passing and the
 -- AXI-Stream-naming port map ratified by PCDN-SOS-08-A-002 (§15 2026-05-23).
 -- The chart-emitted top-level (SOS-08-C) produces instantiations of this
 -- shape automatically.
+--
+-- Two example bindings are shown:
+--   * u_fifo_fwft   — DEPTH=16, WIDTH=32, READ_LATENCY=0, RESET_MEM=false.
+--                     Legacy / smallest-area shape; m_axis_tdata is FWFT.
+--   * u_fifo_reg    — DEPTH=16, WIDTH=32, READ_LATENCY=1, RESET_MEM=true.
+--                     Registered read output; storage cleared on reset.
 -------------------------------------------------------------------------------
 
 library ieee;
@@ -19,13 +27,23 @@ entity sos_fifo_sync_example is
         clk : in  std_logic;
         rst : in  std_logic;
 
-        in_data  : in  std_logic_vector(31 downto 0);
-        in_valid : in  std_logic;
-        in_ready : out std_logic;
+        -- FWFT / no-RESET_MEM channel.
+        in_data_a  : in  std_logic_vector(31 downto 0);
+        in_valid_a : in  std_logic;
+        in_ready_a : out std_logic;
 
-        out_data  : out std_logic_vector(31 downto 0);
-        out_valid : out std_logic;
-        out_ready : in  std_logic
+        out_data_a  : out std_logic_vector(31 downto 0);
+        out_valid_a : out std_logic;
+        out_ready_a : in  std_logic;
+
+        -- Registered-read / RESET_MEM channel.
+        in_data_b  : in  std_logic_vector(31 downto 0);
+        in_valid_b : in  std_logic;
+        in_ready_b : out std_logic;
+
+        out_data_b  : out std_logic_vector(31 downto 0);
+        out_valid_b : out std_logic;
+        out_ready_b : in  std_logic
     );
 end entity sos_fifo_sync_example;
 
@@ -36,8 +54,10 @@ architecture rtl of sos_fifo_sync_example is
     -- inline for the example.
     component sos_fifo_sync is
         generic (
-            DEPTH : positive;
-            WIDTH : positive
+            DEPTH         : positive;
+            WIDTH         : positive;
+            READ_LATENCY  : natural;
+            RESET_MEM     : boolean
         );
         port (
             clk           : in  std_logic;
@@ -54,30 +74,59 @@ architecture rtl of sos_fifo_sync_example is
         );
     end component;
 
-    signal full_q  : std_logic;
-    signal empty_q : std_logic;
-    signal count_q : std_logic_vector(4 downto 0);  -- ceil(log2(16+1)) = 5
+    signal full_a  : std_logic;
+    signal empty_a : std_logic;
+    signal count_a : std_logic_vector(4 downto 0);  -- ceil(log2(16+1)) = 5
+
+    signal full_b  : std_logic;
+    signal empty_b : std_logic;
+    signal count_b : std_logic_vector(4 downto 0);
 
 begin
 
-    u_fifo : sos_fifo_sync
+    -- Example A: legacy FWFT, mem retained across reset.
+    u_fifo_fwft : sos_fifo_sync
         generic map (
-            -- INV-S-HDL-A-5: both parameters supplied explicitly.
-            DEPTH => 16,
-            WIDTH => 32
+            -- INV-S-HDL-A-5: every generic supplied explicitly (no defaults).
+            DEPTH        => 16,
+            WIDTH        => 32,
+            READ_LATENCY => 0,        -- FWFT
+            RESET_MEM    => false     -- legacy: mem not reset
         )
         port map (
             clk           => clk,
             rst           => rst,
-            s_axis_tdata  => in_data,
-            s_axis_tvalid => in_valid,
-            s_axis_tready => in_ready,
-            m_axis_tdata  => out_data,
-            m_axis_tvalid => out_valid,
-            m_axis_tready => out_ready,
-            full          => full_q,
-            empty         => empty_q,
-            count         => count_q
+            s_axis_tdata  => in_data_a,
+            s_axis_tvalid => in_valid_a,
+            s_axis_tready => in_ready_a,
+            m_axis_tdata  => out_data_a,
+            m_axis_tvalid => out_valid_a,
+            m_axis_tready => out_ready_a,
+            full          => full_a,
+            empty         => empty_a,
+            count         => count_a
+        );
+
+    -- Example B: registered-read output, mem cleared on reset.
+    u_fifo_reg : sos_fifo_sync
+        generic map (
+            DEPTH        => 16,
+            WIDTH        => 32,
+            READ_LATENCY => 1,        -- one-cycle registered read latency
+            RESET_MEM    => true      -- strict: mem zeroed on reset
+        )
+        port map (
+            clk           => clk,
+            rst           => rst,
+            s_axis_tdata  => in_data_b,
+            s_axis_tvalid => in_valid_b,
+            s_axis_tready => in_ready_b,
+            m_axis_tdata  => out_data_b,
+            m_axis_tvalid => out_valid_b,
+            m_axis_tready => out_ready_b,
+            full          => full_b,
+            empty         => empty_b,
+            count         => count_b
         );
 
 end architecture rtl;

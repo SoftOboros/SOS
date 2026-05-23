@@ -30,6 +30,12 @@
 -- Per PCDN-A-002 resolution (§15 2026-05-23): control-only primitives use bare
 -- `req`/`ack` (not AXI-Stream prefixed). This is a control primitive.
 --
+-- Per PCDN-A-mutex-N_CLIENTS-min resolved 2026-05-23: SOS-08-A §6.5 requires
+-- N_CLIENTS >= 2. A 1-client mutex is degenerate (the sole client always wins
+-- contention against the empty set, which collapses the round-robin contract
+-- to identity and erodes the "fairness bound across multiple requesters"
+-- claim). Enforced below by a concurrent elaboration-time assertion.
+--
 -- Behaviour:
 --   * `req(i)` asserted by client i to acquire (and hold) the lock.
 --   * `ack(i)` asserted high on every cycle client i holds the lock (one-hot).
@@ -107,6 +113,16 @@ architecture rtl of sos_mutex is
     end function rr_pick;
 
 begin
+
+    ----------------------------------------------------------------------------
+    -- Elaboration-time static assertion: N_CLIENTS >= 2.
+    -- Per PCDN-A-mutex-N_CLIENTS-min resolved 2026-05-23 (SOS-08-A §6.5).
+    -- Concurrent (non-clocked) assert: VHDL evaluates this at elaboration.
+    ----------------------------------------------------------------------------
+    assert N_CLIENTS >= 2
+        report "sos_mutex: SOS-08-A §6.5 requires N_CLIENTS >= 2; got value="
+               & integer'image(N_CLIENTS)
+        severity failure;
 
     ----------------------------------------------------------------------------
     -- Sequential: FSM + holder + round-robin pointer

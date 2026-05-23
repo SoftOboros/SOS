@@ -30,6 +30,12 @@
 // Per PCDN-A-002 resolution (§15 2026-05-23): control-only primitives use bare
 // `req`/`ack` (not AXI-Stream prefixed). This is a control primitive.
 //
+// Per PCDN-A-mutex-N_CLIENTS-min resolved 2026-05-23: SOS-08-A §6.5 requires
+// N_CLIENTS >= 2. A 1-client mutex is degenerate (the sole client always wins
+// contention against the empty set, which collapses the round-robin contract
+// to identity and erodes the "fairness bound across multiple requesters"
+// claim). Enforced below by an elaboration-time $fatal in an `initial` block.
+//
 // Byte-equivalent semantics to sos_mutex.vhd; see that file's header for the
 // full behavioural description.
 //------------------------------------------------------------------------------
@@ -66,6 +72,21 @@ module sos_mutex #(
 
     // Sentinel "unheld" value.
     localparam logic [HID_W-1:0] NO_HOLDER = HID_W'(N_CLIENTS);
+
+    // ------------------------------------------------------------------
+    // Elaboration-time static assertion: N_CLIENTS >= 2.
+    // Per PCDN-A-mutex-N_CLIENTS-min resolved 2026-05-23 (SOS-08-A §6.5).
+    // Standard SV idiom: `initial` block fires at time 0 during simulation;
+    // synthesis tools either honour the `$fatal` as an elab error or ignore
+    // the initial block (in which case the VHDL companion's concurrent
+    // assert remains the binding gate for VHDL-flow synthesis).
+    // ------------------------------------------------------------------
+    initial begin
+        if (N_CLIENTS < 2) begin
+            $fatal(1, "sos_mutex: SOS-08-A §6.5 requires N_CLIENTS >= 2; got %0d",
+                   N_CLIENTS);
+        end
+    end
 
     // ------------------------------------------------------------------
     // Round-robin pick: lowest k in [0, N_CLIENTS) for which

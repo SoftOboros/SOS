@@ -925,3 +925,32 @@ Cross-phase invariants INV-SOS-A through H + the AuthorityRelationship matrix pr
 Bootstrap-vs-general framing (SOS-07 §8): the kernel chart `rtos_kernel.scxml` is reframed as the v1 demonstration the methodology generalises from, not "the chart". The bench-validated state recorded across SOS-01's prior amendments carries forward unchanged.
 
 No frozen-enum value modified. No PCDN re-ratified. No port-spec impact.
+
+### 2026-05-23 — `<sos:discharged>` extension element recognized (Ira)
+
+Co-landing amendment to [SOS-13 §7.5](./SOS-13-CONCEPTS.md). SOS-01 ratifies the recognition of the `<sos:discharged check="..."/>` element as a permitted SCXML extension element. This is an **additive** §15 amendment; SOS-01 stays 🟢 ratified.
+
+**Recognition.** The element `<sos:discharged check="..."/>` is a **permitted SCXML extension element** within the `<state>`, `<transition>`, `<onentry>`, and `<onexit>` parent scopes. The element is authored and owned by SOS-13 (cite [SOS-13 §7.5](./SOS-13-CONCEPTS.md)); SOS-01's role is purely to declare that the lint rules in §6 do NOT reject its presence.
+
+**XML namespace binding.** The `sos:` XML namespace prefix that the chart's `<scxml>` root MUST bind is:
+
+```
+xmlns:sos="http://softoboros.com/scxml-extensions/v1"
+```
+
+The namespace URI is the SOS-13-owned extension-namespace URI. The prefix `sos:` is the canonical short form used in SOS-13's grammar examples; the URI is the load-bearing identifier (XML Namespace 1.0 §3 lets the prefix be rebound, but the URI uniquely identifies the extension owner). The W3C SCXML 1.0 XSD's `<xsd:any namespace="##other" processContents="lax"/>` wildcard in the executable-content content model is what permits these elements to pass schema validation; `SCXML-LINT-001` (schema validation) is therefore unaffected.
+
+**Lint-rule treatment at SOS-01 v1.**
+
+- `SCXML-LINT-001` (schema validation): unaffected. The W3C XSD's `##other` wildcard accepts the element by construction.
+- `SCXML-LINT-002` (root element attributes): the rule's "no other attributes on the root element" clause is interpreted as "no other SCXML-namespace attributes". Namespace declarations (`xmlns:sos="..."`) are XML-level mechanism, not SCXML-attribute surface, and remain permitted. No rule edit required.
+- `SCXML-LINT-013` (event-name vocabulary), `SCXML-LINT-014` (state-id vocabulary), `SCXML-LINT-015` / `-016` (comment density), and the structural rules (`-003`, `-004`, `-006`) all operate on SCXML-namespace elements; they ignore extension-namespace children by construction.
+- The lint rules MAY validate that `check` is one of the four frozen values (`bounds`, `div-by-zero`, `null`, `overflow`) per [SOS-13 §7.5](./SOS-13-CONCEPTS.md). This validation is reserved as a **future SOS-13 lint addition** (a new `SCXML-LINT-NNN` rule owned by SOS-13, lint-registered in SOS-01's `LintRuleId` namespace per §5.5). It is explicitly **not** a SOS-01 v1 rule.
+
+**Non-goal §11 reconciliation.** SOS-01 §11 forbids "Replacing W3C SCXML 1.0 with a SOS-specific superset" and cites `<sos:invariant ...>` as the canonical example of what is forbidden. The `<sos:discharged>` element does NOT violate this non-goal: it does not modify SCXML semantics (the chart's execution under SOS-02 / SOS-03 is unaffected), does not extend the language, and lives entirely in the codegen-tool consumption surface. The §11 prohibition targets extensions that change chart semantics; `<sos:discharged>` is a codegen-side annotation that the SCXML runtime ignores. The non-goal text is not amended; the boundary is "extension elements that change chart semantics are forbidden; extension elements consumed only by downstream tooling are permitted, subject to a §15 recognition amendment per consuming phase".
+
+**Chart-file follow-up.** `rtos_kernel.scxml` at HEAD does NOT currently bind the `sos:` namespace prefix. When the first `<sos:discharged>` annotation lands in the chart (driven by SOS-13 codegen consumers), the chart's `<scxml>` root MUST add `xmlns:sos="http://softoboros.com/scxml-extensions/v1"` in the same commit. This is a future amendment to the chart file; this SOS-01 amendment does NOT itself edit `rtos_kernel.scxml`. INV-S11 (chart-edit gating) governs that future edit.
+
+**Cross-reference.** See [SOS-13 §7.5](./SOS-13-CONCEPTS.md) for the chart-side grammar's full specification (annotation shape, frozen `check` enumeration, multiplicity, inheritance, codegen behaviour) and [SOS-13 §15 — PCDN-13-discharge-grammar ratified (2026-05-23)](./SOS-13-CONCEPTS.md) for the co-landing SOS-13-side ratification entry.
+
+No frozen-enum value modified at SOS-01. No PCDN re-ratified. `ExternalEventName` (§5.3) and `StateId` (§5.4) are unaffected — `<sos:discharged>` is an extension-namespace element, not an event name or state id. SOS-01 stays 🟢 ratified.

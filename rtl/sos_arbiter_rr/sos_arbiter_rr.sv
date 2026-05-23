@@ -9,6 +9,12 @@
 //   INV-S-HDL-A-5).  One-hot internal pointer (INV-S-HDL-A-4, SOS-08
 //   PCDN-002 ratified one-hot at v1).
 //
+//   Per PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved 2026-05-23: the
+//   primitive exposes a `GRANT_LATENCY_CYCLES` parameter (0 or 1)
+//   controlling the request->grant timing.  =1 (the canonical v1 shape)
+//   registers the grant; =0 forwards the combinational priority-mask
+//   result on the same cycle.  Any other value is unsupported at v1.
+//
 // Cited invariants (this primitive does not redefine them):
 //   INV-SOS-A  chart-as-source                     (SOS-07 §6)
 //   INV-SOS-B  vectors-as-deliverable              (SOS-07 §6)
@@ -46,16 +52,33 @@ module sos_arbiter_rr #(
     // Tools that require a default treat the explicit override as the only
     // legal use; omission causes elaboration to fail because the local
     // parameter ID_W derives from it.
-    parameter int N_REQS
+    parameter int N_REQS,
+    // Grant timing: 0 = combinational forward of the priority-mask result on
+    // the same cycle req is asserted; 1 = registered grant (canonical v1
+    // shape; 1-cycle latency).  This is the one L0 parameter that carries a
+    // default (PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved 2026-05-23): the
+    // registered shape (=1) is the safe canonical primitive form and the
+    // combinational v0 form is opt-in.  Values other than {0, 1} are
+    // unsupported at v1.
+    parameter int GRANT_LATENCY_CYCLES = 1
 ) (
     input  wire                                       clk,
     input  wire                                       rst,           // sync active-high
     input  wire [N_REQS-1:0]                          req,
-    output reg  [N_REQS-1:0]                          grant,
+    output wire [N_REQS-1:0]                          grant,
     // Observability: id of the most recent winner.  Width = $clog2(N_REQS+1).
     // Value N_REQS encodes "no winner yet" (held at reset).
     output reg  [$clog2(N_REQS + 1)-1:0]              last_winner_id
 );
+
+  // Elaboration-time validation of GRANT_LATENCY_CYCLES (must be 0 or 1).
+  // Per PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved 2026-05-23.
+  initial begin
+    if (!(GRANT_LATENCY_CYCLES == 0 || GRANT_LATENCY_CYCLES == 1)) begin
+      $fatal(1, "sos_arbiter_rr: SOS-08-A §6.3 supports GRANT_LATENCY_CYCLES in {0, 1} at v1; got %0d",
+             GRANT_LATENCY_CYCLES);
+    end
+  end
 
   // Width of the winner-id field, including the sentinel.
   localparam int ID_W      = $clog2(N_REQS + 1);
@@ -71,6 +94,11 @@ module sos_arbiter_rr #(
   // the highest priority this cycle.  Reset value = pointer[0] = 1.
   // ---------------------------------------------------------------------------
   reg  [N_REQS-1:0] pointer;
+
+  // Registered grant; consumed when GRANT_LATENCY_CYCLES = 1.  Pointer
+  // updates on the same registered path regardless of the output selector
+  // (per PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved 2026-05-23).
+  reg  [N_REQS-1:0] grant_q;
 
   // ---------------------------------------------------------------------------
   // Combinational arbitration: build a priority mask from the pointer, find
@@ -133,10 +161,10 @@ module sos_arbiter_rr #(
   always_ff @(posedge clk) begin
     if (rst) begin
       pointer        <= POINTER_RESET;
-      grant          <= '0;
+      grant_q        <= '0;
       last_winner_id <= NO_WINNER;
     end else begin
-      grant <= grant_next;
+      grant_q <= grant_next;
 
       if (|grant_next) begin
         // Winner index from one-hot grant_next; assemble the new pointer
@@ -159,6 +187,23 @@ module sos_arbiter_rr #(
       // advances exactly once per grant, never spuriously).
     end
   end
+
+  // ---------------------------------------------------------------------------
+  // Grant output selector (PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved
+  // 2026-05-23):
+  //   GRANT_LATENCY_CYCLES = 1 -> registered grant (grant_q); canonical.
+  //   GRANT_LATENCY_CYCLES = 0 -> combinational forward of grant_next; the
+  //   pointer still updates on the registered next-cycle path, so the
+  //   round-robin advance is unchanged.  Only the externally-visible
+  //   request->grant timing collapses by one cycle.
+  // ---------------------------------------------------------------------------
+  generate
+    if (GRANT_LATENCY_CYCLES == 1) begin : g_grant_reg
+      assign grant = grant_q;
+    end else begin : g_grant_comb
+      assign grant = grant_next;
+    end
+  endgenerate
 
 endmodule : sos_arbiter_rr
 

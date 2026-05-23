@@ -11,6 +11,15 @@
 --   One-hot internal pointer (INV-S-HDL-A-4, SOS-08 PCDN-002 ratified
 --   one-hot at v1).
 --
+--   Per PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved 2026-05-23: the
+--   primitive exposes a `GRANT_LATENCY_CYCLES` generic (0 or 1) controlling
+--   the request->grant timing. =1 (the canonical v1 shape) registers the
+--   grant; =0 forwards the combinational priority-mask result on the same
+--   cycle.  This is the SINGLE generic in the L0 set that ships with a
+--   default — the canonical registered form (=1) is the safe shape and the
+--   v0-style combinational form is opt-in.  Any other value is unsupported
+--   at v1.
+--
 -- Cited invariants (this primitive does not redefine them):
 --   INV-SOS-A  chart-as-source                     (SOS-07 §6)
 --   INV-SOS-B  vectors-as-deliverable              (SOS-07 §6)
@@ -80,7 +89,15 @@ library work;
 entity sos_arbiter_rr is
   generic (
     -- Mandatory: no default (INV-S-HDL-A-5).
-    N_REQS : positive
+    N_REQS               : positive;
+    -- Grant timing: 0 = combinational forward of the priority-mask result on
+    -- the same cycle req is asserted; 1 = registered grant (canonical v1
+    -- shape; 1-cycle latency).  This is the one L0 generic that carries a
+    -- default (PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved 2026-05-23): the
+    -- registered shape (=1) is the safe canonical primitive form and the
+    -- combinational v0 form is opt-in.  Values other than {0, 1} are
+    -- unsupported at v1.
+    GRANT_LATENCY_CYCLES : integer := 1
   );
   port (
     clk            : in  std_logic;
@@ -174,6 +191,15 @@ architecture rtl of sos_arbiter_rr is
 begin
 
   ----------------------------------------------------------------------------
+  -- Elaboration-time validation of GRANT_LATENCY_CYCLES (must be 0 or 1).
+  -- Per PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved 2026-05-23.
+  ----------------------------------------------------------------------------
+  assert GRANT_LATENCY_CYCLES = 0 or GRANT_LATENCY_CYCLES = 1
+    report "sos_arbiter_rr: SOS-08-A §6.3 supports GRANT_LATENCY_CYCLES in "
+           & "{0, 1} at v1; got value=" & integer'image(GRANT_LATENCY_CYCLES)
+    severity failure;
+
+  ----------------------------------------------------------------------------
   -- Combinational arbitration logic.
   ----------------------------------------------------------------------------
 
@@ -218,7 +244,23 @@ begin
     end if;
   end process;
 
-  grant          <= grant_q;
+  ----------------------------------------------------------------------------
+  -- Grant output selector (PCDN-A-arbiter-GRANT_LATENCY_CYCLES resolved
+  -- 2026-05-23):
+  --   GRANT_LATENCY_CYCLES = 1 -> registered grant (grant_q); canonical.
+  --   GRANT_LATENCY_CYCLES = 0 -> combinational forward of grant_next; the
+  --   pointer still updates on the registered next-cycle path, so the
+  --   round-robin advance is unchanged.  Only the externally-visible
+  --   request->grant timing collapses by one cycle.
+  ----------------------------------------------------------------------------
+  g_grant_reg : if GRANT_LATENCY_CYCLES = 1 generate
+    grant <= grant_q;
+  end generate g_grant_reg;
+
+  g_grant_comb : if GRANT_LATENCY_CYCLES = 0 generate
+    grant <= grant_next;
+  end generate g_grant_comb;
+
   last_winner_id <= std_logic_vector(last_id_q);
 
 end architecture rtl;

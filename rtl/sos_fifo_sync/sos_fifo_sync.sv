@@ -4,6 +4,10 @@
 // @spec docs/concepts/SOS-08-A-CONCEPTS.md §6.2 (sos_fifo_sync contract)
 //       docs/concepts/SOS-08-CONCEPTS.md   §5  (frozen decisions inherited)
 //       docs/concepts/SOS-07-CONCEPTS.md   §6  (cross-phase invariants)
+//       PCDN-A-fifo-READ_LATENCY  resolved 2026-05-23 — adds READ_LATENCY
+//                                  generic (0 = FWFT, 1 = registered read)
+//       PCDN-A-fifo-RESET_MEM     resolved 2026-05-23 — adds RESET_MEM
+//                                  generic (0 = legacy, 1 = clear mem)
 //
 // Cross-phase invariants (cited, not redefined):
 //   INV-SOS-A  chart-as-source
@@ -39,6 +43,13 @@ module sos_fifo_sync #(
     // INV-S-HDL-A-5: mandatory parameters, no defaults.
     parameter int DEPTH,
     parameter int WIDTH,
+    // PCDN-A-fifo-READ_LATENCY (2026-05-23): 0 = FWFT (m_axis_tdata
+    // combinational off mem[rd_ptr] while !empty); 1 = registered read
+    // (data appears one cycle after the tready+tvalid handshake).
+    parameter int READ_LATENCY,
+    // PCDN-A-fifo-RESET_MEM (2026-05-23): 0 = mem retained across reset;
+    // 1 = mem cleared to all-zero on reset (stricter, larger reset fanout).
+    parameter bit RESET_MEM,
     // Derived widths — not user-facing; recomputed from DEPTH.
     parameter int PTR_W = (DEPTH <= 1) ? 1 : $clog2(DEPTH),
     parameter int CNT_W = $clog2(DEPTH + 1)
@@ -74,28 +85,57 @@ module sos_fifo_sync #(
     logic full_q;
     logic empty_q;
 
-    // Combinational handshake decode.
+    // Registered-read holding register (only used when READ_LATENCY == 1).
+    // rdata_q latches mem[rd_ptr] AT the cycle of a handshake; the consumer
+    // sees the popped value on m_axis_tdata the cycle AFTER (one-cycle
+    // latency per PCDN-A-fifo-READ_LATENCY 2026-05-23).
+    logic [WIDTH-1:0] rdata_q;
+
+    // Combinational handshake decode. Both modes use the same gating: write
+    // is accepted when !full, read is accepted when !empty. The semantic
+    // difference is *when* the popped value lands on m_axis_tdata.
     wire do_write = s_axis_tvalid & ~full_q;
     wire do_read  = m_axis_tready & ~empty_q;
 
     assign s_axis_tready = ~full_q;
-    assign m_axis_tvalid = ~empty_q;
 
-    // FWFT-style: present mem[rd_ptr] combinationally so the consumer can
-    // latch the data on the same cycle it asserts tready.
-    assign m_axis_tdata  = empty_q ? '0 : mem[rd_ptr];
+    // -------------------------------------------------------------------------
+    // Read path — generate-block selected by READ_LATENCY.
+    //   READ_LATENCY = 0: FWFT — m_axis_tdata is mem[rd_ptr] presented
+    //                     combinationally; m_axis_tvalid follows !empty; the
+    //                     popped value is visible the same cycle as the
+    //                     handshake.
+    //   READ_LATENCY = 1: Registered — m_axis_tdata is rdata_q (a flop that
+    //                     latches mem[rd_ptr] on the handshake cycle);
+    //                     m_axis_tvalid follows !empty so the consumer can
+    //                     pipeline handshakes; the popped value appears the
+    //                     cycle AFTER the handshake.
+    // -------------------------------------------------------------------------
+    generate
+        if (READ_LATENCY == 0) begin : g_read_fwft
+            assign m_axis_tvalid = ~empty_q;
+            assign m_axis_tdata  = empty_q ? '0 : mem[rd_ptr];
+        end else begin : g_read_reg
+            assign m_axis_tvalid = ~empty_q;
+            assign m_axis_tdata  = rdata_q;
+        end
+    endgenerate
 
     // Pointer + fill update.
     always_ff @(posedge clk) begin
         if (rst) begin
-            wr_ptr  <= '0;
-            rd_ptr  <= '0;
-            fill    <= '0;
-            full_q  <= 1'b0;
-            empty_q <= 1'b1;
-            // mem contents intentionally not reset (saves area; INV-S-HDL-A-1
-            // mandates reset for the state machine + observability, not the
-            // storage array).
+            wr_ptr   <= '0;
+            rd_ptr   <= '0;
+            fill     <= '0;
+            full_q   <= 1'b0;
+            empty_q  <= 1'b1;
+            rdata_q  <= '0;
+            // PCDN-A-fifo-RESET_MEM: clear backing storage iff RESET_MEM == 1.
+            if (RESET_MEM) begin
+                for (int i = 0; i < DEPTH; i++) begin
+                    mem[i] <= '0;
+                end
+            end
         end else begin
             logic [CNT_W-1:0] next_fill;
             next_fill = fill;
@@ -120,6 +160,19 @@ module sos_fifo_sync #(
             fill    <= next_fill;
             full_q  <= (next_fill == CNT_W'(DEPTH));
             empty_q <= (next_fill == '0);
+
+            // Registered-read book-keeping. Only the READ_LATENCY=1 path
+            // consumes rdata_q; in FWFT mode it stays at its reset value and
+            // synthesis prunes it.
+            //
+            // Semantic: on the cycle of a read handshake, latch the value at
+            // mem[rd_ptr] into rdata_q so the consumer observes it the cycle
+            // AFTER the handshake (PCDN-A-fifo-READ_LATENCY 2026-05-23 spec).
+            if (READ_LATENCY != 0) begin
+                if (do_read) begin
+                    rdata_q <= mem[rd_ptr];
+                end
+            end
         end
     end
 

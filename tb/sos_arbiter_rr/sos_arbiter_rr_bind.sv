@@ -21,7 +21,11 @@
 `default_nettype none
 
 bind sos_arbiter_rr sos_arbiter_rr_sva #(
-    .N_REQS (N_REQS)
+    .N_REQS               (N_REQS),
+    // Forward the latency parameter so the assertion module widens the
+    // `eventually_granted` bound to match (PCDN-A-arbiter-GRANT_LATENCY_CYCLES
+    // resolved 2026-05-23).
+    .GRANT_LATENCY_CYCLES (GRANT_LATENCY_CYCLES)
 ) u_sva (
     .clk             (clk),
     .rst             (rst),
