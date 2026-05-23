@@ -183,6 +183,262 @@ class TransliterationResult:
     # True if the function should bind `ev` (vs `_ev`) — set when the
     # preamble references `ev.data` for typed extraction.
     needs_ev_param: bool = False
+    # SOS-13 verified-strip audit entries (zero-length when the profile
+    # is not engaged for this site). Each entry is a dict matching the
+    # `AuditEntry.to_dict()` shape in `verified_audit.py`. See
+    # SOS-13-CONCEPTS.md §7.4 + §15 2026-05-23 ratification entry.
+    verified_strip_audit: list[dict] = field(default_factory=list)
+
+
+# -----------------------------------------------------------------
+# SOS-13 verified-strip profile — additive emission layer.
+#
+# Per SOS-13-CONCEPTS.md §5 + §15 2026-05-23 ratification entry:
+#   * PCDN-SOS-13-001 — BOTH whole-port `--verified-strip` flag AND
+#     per-region opt-in (`--verified-region <id>`).
+#   * PCDN-SOS-13-002 — JSONL audit log (handled by verified_audit.py).
+#   * PCDN-SOS-13-003 — `dev-keep` is the default; verified-strip is
+#     opt-in. Existing emissions without the flag MUST stay byte-
+#     identical.
+#
+# Discharge-annotation grammar (per task prompt; flagged for §15
+# amendment if SOS-01 / SOS-11 specify a different shape):
+#   <sos:discharged check="bounds"/>
+#   <sos:discharged check="div-by-zero"/>
+#   <sos:discharged check="null"/>
+#   <sos:discharged check="overflow"/>
+#
+# Stripping happens only when the chart annotation is present AND
+# the site is in scope of the active profile config. Missing
+# annotation → safe-default emission survives. This is INV-SOS-G's
+# load-bearing invariant — silent elimination is forbidden.
+# -----------------------------------------------------------------
+
+
+# `check` value → audit log `operation` field.
+DISCHARGE_OPERATION: dict[str, str] = {
+    "bounds":       "bounds_check_strip",
+    "div-by-zero":  "div_by_zero_strip",
+    "null":         "null_check_strip",
+    "overflow":     "overflow_check_strip",
+}
+
+# Recognized discharge check identifiers (frozen at SOS-13 v1; grammar
+# extensions require a §15 amendment per the unchecked-op catalogue
+# Standards Action policy in §7.1).
+RECOGNIZED_DISCHARGES = frozenset(DISCHARGE_OPERATION.keys())
+
+
+@dataclass
+class VerifiedStripConfig:
+    """Per-call configuration for the verified-strip post-pass.
+
+    `enabled_globally`     — `--verified-strip` was passed on the CLI.
+    `enabled_regions`      — set of region IDs explicitly opted in via
+                             `--verified-region <id>`; takes effect even
+                             when `enabled_globally` is False.
+    `region_id`            — the region (state-id or transition state-id)
+                             this site belongs to.
+    `discharges`           — list of `check` values declared on the
+                             site's chart annotation(s).
+    """
+
+    enabled_globally: bool = False
+    enabled_regions: frozenset = field(default_factory=frozenset)
+    region_id: str = ""
+    discharges: tuple = ()
+
+    def is_active(self) -> bool:
+        """True iff this site should be stripped — i.e. the profile
+        is engaged (global flag OR region opt-in) AND the chart has
+        declared at least one recognized discharge."""
+        if not self.discharges:
+            return False
+        if self.enabled_globally:
+            return True
+        if self.region_id and self.region_id in self.enabled_regions:
+            return True
+        return False
+
+    def has_discharge(self, check: str) -> bool:
+        return self.is_active() and check in self.discharges
+
+
+def load_discharge_annotations(chart_path) -> dict:
+    """Parse `<sos:discharged check="..."/>` children of every state
+    and transition in `chart_path`. Returns a mapping:
+
+        { state_id: ["bounds", "null", ...], ... }
+
+    States/transitions without discharge annotations are absent from
+    the dict.
+
+    The annotation grammar `<sos:discharged check="..."/>` is the
+    task-prompt-specified shape; if SOS-01 / SOS-11 ratify a
+    different grammar later, a §15 amendment to SOS-13 is required
+    before changing this loader. The function reads via lxml directly
+    (the scjson loader path discards custom-namespace children).
+    """
+    from lxml import etree as _etree
+    from pathlib import Path as _Path
+
+    p = _Path(chart_path)
+    if not p.exists():
+        return {}
+    # Use the recovering parser. Real-world SCXML charts (incl.
+    # rtos_kernel.scxml) carry hand-authored XML comments that
+    # occasionally include double-hyphen sequences forbidden by strict
+    # XML. The discharge-annotation loader is a side-channel scan and
+    # MUST NOT block codegen on comment-formatting issues.
+    _parser = _etree.XMLParser(recover=True)
+    tree = _etree.parse(str(p), _parser)
+    root = tree.getroot()
+    if root is None:
+        return {}
+    # Match the `<sos:discharged>` element regardless of declared
+    # namespace prefix — accept both `sos:discharged` and the default-
+    # namespace bare `discharged` form. The `check` attribute is what
+    # carries the obligation type.
+    discharges: dict[str, list[str]] = {}
+
+    def _walk(elem) -> None:
+        # Identify the owning state-id: nearest ancestor (or self)
+        # with an `id` attribute on a <state>/<parallel>/<transition>.
+        # Skip non-Element nodes (comments, processing instructions).
+        for child in elem.iterchildren():
+            if not isinstance(child.tag, str):
+                continue
+            tag = _etree.QName(child).localname
+            if tag == "discharged":
+                check = child.get("check")
+                if check in RECOGNIZED_DISCHARGES:
+                    # Locate the parent's state-id by walking up.
+                    parent = elem
+                    sid = None
+                    while parent is not None:
+                        ptag = _etree.QName(parent).localname
+                        if ptag in ("state", "parallel", "final"):
+                            sid = parent.get("id")
+                            if sid:
+                                break
+                        elif ptag == "transition":
+                            # transitions are scoped to their parent state
+                            grand = parent.getparent()
+                            if grand is not None:
+                                gtag = _etree.QName(grand).localname
+                                if gtag in ("state", "parallel", "final"):
+                                    sid = grand.get("id")
+                                    if sid:
+                                        break
+                        parent = parent.getparent()
+                    if sid:
+                        discharges.setdefault(sid, []).append(check)
+            _walk(child)
+
+    _walk(root)
+    return discharges
+
+
+# Regex that matches the safe-default bounds-checked index pattern the
+# Rust emitter produces, e.g. `dm.tcb[i as usize]` or `self.sems[sid as
+# usize]`. Captures the receiver, index expression, and the trailing
+# `as usize` so the post-pass can reconstruct the unchecked form.
+import re as _re
+
+_BOUNDS_CHECKED_INDEX_RE = _re.compile(
+    r"(?P<recv>\b(?:dm|self)(?:\.[A-Za-z_][A-Za-z0-9_]*)+)"
+    r"\[(?P<idx>[^\[\]]+?)\s+as\s+usize\]"
+)
+
+
+def apply_verified_strip(
+    rust_source: str,
+    config: VerifiedStripConfig,
+    state_id: str,
+    chart_site: str,
+) -> tuple[str, list[dict]]:
+    """Replace safe-default Rust idioms with unchecked equivalents
+    where the chart's discharge annotations authorize it. Returns
+    `(new_source, audit_entries)`; if the profile is not active for
+    the site, returns `(rust_source, [])` unchanged.
+
+    The replacements are:
+
+      * `<recv>[<idx> as usize]`  →  `unsafe { <recv>.get_unchecked(<idx> as usize) }`
+        gated on `discharge="bounds"`.
+
+    Each replacement is preceded by a `// SAFETY:` comment line citing
+    the chart annotation + state id. Per SOS-13 §8 invariant-citation
+    format.
+
+    Only `bounds` is wired in v1; the `div-by-zero` / `null` /
+    `overflow` annotations are recognized (recorded in the audit log
+    when the configured chart declares them) but the corresponding
+    emission patterns are deferred — the existing transliterator
+    doesn't yet emit those guarded forms in shapes the post-pass can
+    target. Adding them is additive and requires no spec amendment.
+    """
+    if not config.is_active():
+        return rust_source, []
+
+    audit: list[dict] = []
+    new_lines: list[str] = []
+    src_lines = rust_source.splitlines()
+    out_line_no = 0
+
+    for line in src_lines:
+        new_line = line
+        if config.has_discharge("bounds"):
+            # Walk the line left-to-right, replacing each matched
+            # bounds-checked index. A single line may carry more than
+            # one (e.g. `dm.tcb[i as usize].state = dm.tcb[i as usize].next;`),
+            # but we audit one entry per replacement so the audit
+            # arithmetic stays "one entry per emitted unsafe block".
+            def _replace(match):
+                recv = match.group("recv")
+                idx = match.group("idx").strip()
+                safety = (
+                    f"INV-SOS-G — bounds discharged at chart "
+                    f"<sos:discharged check=\"bounds\"/> on {state_id}"
+                )
+                audit.append({
+                    "region_id": config.region_id or state_id,
+                    "chart_state": state_id,
+                    "operation": DISCHARGE_OPERATION["bounds"],
+                    "discharge_source": "<sos:discharged check=\"bounds\"/>",
+                    "emitted_line": out_line_no + 1,
+                    "safety_citation": safety,
+                    "chart_site": chart_site,
+                })
+                return (
+                    f"unsafe {{ *{recv}.get_unchecked({idx} as usize) }}"
+                )
+
+            new_line = _BOUNDS_CHECKED_INDEX_RE.sub(_replace, line)
+            if new_line != line:
+                # Emit a SAFETY comment IMMEDIATELY above the line
+                # carrying the unsafe block, per §8. Pull the leading
+                # indentation off the original line so the comment
+                # aligns with the unsafe expression.
+                indent = line[: len(line) - len(line.lstrip())]
+                safety_comment = (
+                    f"{indent}// SAFETY: INV-SOS-G — bounds discharged "
+                    f"at chart <sos:discharged check=\"bounds\"/> on "
+                    f"{state_id} (SOS-13 §8)."
+                )
+                new_lines.append(safety_comment)
+                out_line_no += 1
+                # Re-stamp the emitted_line for the audit entries we
+                # just appended so they point at the unsafe line, not
+                # the SAFETY-comment line.
+                for entry in audit:
+                    if entry["emitted_line"] == out_line_no:
+                        entry["emitted_line"] = out_line_no + 1
+
+        new_lines.append(new_line)
+        out_line_no += 1
+
+    return "\n".join(new_lines), audit
 
 
 class RustEmitter:
@@ -1136,7 +1392,11 @@ def emit_helpers(helpers_source: str) -> list[HelperEmit]:
 
 
 def transliterate_to_rust(
-    source: str, event_name: str | None = None
+    source: str,
+    event_name: str | None = None,
+    verified_strip: "VerifiedStripConfig | None" = None,
+    state_id: str = "",
+    chart_site: str = "",
 ) -> TransliterationResult:
     """Parse ECMAScript source, emit Rust statements.
 
@@ -1144,9 +1404,24 @@ def transliterate_to_rust(
     `task.create`); when provided, a typed-match preamble extracts the
     `EventData` payload as locals before the transliterated body runs.
 
+    `verified_strip` is an optional SOS-13 verified-strip profile
+    configuration. When `None` (the default), emission is byte-
+    identical to prior behaviour — the verified-strip post-pass does
+    not run. When set, the post-pass replaces bounds-checked index
+    patterns with `unsafe { ... .get_unchecked(...) }` for sites whose
+    chart annotations discharge the obligation, and records one audit
+    entry per replacement on the returned `TransliterationResult`.
+
+    `state_id` / `chart_site` are passed through to the audit log; they
+    let reviewers trace each unsafe block back to the originating chart
+    location. Defaults are empty strings — pass non-empty values when
+    `verified_strip` is set.
+
     Returns the emitted Rust source (preamble + body), a list of notes
-    flagging unhandled-construct fallbacks, and a `needs_ev_param`
-    flag the caller uses to bind `ev` vs `_ev` in the function signature.
+    flagging unhandled-construct fallbacks, a `needs_ev_param` flag the
+    caller uses to bind `ev` vs `_ev` in the function signature, and
+    (under verified-strip) a list of audit entries on
+    `verified_strip_audit`.
     """
     program = esprima.parseScript(source)
     preamble, bound_fields = emit_eventdata_extract(event_name)
@@ -1156,11 +1431,20 @@ def transliterate_to_rust(
         lines.append(preamble)
     for stmt in program.body:
         lines.append(emitter.emit_stmt(stmt))
+    rust_source = "\n".join(lines)
+
+    audit_entries: list[dict] = []
+    if verified_strip is not None and verified_strip.is_active():
+        rust_source, audit_entries = apply_verified_strip(
+            rust_source, verified_strip, state_id, chart_site
+        )
+
     return TransliterationResult(
-        rust_source="\n".join(lines),
+        rust_source=rust_source,
         unhandled_notes=emitter._notes,
         preamble=preamble,
         needs_ev_param=bool(preamble),
+        verified_strip_audit=audit_entries,
     )
 
 

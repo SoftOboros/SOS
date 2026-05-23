@@ -52,11 +52,14 @@ from transliterate_c import (  # noqa: E402
     transliterate_to_c,
 )
 from transliterate_rust import (  # noqa: E402
+    VerifiedStripConfig,
     embed_rust_runtime,
     emit_dispatch_event,
     emit_helpers,
+    load_discharge_annotations,
     transliterate_to_rust,
 )
+from verified_audit import AuditEntry, write_audit_log  # noqa: E402
 
 TOOL_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = TOOL_DIR / "templates"
@@ -99,6 +102,43 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Render but do not write; print rendered content to stdout.",
     )
+    # SOS-13 verified-strip profile flags. Per SOS-13-CONCEPTS.md §15
+    # 2026-05-23 ratification entry:
+    #   - PCDN-SOS-13-001 — BOTH profile + per-region opt-in.
+    #   - PCDN-SOS-13-003 — `dev-keep` is the default (so --verified-strip
+    #     defaults to False).
+    #   - PCDN-SOS-13-002 — audit log is JSONL.
+    p.add_argument(
+        "--verified-strip",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable SOS-13 verified-strip profile across all regions. "
+            "Default is dev-keep (PCDN-SOS-13-003)."
+        ),
+    )
+    p.add_argument(
+        "--verified-region",
+        action="append",
+        default=[],
+        metavar="REGION_ID",
+        help=(
+            "Opt one region into verified-strip even when the global "
+            "flag is off. Repeatable. PCDN-SOS-13-001 (per-region "
+            "granularity)."
+        ),
+    )
+    p.add_argument(
+        "--verified-audit",
+        type=Path,
+        default=Path("verified_audit.jsonl"),
+        help=(
+            "Path to the JSONL audit log (PCDN-SOS-13-002). Default "
+            "`verified_audit.jsonl` in the current directory. The file "
+            "is written only when at least one verified-strip "
+            "elimination is emitted."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -136,12 +176,26 @@ def _env() -> Environment:
     )
 
 
-def _decorate_sites_with_transliteration(target: str, ast: ChartAst) -> list[dict]:
+def _decorate_sites_with_transliteration(
+    target: str,
+    ast: ChartAst,
+    verified_strip_enabled: bool = False,
+    verified_regions: frozenset = frozenset(),
+    discharges_by_state: dict | None = None,
+    audit_sink: list | None = None,
+) -> list[dict]:
     """For each script site, attempt target-language transliteration.
     On success, expose `transliterated_body` to the template; on
     failure, expose `transliteration_notes` so the template can fall
-    back to a stub + comment surfacing of the chart source."""
+    back to a stub + comment surfacing of the chart source.
+
+    The trailing kwargs wire the SOS-13 verified-strip profile through
+    to the Rust transliterator. They are no-ops for `target == "c"`
+    and have no effect when `verified_strip_enabled` is False and
+    `verified_regions` is empty (the byte-identical default path).
+    """
     out: list[dict] = []
+    discharges_by_state = discharges_by_state or {}
     for site in ast.sites:
         site_d: dict = {
             "kind": site.kind,
@@ -158,15 +212,41 @@ def _decorate_sites_with_transliteration(target: str, ast: ChartAst) -> list[dic
             "needs_ev_param": False,
         }
         if target == "rust":
+            # Build per-site verified-strip config. The site is in scope
+            # of the profile when EITHER the global flag is set OR the
+            # site's state-id is in the explicit per-region opt-in set.
+            # Discharge annotations are read from the chart's
+            # <sos:discharged check="..."/> children.
+            vs_cfg = None
+            if verified_strip_enabled or verified_regions:
+                discharges = tuple(
+                    discharges_by_state.get(site.state_id, [])
+                )
+                vs_cfg = VerifiedStripConfig(
+                    enabled_globally=verified_strip_enabled,
+                    enabled_regions=verified_regions,
+                    region_id=site.state_id,
+                    discharges=discharges,
+                )
             try:
                 result = transliterate_to_rust(
-                    site.script_source, event_name=site.event
+                    site.script_source,
+                    event_name=site.event,
+                    verified_strip=vs_cfg,
+                    state_id=site.state_id,
+                    chart_site=site.function_name,
                 )
                 if result.unhandled_notes:
                     site_d["transliteration_notes"] = result.unhandled_notes
                 else:
                     site_d["transliterated_body"] = result.rust_source
                     site_d["needs_ev_param"] = result.needs_ev_param
+                # Forward audit entries even when notes are present —
+                # the post-pass operates on already-emitted source,
+                # so its records are valid regardless of fallback
+                # status. (Empty when the profile is inactive.)
+                if audit_sink is not None and result.verified_strip_audit:
+                    audit_sink.extend(result.verified_strip_audit)
             except Exception as exc:
                 site_d["transliteration_notes"] = [f"parse error: {exc}"]
         elif target == "c":
@@ -185,8 +265,20 @@ def _decorate_sites_with_transliteration(target: str, ast: ChartAst) -> list[dic
     return out
 
 
-def render_target(target: str, ast: ChartAst) -> str:
-    """Render the target's Jinja2 template against the chart AST."""
+def render_target(
+    target: str,
+    ast: ChartAst,
+    verified_strip_enabled: bool = False,
+    verified_regions: frozenset = frozenset(),
+    discharges_by_state: dict | None = None,
+    audit_sink: list | None = None,
+) -> str:
+    """Render the target's Jinja2 template against the chart AST.
+
+    Trailing kwargs wire the SOS-13 verified-strip profile through
+    to the Rust transliterator; they are no-ops for `target == "c"`
+    and have no effect when the profile is not engaged.
+    """
     env = _env()
     template_name = {"rust": "scripts.rs.j2", "c": "scripts.c.j2"}[target]
     tpl = env.get_template(template_name)
@@ -224,7 +316,14 @@ def render_target(target: str, ast: ChartAst) -> str:
     return tpl.render(
         datamodel=ast.datamodel,
         helpers_source=ast.helpers_source,
-        sites=_decorate_sites_with_transliteration(target, ast),
+        sites=_decorate_sites_with_transliteration(
+            target,
+            ast,
+            verified_strip_enabled=verified_strip_enabled,
+            verified_regions=verified_regions,
+            discharges_by_state=discharges_by_state,
+            audit_sink=audit_sink,
+        ),
         helpers_rust=helpers_rust,
         dispatch_rust=dispatch_rust,
         runtime_rust=runtime_rust,
@@ -243,14 +342,72 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"sos-codegen: {exc}\n")
         return 1
 
+    # SOS-13 verified-strip: load discharge annotations from the chart
+    # so the per-site decorator can consult them. Off the Rust path,
+    # this loader is a no-op observer — its return value is only
+    # consulted when `target == "rust"`.
+    verified_strip_enabled = bool(getattr(args, "verified_strip", False))
+    verified_regions = frozenset(getattr(args, "verified_region", []) or [])
+    discharges_by_state: dict = {}
+    if verified_strip_enabled or verified_regions:
+        try:
+            discharges_by_state = load_discharge_annotations(args.chart)
+        except Exception as exc:
+            sys.stderr.write(
+                f"sos-codegen: load_discharge_annotations failed: {exc}\n"
+            )
+            return 1
+
+    audit_sink: list = []
+
     targets = ("rust", "c") if args.target == "both" else (args.target,)
     rendered: dict[str, str] = {}
     for t in targets:
         try:
-            rendered[t] = render_target(t, ast)
+            rendered[t] = render_target(
+                t,
+                ast,
+                verified_strip_enabled=verified_strip_enabled,
+                verified_regions=verified_regions,
+                discharges_by_state=discharges_by_state,
+                audit_sink=audit_sink,
+            )
         except Exception as exc:
             sys.stderr.write(f"sos-codegen: render({t}) failed: {exc}\n")
             return 2
+
+    # SOS-13 §7.4: emit the audit log when at least one elimination
+    # happened. We do NOT create an empty file — the absence of an
+    # audit log is a meaningful signal (no eliminations occurred).
+    if audit_sink:
+        entries = [
+            AuditEntry(
+                region_id=d.get("region_id", ""),
+                chart_state=d.get("chart_state", ""),
+                operation=d.get("operation", ""),
+                discharge_source=d.get("discharge_source", ""),
+                emitted_line=int(d.get("emitted_line", 0)),
+                safety_citation=d.get("safety_citation", ""),
+                extra={
+                    k: v
+                    for k, v in d.items()
+                    if k not in {
+                        "region_id", "chart_state", "operation",
+                        "discharge_source", "emitted_line",
+                        "safety_citation",
+                    }
+                },
+            )
+            for d in audit_sink
+        ]
+        try:
+            write_audit_log(args.verified_audit, entries)
+        except Exception as exc:
+            sys.stderr.write(
+                f"sos-codegen: writing audit log {args.verified_audit} "
+                f"failed: {exc}\n"
+            )
+            return 3
 
     if args.dry_run:
         for t in targets:

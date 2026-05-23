@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-13 test fixture: a minimal SCXML chart carrying a discharge
+  annotation on a state. Used by tests/test_verified_strip.py to
+  drive the verified-strip post-pass end-to-end without depending
+  on the full rtos_kernel.scxml.
+
+  The chart declares:
+   * one datamodel entry so the script body can index a collection.
+   * one state boot_bounded carrying the bounds-discharge annotation.
+   * one onentry script that contains a bounds-checked index access
+     the post-pass should rewrite to get_unchecked.
+   * one state boot_unbounded WITHOUT a discharge annotation; its
+     onentry stays safe-default even under verified-strip.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/SOS/v1"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="boot_bounded">
+
+  <datamodel>
+    <data id="tcb" expr="[]"/>
+    <data id="i" expr="0"/>
+  </datamodel>
+
+  <state id="boot_bounded">
+    <sos:discharged check="bounds"/>
+    <onentry>
+      <script><![CDATA[
+        tcb[i] = 1;
+      ]]></script>
+    </onentry>
+    <transition event="next" target="boot_unbounded"/>
+  </state>
+
+  <state id="boot_unbounded">
+    <onentry>
+      <script><![CDATA[
+        tcb[i] = 2;
+      ]]></script>
+    </onentry>
+  </state>
+
+</scxml>

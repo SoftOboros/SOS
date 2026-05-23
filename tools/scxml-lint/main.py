@@ -66,6 +66,7 @@ from rules import (
     rule_011_unguarded_documented,
     rule_012_cond_pure,
     rule_016_helper_comments,
+    scxml_lint_h_1,
     schema,
     script_length,
 )
@@ -123,6 +124,7 @@ def run(scxml_path: Path, repo_root: Path) -> List[Finding]:
     findings.extend(rule_012_cond_pure.check(tree, scxml_path))
     findings.extend(event_vocabulary.check(tree, scxml_path))
     findings.extend(rule_016_helper_comments.check(tree, scxml_path))
+    findings.extend(scxml_lint_h_1.check(tree, scxml_path))
     findings.extend(
         reference_md_drift.check(
             scxml_path,
