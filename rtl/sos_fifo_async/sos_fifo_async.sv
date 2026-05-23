@@ -13,6 +13,13 @@
 //                                  generic (0 = legacy, 1 = clear mem),
 //                                  inherited pattern from sos_fifo_sync.
 //       PCDN-A-bind-form          resolved 2026-05-23 — module-type bind.
+//       PCDN-A-async-DEPTH-pow2   resolved 2026-05-23 — DEPTH MUST be a
+//                                  power of two AND DEPTH >= 4. Enforced
+//                                  via an elaboration-time $fatal in an
+//                                  `initial` block. The gray-code
+//                                  wraparound trick presumes pow2 depth;
+//                                  degenerate values silently produce a
+//                                  broken FIFO.
 //
 // Cross-phase invariants (cited, not redefined):
 //   INV-SOS-A  chart-as-source
@@ -159,6 +166,28 @@ module sos_fifo_async #(
                (w_next[GPTR_W-2]   != r_sync[GPTR_W-2])   &&
                (w_next[GPTR_W-3:0] == r_sync[GPTR_W-3:0]);
     endfunction
+
+    // ------------------------------------------------------------------
+    // Elaboration-time static assertion: DEPTH constraints.
+    // Per PCDN-A-async-DEPTH-pow2 resolved 2026-05-23 (SOS-08-A §6.1).
+    // The gray-code wraparound trick (top-two-bits-inverted-plus-rest-
+    // equal for full detection, all-bits-equal for empty detection)
+    // assumes a power-of-two depth; non-pow2 DEPTH silently produces a
+    // broken FIFO. DEPTH >= 4 keeps a meaningful CDC budget — DEPTH=2
+    // collapses to single-element behaviour where the gray pointer
+    // carries no usable wraparound information across the SYNC_STAGES
+    // crossings. Standard SV idiom: `initial` block fires at time 0
+    // during simulation; synthesis tools either honour the `$fatal` as
+    // an elab error or ignore the initial block (in which case the VHDL
+    // companion's concurrent assert remains the binding gate for
+    // VHDL-flow synthesis).
+    // ------------------------------------------------------------------
+    initial begin
+        if (!(DEPTH >= 4 && (DEPTH & (DEPTH - 1)) == 0)) begin
+            $fatal(1, "sos_fifo_async: DEPTH=%0d must be power-of-2 and >= 4",
+                   DEPTH);
+        end
+    end
 
     // ------------------------------------------------------------------
     // Synchronizer chains. INV-S-HDL-3 excludes these from formal proof;

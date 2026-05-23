@@ -7,6 +7,16 @@
 //                                              pattern inherited from
 //                                              PCDN-A-fifo-READ_LATENCY +
 //                                              PCDN-A-fifo-RESET_MEM)
+//       PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23 — adds SYNC_STAGES
+//                                              parameter pass-through; the
+//                                              DUAL_CLOCK "eventually
+//                                              settled" cover sequence
+//                                              scales with the synchroniser
+//                                              depth (##[1:SYNC_STAGES+1]
+//                                              for the gray-coded shadow to
+//                                              propagate through the chain
+//                                              before the A-domain
+//                                              collision detector fires).
 //       docs/concepts/SOS-08-CONCEPTS.md   §5  (frozen decisions inherited)
 //       docs/concepts/SOS-07-CONCEPTS.md   §6  (cross-phase invariants)
 //
@@ -38,6 +48,12 @@ module sos_dpram_arb_sva #(
     parameter string MODE  = "SINGLE_CLOCK",
     parameter int    READ_LATENCY = 0,
     parameter bit    RESET_MEM    = 1'b0,
+    // SYNC_STAGES mirror — forwarded from the DUT via the bind directive
+    // (PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23). The DUAL_CLOCK
+    // "eventually settled" cover bound below scales as `##[1:SYNC_STAGES+1]`
+    // (the +1 accounts for the clk_b source flop that precedes the
+    // clk_a synchroniser chain). Default 2 matches the DUT's default.
+    parameter int    SYNC_STAGES  = 2,
     parameter int    ADDR_W = (DEPTH <= 1) ? 1 : $clog2(DEPTH)
 ) (
     // Single-clock + reset (used when MODE == "SINGLE_CLOCK").
@@ -201,6 +217,25 @@ module sos_dpram_arb_sva #(
             //   - RTL site: sos_dpram_arb.sv g_dual_clock generate block.
             //   - Runtime check: test_dual_clock_collision in
             //                    tb/sos_dpram_arb/test_sos_dpram_arb.py.
+
+            // -------------------------------------------------------------
+            // PCDN-A-dpram-SYNC_STAGES (resolved 2026-05-23) — eventually
+            // settled cover sequence. The bound is `##[1:SYNC_STAGES+1]`
+            // (1..N+1 clk_a cycles) — the deepest stage of the gray-code
+            // synchroniser chain settles after the SYNC_STAGES delay plus
+            // one for the clk_b source flop. Cover-only: the strict
+            // assertion would require a stable input window we cannot
+            // guarantee from this SVA reach (the cocotb scoreboard owns
+            // the strict form via test_dual_clock_collision).
+            // -------------------------------------------------------------
+            property p_collision_eventually_settles_dc;
+                @(posedge clk_a) disable iff (rst_a)
+                    (port_a_we && port_b_we &&
+                     (port_a_addr == port_b_addr))
+                        |-> ##[1:SYNC_STAGES+1] (port_b_full == 1'b1);
+            endproperty
+            c_collision_eventually_settles_dc:
+                cover property (p_collision_eventually_settles_dc);
 
             // The reset-clears observability properties still hold per
             // port, on each port's own clock.

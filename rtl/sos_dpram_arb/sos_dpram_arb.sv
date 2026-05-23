@@ -8,6 +8,17 @@
 //                                              ratified for sos_fifo_sync via
 //                                              PCDN-A-fifo-READ_LATENCY and
 //                                              PCDN-A-fifo-RESET_MEM)
+//       PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23 — adds SYNC_STAGES
+//                                              parameter (>= 2, default 2)
+//                                              on the dual-clock gray-code
+//                                              address + we synchroniser
+//                                              chain. Mandatory-with-default
+//                                              per the CDC-primitive named
+//                                              exception extended to
+//                                              INV-S-HDL-A-5 this wave
+//                                              (mirroring sos_fifo_async and
+//                                              sos_synchronizer's default
+//                                              treatment of the CDC depth).
 //       docs/concepts/SOS-08-CONCEPTS.md   §5  (frozen decisions inherited)
 //       docs/concepts/SOS-07-CONCEPTS.md   §6  (cross-phase invariants)
 //
@@ -33,7 +44,13 @@
 //   INV-S-HDL-A-2  handshake-port composition is associative
 //   INV-S-HDL-A-3  vendor-IP shim wrapper is byte-identical
 //   INV-S-HDL-A-4  one-hot internal FSM by default
-//   INV-S-HDL-A-5  mandatory parameters have no defaults
+//   INV-S-HDL-A-5  mandatory parameters have no defaults (per
+//                  PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23, this
+//                  primitive's `SYNC_STAGES` parameter is a named exception:
+//                  default 2, mirroring `sos_fifo_async` and
+//                  `sos_synchronizer`. The CDC-primitive default-2 pattern
+//                  extends INV-S-HDL-A-5's named-exception set this wave;
+//                  see the §15 amendment landing in a sibling agent's PR.)
 //
 // Dual-port RAM + arbiter L0 primitive. Byte-equivalent semantics to the
 // VHDL sibling at sos_dpram_arb.vhd.
@@ -76,6 +93,19 @@ module sos_dpram_arb #(
     //   0 = mem retained across reset (legacy / smaller reset fanout),
     //   1 = mem cleared to all-zero on reset (stricter post-reset semantics).
     parameter bit    RESET_MEM,
+    // SYNC_STAGES — depth of the cross-domain gray-coded address + we
+    // synchroniser chain in MODE="DUAL_CLOCK". Mandatory-with-default-2 per
+    // PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23 (CDC-primitive named
+    // exception to INV-S-HDL-A-5; mirrors `sos_fifo_async` and
+    // `sos_synchronizer`). Default 2 is the well-trodden value for moderate
+    // clock ratios on low-frequency targets; deployments with
+    // MODE="DUAL_CLOCK" and f_clk >= 250 MHz MUST set SYNC_STAGES >= 3 per
+    // MTBF.md §4. Larger values (3, 4) raise MTBF for high-frequency /
+    // tight-budget designs. MTBF.md sign-off MUST be updated when
+    // overriding SYNC_STAGES > 2 or targeting a different process. Unused
+    // in MODE="SINGLE_CLOCK" (no cross-domain crossing). >= 2 enforced via
+    // elaboration-time $fatal in an `initial` block.
+    parameter int    SYNC_STAGES = 2,
     // Derived widths — not user-facing; recomputed from DEPTH.
     parameter int    ADDR_W = (DEPTH <= 1) ? 1 : $clog2(DEPTH)
 ) (
@@ -142,6 +172,24 @@ module sos_dpram_arb #(
             gray2bin = b;
         end
     endfunction
+
+    // -------------------------------------------------------------------
+    // Elaboration-time validation of SYNC_STAGES (>= 2 per
+    // PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23). SYNC_STAGES = 1 is
+    // not a synchroniser -- it is a single sampling flop with no MTBF
+    // improvement over a direct cross. Mirrors the `initial $fatal` in
+    // sos_synchronizer.sv. Unused in MODE="SINGLE_CLOCK" but enforced
+    // unconditionally because the parameter is part of the module surface
+    // in either mode.
+    // -------------------------------------------------------------------
+    initial begin
+        if (SYNC_STAGES < 2) begin
+            $fatal(1,
+                "sos_dpram_arb: SOS-08-A §6.7 / PCDN-A-dpram-SYNC_STAGES "
+                "requires SYNC_STAGES >= 2; got %0d",
+                SYNC_STAGES);
+        end
+    end
 
     generate
         // ---------------------------------------------------------------
@@ -211,13 +259,37 @@ module sos_dpram_arb #(
         else if (MODE == "DUAL_CLOCK") begin : g_dual_clock
 
             // Gray-coded port B address sampled in clk_b, then synced
-            // through a two-stage flop chain into clk_a.
+            // through a SYNC_STAGES-deep flop chain into clk_a
+            // (PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23).
             logic [ADDR_W-1:0] port_b_addr_gray_b;
-            logic [ADDR_W-1:0] port_b_addr_gray_a1;
-            logic [ADDR_W-1:0] port_b_addr_gray_a2;
             logic              port_b_we_b;
-            logic              port_b_we_a1;
-            logic              port_b_we_a2;
+
+            // Synchroniser flop chains in clk_a. `sync_addr_chain[0]`
+            // captures the gray-coded port_b_addr at the first
+            // SYNC_STAGES boundary; `sync_addr_chain[SYNC_STAGES-1]` drives
+            // the collision detector. The _we chain travels in lockstep.
+            //
+            // All three vendor synchronizer-attribute families are declared
+            // on each storage element via SV `(* ... *)` syntax; each
+            // synthesis tool picks the attribute it recognizes and
+            // silently ignores the others. Mirrors sos_synchronizer.sv.
+            //   * Xilinx Vivado: ASYNC_REG = "TRUE" forces SLICE-adjacency.
+            //   * Intel Quartus: altera_attribute
+            //     SYNCHRONIZER_IDENTIFICATION FORCED marks the chain for
+            //     vendor MTBF reporting.
+            //   * Lattice Diamond / Radiant: syn_preserve / syn_keep
+            //     prevent retiming of the chain.
+            // Per INV-S-HDL-3, these flops are excluded from the formal
+            // model; MTBF.md is the verification artifact.
+            (* ASYNC_REG = "TRUE" *)
+            (* altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
+            (* syn_preserve = 1, syn_keep = 1 *)
+            logic [ADDR_W-1:0] sync_addr_chain [0:SYNC_STAGES-1];
+
+            (* ASYNC_REG = "TRUE" *)
+            (* altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)
+            (* syn_preserve = 1, syn_keep = 1 *)
+            logic              sync_we_chain   [0:SYNC_STAGES-1];
 
             // clk_b register stage (source of the synchroniser chain).
             always_ff @(posedge clk_b) begin
@@ -230,30 +302,29 @@ module sos_dpram_arb #(
                 end
             end
 
-            // clk_a synchroniser stages.
-            // Vendor-specific synthesis attributes (ASYNC_REG, syn_preserve)
-            // are emitted by the vendor shim path; the portable RTL here
-            // relies on naming convention `_sync_*` so build wrappers can
-            // pattern-match. Per INV-S-HDL-3, these flops are excluded from
-            // the formal model.
-            (* ASYNC_REG = "TRUE", syn_preserve = 1 *)
+            // clk_a synchroniser stages — SYNC_STAGES deep.
             always_ff @(posedge clk_a) begin
                 if (rst_a) begin
-                    port_b_addr_gray_a1 <= '0;
-                    port_b_addr_gray_a2 <= '0;
-                    port_b_we_a1        <= 1'b0;
-                    port_b_we_a2        <= 1'b0;
+                    for (int i = 0; i < SYNC_STAGES; i++) begin
+                        sync_addr_chain[i] <= '0;
+                        sync_we_chain[i]   <= 1'b0;
+                    end
                 end else begin
-                    port_b_addr_gray_a1 <= port_b_addr_gray_b;
-                    port_b_addr_gray_a2 <= port_b_addr_gray_a1;
-                    port_b_we_a1        <= port_b_we_b;
-                    port_b_we_a2        <= port_b_we_b;
+                    sync_addr_chain[0] <= port_b_addr_gray_b;
+                    sync_we_chain[0]   <= port_b_we_b;
+                    for (int i = 1; i < SYNC_STAGES; i++) begin
+                        sync_addr_chain[i] <= sync_addr_chain[i-1];
+                        sync_we_chain[i]   <= sync_we_chain[i-1];
+                    end
                 end
             end
 
-            // A-domain collision view — conservative.
-            assign collision = port_a_we & port_b_we_a2 &
-                               (gray2bin(port_b_addr_gray_a2) == port_a_addr);
+            // A-domain collision view — conservative. The deepest stage of
+            // each chain is what the collision detector consumes
+            // (INV-S-HDL-3 boundary).
+            assign collision = port_a_we & sync_we_chain[SYNC_STAGES-1] &
+                               (gray2bin(sync_addr_chain[SYNC_STAGES-1])
+                                == port_a_addr);
 
             assign port_a_full  = 1'b0;
             assign port_a_ready = 1'b1;
@@ -299,7 +370,8 @@ module sos_dpram_arb #(
             // here in clk_b; this is the cross-domain edge that the MTBF
             // calculation covers. The semantic guarantee is conservative:
             // a false-positive collision stalls B for one cycle; a false-
-            // negative is excluded by the SYNC_STAGES=2 chain.
+            // negative is excluded by the SYNC_STAGES-deep chain (default
+            // 2; see MTBF.md §4 for the SYNC_STAGES sweep).
             always_ff @(posedge clk_b) begin
                 if (rst_b) begin
                     rdata_b_q <= '0;

@@ -13,6 +13,13 @@
 --                                  generic (false = legacy, true = clear mem),
 --                                  inherited pattern from sos_fifo_sync.
 --       PCDN-A-bind-form          resolved 2026-05-23 — module-type bind.
+--       PCDN-A-async-DEPTH-pow2   resolved 2026-05-23 — DEPTH MUST be a
+--                                  power of two AND DEPTH >= 4. Enforced
+--                                  via an elaboration-time concurrent
+--                                  assertion in the architecture body.
+--                                  The gray-code wraparound trick
+--                                  presumes pow2 depth; degenerate values
+--                                  silently produce a broken FIFO.
 --
 -- Cross-phase invariants (cited, not redefined):
 --   INV-SOS-A  chart-as-source
@@ -175,6 +182,27 @@ architecture rtl of sos_fifo_async is
     signal do_write : std_logic;
     signal do_read  : std_logic;
 
+    -- Power-of-two test for elaboration-time assertion on DEPTH.
+    -- A positive integer n is a power of two iff (n and (n-1)) = 0. The
+    -- VHDL standard library does not provide a bitwise integer-AND, so
+    -- this small helper walks the candidate to determine whether exactly
+    -- one bit is set; it is only ever evaluated at elaboration time.
+    function is_pow2 (n : integer) return boolean is
+        variable v   : integer := n;
+        variable ones : integer := 0;
+    begin
+        if v <= 0 then
+            return false;
+        end if;
+        while v > 0 loop
+            if (v mod 2) = 1 then
+                ones := ones + 1;
+            end if;
+            v := v / 2;
+        end loop;
+        return ones = 1;
+    end function;
+
     -- Recovered binary copies of the synchronized far-side pointers (used
     -- to compute local count_q). Gray-to-binary conversion is a
     -- combinational XOR-prefix reduction.
@@ -220,6 +248,23 @@ architecture rtl of sos_fifo_async is
     end function;
 
 begin
+
+    ------------------------------------------------------------------
+    -- Elaboration-time static assertion: DEPTH constraints.
+    -- Per PCDN-A-async-DEPTH-pow2 resolved 2026-05-23 (SOS-08-A §6.1).
+    -- The gray-code wraparound trick (top-two-bits-inverted-plus-rest-
+    -- equal for full detection, all-bits-equal for empty detection)
+    -- assumes a power-of-two depth; non-pow2 DEPTH silently produces
+    -- a broken FIFO. DEPTH >= 4 keeps a meaningful CDC budget — DEPTH=2
+    -- collapses to single-element behaviour where the gray pointer
+    -- carries no usable wraparound information across the SYNC_STAGES
+    -- crossings. Concurrent (non-clocked) assert: VHDL evaluates this
+    -- at elaboration.
+    ------------------------------------------------------------------
+    assert (DEPTH >= 4) and is_pow2(DEPTH)
+        report "sos_fifo_async: DEPTH=" & integer'image(DEPTH) &
+               " must be power-of-2 and >= 4"
+        severity failure;
 
     ------------------------------------------------------------------
     -- Synchronizer chains. INV-S-HDL-3 excludes these from formal

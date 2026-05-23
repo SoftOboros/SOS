@@ -5,6 +5,9 @@
 // @parent      docs/concepts/SOS-08-CONCEPTS.md §6 (L0 set), §7 (INV-S-HDL-1..5)
 // @grandparent docs/concepts/SOS-07-CONCEPTS.md §6 (INV-SOS-A..H)
 //
+// PCDN-A-strobe-pending-shadow resolved 2026-05-23 (§15): the bind forwards
+// the new `pending_q` observability port through to the assertion module.
+//
 // Invariants cited (not re-derived):
 //   INV-SOS-A..H, INV-S-HDL-1..5, INV-S-HDL-A-1..5.
 //
@@ -32,6 +35,7 @@ bind sos_strobe_latch sos_strobe_latch_sva u_sos_strobe_latch_sva (
     .strobe          (strobe),
     .ack             (ack),
     .latched         (latched),
+    .pending_q       (pending_q),
     .latched_state_q (latched_state_q)
 );
 

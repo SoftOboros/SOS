@@ -6,6 +6,15 @@
                                              pattern inherited from
                                              PCDN-A-fifo-READ_LATENCY +
                                              PCDN-A-fifo-RESET_MEM)
+      PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23 — exposes the new DUT
+                                             SYNC_STAGES generic via env var
+                                             SOS_DPRAM_ARB_SYNC_STAGES
+                                             (default 2; valid range 2..4).
+                                             The DUAL_CLOCK collision /
+                                             settle windows scale linearly
+                                             with SYNC_STAGES (one extra
+                                             clk_a cycle of synchroniser
+                                             latency per added stage).
       docs/concepts/SOS-08-CONCEPTS.md   §5  (frozen decisions inherited)
       docs/concepts/SOS-07-CONCEPTS.md   §6  (cross-phase invariants)
 
@@ -49,6 +58,11 @@ Parameterisation (via env vars):
   SOS_DPRAM_ARB_MODE          — "SINGLE_CLOCK" | "DUAL_CLOCK"
   SOS_DPRAM_ARB_READ_LATENCY  — 0 (FWFT) | 1 (registered)
   SOS_DPRAM_ARB_RESET_MEM     — 0 (retained) | 1 (cleared)
+  SOS_DPRAM_ARB_SYNC_STAGES   — DUT SYNC_STAGES generic (default 2;
+                                 valid 2|3|4 — PCDN-A-dpram-SYNC_STAGES
+                                 resolved 2026-05-23). Values < 2 cause
+                                 the test module to skip with pytest.skip
+                                 (the DUT would fail elaboration anyway).
 """
 
 from __future__ import annotations
@@ -57,6 +71,7 @@ import os
 import random
 
 import cocotb
+import pytest
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
 
@@ -68,9 +83,32 @@ WIDTH = int(os.environ.get("SOS_DPRAM_ARB_WIDTH", "32"))
 MODE = os.environ.get("SOS_DPRAM_ARB_MODE", "SINGLE_CLOCK")
 READ_LATENCY = int(os.environ.get("SOS_DPRAM_ARB_READ_LATENCY", "0"))
 RESET_MEM = int(os.environ.get("SOS_DPRAM_ARB_RESET_MEM", "0"))
+# PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23.
+# Default 2 mirrors the DUT's default; values < 2 fail DUT elaboration —
+# we skip rather than letting the simulator error out so the harness gives
+# a clean test-skip diagnostic.
+SYNC_STAGES = int(os.environ.get("SOS_DPRAM_ARB_SYNC_STAGES", "2"))
+if SYNC_STAGES < 2:
+    pytest.skip(
+        f"PCDN-A-dpram-SYNC_STAGES requires SYNC_STAGES >= 2; "
+        f"got {SYNC_STAGES} from SOS_DPRAM_ARB_SYNC_STAGES env var",
+        allow_module_level=True,
+    )
 
 CLK_PERIOD_A_NS = 10  # 100 MHz nominal
 CLK_PERIOD_B_NS = 13  # ~77 MHz nominal (asynchronous to clk_a in DUAL_CLOCK)
+
+# DUAL_CLOCK settle window scales with SYNC_STAGES. The deepest stage of
+# the synchroniser chain settles SYNC_STAGES clk_a cycles after the clk_b
+# source flop captures the gray-coded port_b_addr; plus one clk_b for the
+# source flop itself. A small margin (currently +3) absorbs the clk_a/clk_b
+# period mismatch (10 ns vs 13 ns) without driving the test cycle count up.
+DUAL_CLOCK_SETTLE_CYCLES = SYNC_STAGES + 4
+# Sustained-collision sweep MUST be at least SYNC_STAGES deep on the clk_a
+# side to give the synchroniser chain time to propagate the gray-coded
+# port_b_addr through every stage; we scale linearly above the previous
+# fixed 32-cycle budget.
+DUAL_CLOCK_COLLISION_BUDGET = max(32, 8 * SYNC_STAGES + 8)
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +282,10 @@ async def test_cross_port_a_writes_b_reads(dut) -> None:
 
     # Allow at least one cycle for the cross-clock path (DUAL_CLOCK) to
     # see the write land. In SINGLE_CLOCK mode this is essentially free.
-    settle_cycles = 6 if MODE == "DUAL_CLOCK" else 1
+    # DUAL_CLOCK settle scales with SYNC_STAGES (PCDN-A-dpram-SYNC_STAGES
+    # resolved 2026-05-23) — deeper chains need proportionally more cycles
+    # for the gray-coded shadow to propagate.
+    settle_cycles = DUAL_CLOCK_SETTLE_CYCLES if MODE == "DUAL_CLOCK" else 1
     for _ in range(settle_cycles):
         await RisingEdge(clk_b)
 
@@ -496,8 +537,10 @@ async def test_dual_clock_independent(dut) -> None:
     await RisingEdge(dut.clk_b)
     dut.port_b_we.value = 0
 
-    # Let cross-clock collision shadow stabilise.
-    for _ in range(8):
+    # Let cross-clock collision shadow stabilise. SYNC_STAGES-scaled per
+    # PCDN-A-dpram-SYNC_STAGES — chain latency grows by one clk_a cycle
+    # per additional stage.
+    for _ in range(DUAL_CLOCK_SETTLE_CYCLES):
         await RisingEdge(dut.clk_a)
         await RisingEdge(dut.clk_b)
 
@@ -545,6 +588,9 @@ async def test_dual_clock_collision(dut) -> None:
     data_b = 0xB1B2B3B4 & _data_mask()
 
     # Sustain both writes for many cycles so the gray-synchroniser settles.
+    # Budget scales with SYNC_STAGES per PCDN-A-dpram-SYNC_STAGES resolved
+    # 2026-05-23 — the deepest chain stage needs proportionally more clk_a
+    # cycles to expose the synced port_b_addr to the collision detector.
     dut.port_a_addr.value = addr
     dut.port_a_wdata.value = data_a
     dut.port_a_we.value = 1
@@ -553,7 +599,7 @@ async def test_dual_clock_collision(dut) -> None:
     dut.port_b_we.value = 1
 
     saw_b_blocked = False
-    for _ in range(32):
+    for _ in range(DUAL_CLOCK_COLLISION_BUDGET):
         await RisingEdge(dut.clk_a)
         if int(dut.port_b_full.value) == 1:
             saw_b_blocked = True
@@ -562,7 +608,7 @@ async def test_dual_clock_collision(dut) -> None:
     # Stop the writes.
     dut.port_a_we.value = 0
     dut.port_b_we.value = 0
-    for _ in range(8):
+    for _ in range(DUAL_CLOCK_SETTLE_CYCLES):
         await RisingEdge(dut.clk_a)
         await RisingEdge(dut.clk_b)
 

@@ -6,6 +6,13 @@
 //                                                bind directive owned by tb/)
 //       docs/concepts/SOS-08-A-CONCEPTS.md §15 (PCDN-A-bind-form ratified
 //                                              2026-05-23 — module-type bind)
+//       PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23 — forwards SYNC_STAGES
+//                                              parameter from the DUT
+//                                              instance into the bound SVA
+//                                              module so the eventually-
+//                                              settled cover sequence
+//                                              scales with the DUT's
+//                                              synchroniser depth.
 //
 // Cross-phase / sub-phase / per-primitive invariants cited:
 //   INV-SOS-A..H, INV-S-HDL-1..5, INV-S-HDL-A-1..5
@@ -22,7 +29,8 @@ bind sos_dpram_arb sos_dpram_arb_sva #(
     .WIDTH        (WIDTH),
     .MODE         (MODE),
     .READ_LATENCY (READ_LATENCY),
-    .RESET_MEM    (RESET_MEM)
+    .RESET_MEM    (RESET_MEM),
+    .SYNC_STAGES  (SYNC_STAGES)
 ) u_sva (
     .clk            (clk),
     .rst            (rst),

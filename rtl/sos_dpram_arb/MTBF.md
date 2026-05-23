@@ -6,6 +6,12 @@
        reduced conformance level for single-clock-only deployments)
       docs/concepts/SOS-08-A-CONCEPTS.md §15 (PCDN-A-006 — external MTBF
        sign-off; required fields enumerated below)
+      PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23 — adds the `SYNC_STAGES`
+       generic to `sos_dpram_arb` (mandatory-with-default 2, CDC-primitive
+       named exception to INV-S-HDL-A-5). §4 below sweeps SYNC_STAGES ∈
+       {2, 3, 4} at 250 MHz / τ=100 ps and lifts the previous "future
+       generic recommended" note to a normative MUST clause for
+       deployments at f_clk ≥ 250 MHz on ECP5-class targets.
       docs/concepts/SOS-08-CONCEPTS.md   §7  (INV-S-HDL-3 — CDC isolation)
       docs/concepts/SOS-07-CONCEPTS.md   §6  (INV-SOS-A..H)
 
@@ -23,16 +29,21 @@ i.e. without MODE=DUAL_CLOCK this file is **informative only**.
 
 ## 2. Synchroniser shape
 
-The DUAL_CLOCK branch of `sos_dpram_arb` composes a `STAGES = 2`-deep
-flop chain that synchronises:
+The DUAL_CLOCK branch of `sos_dpram_arb` composes a `SYNC_STAGES`-deep
+flop chain (PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23; default 2 per
+the CDC-primitive named exception to INV-S-HDL-A-5) that synchronises:
 
 - `port_b_addr` (gray-coded, `ADDR_W = ceil(log2(DEPTH))` bits wide), from
   `clk_b` into `clk_a`.
 - `port_b_we` (1-bit qualifier), from `clk_b` into `clk_a`.
 
 Total cross-domain flop set: `ADDR_W + 1` synchroniser chains, each with
-two flops on the `clk_a` side. The vendor-IP shim path applies the
-target-specific synthesis attribute:
+`SYNC_STAGES` flops on the `clk_a` side. The portable RTL declares all
+three vendor synthesis attributes simultaneously on the chain signals
+(`async_reg`, `altera_attribute` SYNCHRONIZER_IDENTIFICATION FORCED, and
+`syn_preserve`/`syn_keep`); each synthesis tool picks the attribute it
+recognizes and silently ignores the others. The vendor-IP shim path may
+additionally apply the target-specific synthesis attribute:
 
 - Xilinx: `(* ASYNC_REG = "TRUE" *)`
 - Intel:  `(* altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED" *)`
@@ -87,45 +98,48 @@ divided by N.)
 | `f_data` (clk_b domain) | 250 MHz (worst case — equal clock) |
 | `τ` (per-FF) | 100 ps |
 | `T₀` (per-FF) | 30 ps |
-| `t_resolution` (2-stage chain) | 2 ns (one full `T_clk` minus setup/clk-to-q margin) |
 | `ADDR_W` | `ceil(log2(64)) = 6` |
 | Sync chains | 6 (addr) + 1 (we) = 7 |
 
-Computation:
+`t_resolution` scales with `SYNC_STAGES`: `(SYNC_STAGES - 1) × T_clk +
+0.5 × T_clk = (SYNC_STAGES - 0.5) × T_clk`. With `T_clk = 4 ns` and the
+conservative half-period margin on the final stage, the per-stage budget
+is approximately `SYNC_STAGES × T_clk` ns minus a `0.5 × T_clk` setup
+allowance. The aggregate denominator `f_clk × f_data × T₀ ≈ 1.875e6`
+(Hz·s) is the same across the sweep.
 
-```
-exp(t_resolution / τ) = exp(2e-9 / 100e-12) = exp(20) ≈ 4.85e8
-f_clk × f_data × T₀  = 250e6 × 250e6 × 30e-12 ≈ 1.875e6
+### 4.1. SYNC_STAGES sweep at 250 MHz / τ=100 ps
 
-MTBF_per_bit ≈ 4.85e8 / 1.875e6 s ≈ 258 s
-```
+| `SYNC_STAGES` | `t_resolution` | `exp(t_resolution / τ)` | `MTBF_per_bit` | `MTBF_aggregate` (÷7) | Verdict |
+|---|---|---|---|---|---|
+| **2** (default) | 2 ns | `exp(20)` ≈ 4.85e8 | ≈ 258 s | ≈ 37 s | **Inadequate** — 4 minutes per bit; aggregate ~37 s. NOT for production at this frequency. |
+| **3** | 3 ns | `exp(30)` ≈ 1.07e13 | ≈ 5.7e6 s (≈ 66 days) | ≈ 8.1e5 s (≈ 9 days) | **Safety threshold met** at the per-bit level; aggregate ~9 days. Acceptable for non-life-critical safety-critical deployments. |
+| **4** | 4 ns | `exp(40)` ≈ 2.35e17 | ≈ 1.25e11 s (≈ 3,970 years) | ≈ 1.79e10 s (≈ 567 years) | **Production-safe** for any deployment class. The recommended SYNC_STAGES for life-critical / aerospace / medical contexts. |
 
-That single-bit MTBF is **insufficient** for production silicon — 258
-seconds is roughly four minutes. For the aggregate (7-chain) sync bus the
-union-bound aggregate is ~37 s; clearly inadequate.
+### 4.2. Alternative — lower clock with SYNC_STAGES=3
 
-This worked example reveals that **a 2-stage synchroniser on a 250 MHz
-clock with ECP5-class τ is not enough** for safe DPRAM CDC. Standard
-fixes (in increasing order of cost):
+Reducing `f_clk` to 100 MHz with `SYNC_STAGES = 3` → `T_clk = 10 ns`,
+`t_resolution = 8 ns`, `exp(8 ns / 100 ps) = exp(80)` ≈ 5.5e34. Per-bit
+MTBF is astronomically large; aggregate is also astronomical. Use this
+shape when the clock-rate budget allows it.
 
-1. **STAGES = 3** → `exp(3 ns / 100 ps) = exp(30) ≈ 1.07e13`, MTBF_per_bit
-   ≈ 5.7e6 s ≈ 66 days; aggregate ≈ 9 days. Still marginal for safety-
-   critical.
-2. **STAGES = 4** → `exp(4 ns / 100 ps) = exp(40) ≈ 2.35e17`, MTBF_per_bit
-   ≈ 1.25e11 s ≈ 3,970 years; aggregate ≈ 567 years. Production-safe.
-3. **Lower `f_clk` to 100 MHz** with `STAGES = 3` → `T_clk = 10 ns`,
-   `t_resolution = 8 ns`, `exp(8 ns / 100 ps) = exp(80)` ≈ 5.5e34;
-   astronomically safe.
+### 4.3. Normative deployment rules
 
-**Recommendation for the first ECP5 deployment**: use **`STAGES = 3`** at
-a target `f_clk` of **100 MHz** for the dual-clock DPRAM. For higher
-clocks (≥ 200 MHz), elevate to **`STAGES = 4`**. The current portable
-RTL hard-codes `STAGES = 2`; a future amendment to this primitive will
-introduce a `SYNC_STAGES` generic (mirroring `sos_fifo_async`) for
-configurability. Until then, the dual-clock variant of `sos_dpram_arb`
-SHOULD be deployed only at clocks where the 2-stage chain achieves
-MTBF ≥ 10¹⁰ s (≈ 317 years) per bit — practically `f_clk ≤ 50 MHz`
-on ECP5-class τ.
+- **MUST** — deployments with `MODE = "DUAL_CLOCK"` and `f_clk ≥ 250 MHz`
+  set `SYNC_STAGES ≥ 3` (see §4.1; SYNC_STAGES=2 is inadequate at
+  250 MHz on ECP5-class τ).
+- **SHOULD** — deployments targeting life-critical / safety-critical
+  contexts set `SYNC_STAGES = 4` regardless of clock rate.
+- **MAY** — deployments at `f_clk ≤ 50 MHz` on ECP5-class τ accept the
+  default `SYNC_STAGES = 2` (the per-bit MTBF at 50 MHz / SYNC_STAGES=2
+  comfortably exceeds 10¹⁰ s).
+
+Per PCDN-A-dpram-SYNC_STAGES resolved 2026-05-23, `SYNC_STAGES` is now a
+DUT-surface generic (mandatory-with-default-2 per the CDC-primitive
+named exception extended to INV-S-HDL-A-5 this wave); the previous
+"future amendment will introduce a SYNC_STAGES generic" note has been
+withdrawn. Examples/instantiate.{vhd,sv} document the
+`u_dpram_safety_critical` shape (SYNC_STAGES=3) explicitly.
 
 ## 5. Sign-off
 
@@ -159,5 +173,21 @@ sign-off fields populated.
   or STAGES=4 above.
 - §5 sign-off block left as placeholder — to be filled per deployment per
   PCDN-A-006 (external sign-off, build-wrapper structural validation).
+
+### 2026-05-23 — PCDN-A-dpram-SYNC_STAGES amendment (Ira / impl wave-2)
+
+- §2 reworded to refer to the `SYNC_STAGES` generic rather than a hard-
+  coded `STAGES = 2`; added the per-vendor synthesis-attribute note now
+  that the portable RTL declares all three attribute families directly on
+  the synchroniser chain signals.
+- §4 worked example re-organised into a `SYNC_STAGES ∈ {2, 3, 4}` sweep
+  table (§4.1) at 250 MHz / τ=100 ps / DEPTH=64, plus a lower-frequency
+  alternative (§4.2) at 100 MHz / SYNC_STAGES=3.
+- §4.3 normative deployment rules added: MUST `SYNC_STAGES ≥ 3` at
+  `f_clk ≥ 250 MHz` on ECP5-class τ; SHOULD `SYNC_STAGES = 4` for
+  life-critical contexts; MAY accept the default `SYNC_STAGES = 2` only
+  when `f_clk ≤ 50 MHz` on ECP5-class τ.
+- Withdrew the prior "future SYNC_STAGES generic recommended" note (the
+  generic landed this wave per PCDN-A-dpram-SYNC_STAGES).
 
 Status: **draft — applies to MODE=DUAL_CLOCK deployments only**.
