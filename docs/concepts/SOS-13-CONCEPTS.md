@@ -1,6 +1,6 @@
 # SOS-13 — Verified-codegen Rust position (`verified-strip` profile)
 
-**Status:** 🟡 drafted 2026-05-23. Awaiting PCDN walkthrough.
+**Status:** 🟢 **ratified 2026-05-23**. All 5 PCDNs walked; resolutions recorded in §15.
 
 ## 0. Authority policy
 
@@ -387,3 +387,19 @@ Five decisions gate ratification. Resolution shape mirrors the EOQ pattern used 
 **Recommendation.** (a). The whole architectural claim of `verified-strip` is "we proved the developer can't violate the contract." Allowing a verified-strip build to ratify at <6/6 contradicts the claim. If a `verified-strip` run produces fewer passing vectors than `dev-keep`, that's empirical evidence that an eligibility decision was wrong, and the fix is to either narrow the eligibility OR the audit trail's discharge-claim. Either way, ratification waits.
 
 **Resolves at.** This doc, before ratification.
+
+## 16. Change log — Ratification
+
+### 2026-05-23 — Ratified (Ira)
+
+All 5 PCDNs walked and resolved:
+
+| PCDN | Resolution |
+|---|---|
+| **001 — Profile granularity** | ✅ **Both**: whole-port `--profile {dev-keep,verified-strip}` flag + per-region chart annotation `<region profile="dev-keep"/>`. Maximum flexibility — supports keeping the active-authoring region in `dev-keep` while stripping the rest. |
+| **002 — Audit-trail file format** | ✅ **JSONL** — one elimination per line. Diff-friendly; consistent with the existing conformance vector format; trivially scriptable. |
+| **003 — Default profile** | ✅ **`dev-keep`** as default; `verified-strip` opt-in via `--profile verified-strip`. Principle of least surprise — verified-strip's panic-strip is irreversible per-build; default-safe Rust posture preserved for unsuspecting users. |
+| **004 — `cfg!(debug_assertions)` interaction** | ✅ **Keep `debug_assert!()` under `verified-strip`** — `debug_assertions` is opt-in per Cargo profile; the two axes (debug vs verified-strip) are independent. `release+verified-strip` retains debug_assert eliminations only if the user separately opts out of debug_assertions via Cargo. |
+| **005 — Bench-validation gate** | ✅ **Mandatory 6/6**: no `verified-strip` build is ratified without passing the SOS-03 conformance suite end-to-end. Hard gate prevents shipping unchecked code that hasn't run through the chart-derived proof. Cost is bench cycles per release; already part of SOS-04/05's gate. |
+
+Status: 🟢 **ratified**. SOS-13 implementation work (extending `tools/sos-codegen/transliterate_rust.py` with the `--profile verified-strip` path + audit-trail JSONL emission) unblocked.

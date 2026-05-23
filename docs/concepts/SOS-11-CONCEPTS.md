@@ -1,6 +1,6 @@
 # SOS-11 — MCP-mediated chart editing
 
-**Status:** 🟡 **drafted 2026-05-23.** Awaiting PCDN walkthrough; ratifies to 🟢 once §15 carries a dated ratification entry and every `PCDN-SOS-11-NNN` below has a chosen value.
+**Status:** 🟢 **ratified 2026-05-23**. All 6 PCDNs walked; resolutions recorded at the end of §15.
 
 **Blocks:** SOS-12 (recursive chart dispatch — the `extract_region_to_subchart` / `inline_subchart` tools land here and the §-numbered legibility-discipline integration lands there).
 
@@ -391,3 +391,18 @@ Initial draft authored against [SOS-07][sos-07] ratification + [`SOS-ROADMAP-07-
 - **PCDN-SOS-11-006 — Canonical `scxml_diff` representation.** §6. Options: (a) unified-diff text (`---`/`+++` of the SCXML payload), (b) structured AST diff (scjson-before / scjson-after JSON), (c) both. Default recommendation: **(c) both** — unified diff for git patches (§8), structured AST diff for the viewer's chart-level render (§9).
 
 Status: 🟡 **drafted, awaiting PCDN walkthrough.** Ratifies to 🟢 once each PCDN above has a chosen value and the corresponding section is updated. SOS-12 (recursive chart dispatch) is partially co-dependent — `extract_region_to_subchart` / `inline_subchart` tool semantics need SOS-12's contract algebra before they are operationally complete; SOS-11 may ratify with these two tools marked as "shipped with SOS-12 contract semantics" forward-cited.
+
+### 2026-05-23 — Ratified (Ira)
+
+All 6 PCDNs walked and resolved:
+
+| PCDN | Resolution |
+|---|---|
+| **001 — Higher-intent tool naming** | ✅ **verb-object** (`add_event_handler_for_state`, `extract_orthogonal_region`). Reads as imperative actions; matches the existing primitive vocabulary. |
+| **002 — Vector-delta representation in result** | ✅ **Both**: summary embedded in tool-call result; full delta retrievable via a separate `get_vector_delta(call_id)` tool call. Default summary keeps responses small; full delta available for review without bloating the common path. |
+| **003 — Lint pass before commit** | ✅ **Mandatory** — failed lint blocks the commit; user resolves before re-trying. Chart stays always-clean; cost is iteration speed during intentional broken-state drafting. |
+| **004 — Commit author attribution** | ✅ **Configurable, default `human-via-agent`**. Commit reads "Ira (via agent X)". Defaults preserve human-visible authorship in chart history; agent-only mode is opt-in for autonomous batches. |
+| **005 — Concurrent edits policy** | ✅ **Serialize at v1** — single-writer model; concurrent edits sequence through the MCP server. Multi-writer (CRDT-like) is a future-phase decision; the simple semantics carry v1 single-developer + small-team workflows. |
+| **006 — `scxml_diff` representation in result** | ✅ **Both**: structured AST as canonical (machine-readable); unified-diff rendered from it on demand for human review. One canonical form underneath; two presentation surfaces. |
+
+Status: 🟢 **ratified**. SOS-11 implementation work (MCP tool catalogue at `tools/sos-codegen/mcp-tools/` or a sibling location; the algebraic-tool-surface implementation; graphical viewer contract handoff to iState) unblocked.

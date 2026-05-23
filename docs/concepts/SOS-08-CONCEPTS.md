@@ -1,6 +1,6 @@
 # SOS-08 — HDL backend (synthesizable VHDL-2008 + SystemVerilog-2017)
 
-**Status:** 🟡 drafted 2026-05-23. Awaiting PCDN walkthrough.
+**Status:** 🟢 **ratified 2026-05-23**. All 11 PCDNs walked; resolutions recorded in §15.
 
 ## 0. Authority policy
 
@@ -319,3 +319,23 @@ This phase's umbrella ratification (after PCDN resolution) unblocks:
 - 11 PCDNs raised covering the umbrella-level decisions that need user input before sub-phase work begins.
 
 Status: 🟡 **drafted**, awaiting PCDN walkthrough.
+
+### 2026-05-23 — Ratified (Ira)
+
+All 11 PCDNs walked and resolved:
+
+| PCDN | Resolution |
+|---|---|
+| **001 — L0 interface shape** | ✅ **Mixed**: ready/valid for data-bearing channels (mailboxes, FIFOs, message channels — AXI-compatible); req/ack for control-only handshakes (mutex grant, event-strobe ack). Both forms are handshake-compatible per INV-S-HDL-1. |
+| **002 — State-encoding default for SOS-08-C** | ✅ **One-hot at v1** (decode-fast, area-cheap on modern FPGAs — the v1 target). Per-region binary override via chart annotation for ASIC-flow opt-in. |
+| **003 — Vendor-IP default at synth time** | ✅ **Portable RTL default**; user opts into vendor IP via `-Dvendor=xilinx` (or `-Dvendor=intel`, `-Dvendor=lattice`) per-primitive at build time. Preserves cross-vendor consistency and the open-source-synth adoption story. |
+| **004 — cocotb-classic vs pyuvm for SOS-08-D** | ✅ **cocotb-classic at v1**. Lowest barrier; full UVM already deferred per EOQ-003. pyuvm-compatible emission is a SOS-08-F follow-on if a customer requests it. |
+| **005 — CDC handshake protocol** | ✅ **Simple form (2-FF synchronizer + ready/valid) at v1**. Multi-cycle-path-constrained optimized form is opt-in per channel via chart annotation. |
+| **006 — Lattice SoC sub-target** | ✅ **ECP5 first** (largest Lattice part supported by Yosys + nextpnr; aligns with the unfunded-team open-source-synth story). iCE40 next. MachXO (proprietary Diamond/Radiant tools) deferred. |
+| **007 — SVA bind file scope per cocotb test** | ✅ **Full bind by default**. Assertion non-trigger is cheap; complete coverage is the verification value. Per-test scoping opt-in for performance-critical regression runs. |
+| **008 — Synth-time elimination of unreachable transitions** | ✅ **Opt-in via `--verified-strip` flag**, parallel to SOS-13's Rust mechanism. Default emission preserves all transitions for debug ease; `--verified-strip` emits `assume false` annotations the synth tool consumes to optimize state-encoding. |
+| **009 — Vector-IR canonical format** | ✅ **JSONL for traces** (one event per line; matches the existing conformance vector format); **JSON for invariants** (structured property definitions). Both schema-validated by the codegen tool. |
+| **010 — Multi-clock-domain chart annotation** | ✅ **`<region clock="domain_b"/>`** attribute on `<state>` and `<parallel>` elements. Chart compiler ensures every cross-domain transition has an `sos_synchronizer` or `sos_fifo_async` between regions (per INV-S-HDL-3). |
+| **011 — Top-level wrapper generation** | ✅ **Generated parameterized wrapper template** in `build/`, NOT a tracked source. Per-board overrides (Lattice ECP5 dev board, generic FPGA dev board, ASIC tape-out wrapper) are board-specific files the user maintains. Top-level wrapper is a generated artifact per INV-SOS-A. |
+
+Status: 🟢 **ratified**. SOS-08 sub-phase concept-doc cycles (SOS-08-A through SOS-08-H) unblocked. SOS-09 (membrane) depends on SOS-08-A/B existing; that dependency chain begins clearing as SOS-08-A ratifies.
