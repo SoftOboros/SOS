@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "sim/sos-sim",
+    "sim/sos-conformance",
+    "ports/m7-rust/sos-m7-rust",
+    "ports/m7-rust/sos-m7-rust-trace",
+    "ports/m7-rust/sos-m7-rust-tests",
+    "ports/m7-rust/sos-m7-rust-host-driver",
+]

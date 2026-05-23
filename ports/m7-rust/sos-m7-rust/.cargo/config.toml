@@ -1,0 +1,19 @@
+# Crate-local cargo config for sos-m7-rust.
+#
+# Pins the cross-compile target and the linker glue cortex-m-rt expects.
+# Scope is crate-local (this file lives next to the crate's Cargo.toml);
+# the parent SOS workspace is unaffected — sim/sos-sim and
+# sim/sos-conformance continue to build for the host target.
+#
+# Per SOS-04-CONCEPTS.md §8: the canonical build command is
+#   cargo build --target thumbv7em-none-eabihf --release -p sos-m7-rust
+# but invoking from inside this crate's directory uses the default below.
+
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+rustflags = [
+  "-C", "link-arg=-Tlink.x",
+  "-C", "target-cpu=cortex-m7",
+]

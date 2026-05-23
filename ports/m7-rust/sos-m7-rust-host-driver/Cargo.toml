@@ -1,0 +1,48 @@
+# sos-m7-rust-host-driver — host-side adapter binary for the SOS-04 M7
+# Rust reference port. Sits between the `sos-conformance` harness (which
+# invokes it as `--port <bin>` per SOS-03 §7.6) and the disco-analyzer
+# firmware (`sos-m7-rust`) running on the STM32H747I-DISCO CM7 core.
+#
+# Contract (per SOS-04 §7.1):
+#   - Read a wrapped vector JSON `{"name": ..., "config": ..., "input":
+#     [...]}` from stdin (SOS-03 §7.6, as realised by `SubprocessPort`).
+#   - Open the host serial device given by `--port <tty>`; write the JSON
+#     verbatim (newline-terminated) to UART TX at the configured baud.
+#   - Read `\n`-terminated JSONL lines from UART RX. Emit each on stdout.
+#   - Filter the firmware's `{"__sos_done": true}` done sentinel (per
+#     SOS-04 PCDN-005 adapter-filtered ratification + INV-S-PORT-12);
+#     never emit it on stdout. Exit cleanly when seen.
+#   - Bail with non-zero exit after PCDN-014 (30 s default) wall-clock
+#     timeout if no sentinel arrives.
+#
+# This crate is HOST-only — compiles for the operator's Mac/Linux
+# workstation (NOT cross-compiled for ARM). It links no kernel logic.
+
+[package]
+name = "sos-m7-rust-host-driver"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Host-side UART adapter bridging sos-conformance stdin/stdout to the disco-analyzer SOS-04 firmware."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "sos-m7-rust-host-driver"
+path = "src/main.rs"
+
+[lib]
+name = "sos_m7_rust_host_driver"
+path = "src/lib.rs"
+
+[dependencies]
+# PCDN-SOS-04-017: serialport = "4" (current 4.x). Mature, cross-platform
+# (Linux + macOS), blocking-by-default — matches the harness's synchronous
+# I/O model. tokio-serial would pull in tokio at the host side for no
+# benefit; hand-rolled nix+termios is ~150 LOC of platform-specific code
+# `serialport` already solves.
+serialport = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

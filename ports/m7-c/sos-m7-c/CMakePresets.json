@@ -1,0 +1,42 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 20,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "m7-c",
+            "displayName": "SOS-05 M7 C — Conformance (Release)",
+            "description": "Release build for bench-flash. arm-none-eabi-gcc 13.2.Rel1 per PCDN-SOS-05-006.",
+            "generator": "Unix Makefiles",
+            "binaryDir": "${sourceDir}/build/m7-c",
+            "toolchainFile": "${sourceDir}/toolchain-arm-none-eabi.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "m7-c-debug",
+            "displayName": "SOS-05 M7 C — Debug",
+            "description": "Debug build for in-bench probe-rs sessions (-Og -g3).",
+            "generator": "Unix Makefiles",
+            "binaryDir": "${sourceDir}/build/m7-c-debug",
+            "toolchainFile": "${sourceDir}/toolchain-arm-none-eabi.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "m7-c",
+            "configurePreset": "m7-c"
+        },
+        {
+            "name": "m7-c-debug",
+            "configurePreset": "m7-c-debug"
+        }
+    ]
+}

@@ -1,0 +1,38 @@
+# sos-m7-rust-tests — host-target unit tests for the SOS-04 M7 Rust
+# port's hand-rolled JSON writer (PCDN-SOS-04-018; covers the
+# PCDN-SOS-04-008 byte-stability concern).
+#
+# This crate is host-only by design — it depends on `sos-sim` (the
+# canonical reference implementation) and `serde_json` to produce
+# byte-exact reference traces, then asserts the firmware writer's
+# output matches exactly. It does NOT depend on `sos-m7-rust` (the
+# firmware crate) directly — that crate pulls in `cortex-m` and
+# `cortex-m-rt` which cannot link on the host. Instead, it depends on
+# `sos-m7-rust-trace`, the sibling pure-logic crate that holds the
+# writer's body; the firmware adapter is a one-page translation from
+# `kernel::Datamodel` to `TraceInput` which is exercised end-to-end on
+# the bench by the SOS-03 conformance harness.
+
+[package]
+name = "sos-m7-rust-tests"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Host-side byte-equality tests for the SOS M7 Rust trace writer."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+# Empty library — the tests live in `tests/` and depend on this crate
+# only for the dev-dependency graph.
+name = "sos_m7_rust_tests"
+path = "src/lib.rs"
+
+[dependencies]
+# The pure-logic writer under test.
+sos-m7-rust-trace = { path = "../sos-m7-rust-trace" }
+# The canonical reference implementation. Pulls in serde derives.
+sos-sim = { path = "../../../sim/sos-sim" }
+# JSON serialiser — produces the reference bytes the firmware writer
+# must match.
+serde_json = "1"

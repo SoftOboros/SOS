@@ -1,0 +1,10 @@
+# Pinned Rust toolchain for the SOS workspace.
+#
+# SOS-02 PCDN-SOS-02-004 ratified MSRV = 1.75 (stable late-2023, supports
+# `let-else`, no nightly features required). We pin to `stable` here and
+# enforce the MSRV via `rust-version = "1.75"` in `sim/sos-sim/Cargo.toml`,
+# matching the conventional layout for late-2026 Rust projects.
+
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

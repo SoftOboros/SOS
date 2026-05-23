@@ -1,0 +1,21 @@
+# Rust build artifacts
+target/
+**/target/
+
+# CMake / C build trees
+ports/m7-c/sos-m7-c/build/
+ports/m7-c/sos-m7-c-host-driver/build/
+
+# IDE / editor noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Python caches inside tools/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+
+# Local cache / scratch
+*.bak

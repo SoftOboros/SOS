@@ -1,0 +1,580 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  rtos_kernel.scxml
+
+  Minimal preemptive priority-based RTOS kernel modeled as SCXML.
+  FreeRTOS-style primitives: tasks (8 prio levels), counting/binary
+  semaphores, bounded message queues, tick-delays, critical sections,
+  scheduler suspend.
+
+  Datamodel: ecmascript
+
+  Syscall ABI:
+    Event name carries the request, _event.data is the parameter struct.
+    Caller reads `rc` (immediate) and `tcb[id].msg` (deposited at unblock).
+
+  Concurrency model:
+    <parallel id="running"> hosts four orthogonal regions that share the
+    datamodel. Mutation safety is provided by the SCXML run-to-completion
+    semantic: only one transition's executable content runs at a time.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="boot">
+
+  <!-- =================================================================== -->
+  <!--  DATAMODEL                                                          -->
+  <!-- =================================================================== -->
+  <datamodel>
+    <!-- Configuration constants -->
+    <data id="MAX_TASKS"   expr="8"/>
+    <data id="MAX_PRIO"    expr="8"/>      <!-- 0=idle, MAX_PRIO-1=highest -->
+    <data id="MAX_SEMS"    expr="8"/>
+    <data id="MAX_QUEUES"  expr="4"/>
+    <data id="Q_DEPTH"     expr="16"/>
+
+    <!-- Task states -->
+    <data id="ST_DORMANT" expr="0"/>
+    <data id="ST_READY"   expr="1"/>
+    <data id="ST_RUNNING" expr="2"/>
+    <data id="ST_DELAY"   expr="3"/>
+    <data id="ST_BLK_SEM" expr="4"/>
+    <data id="ST_BLK_QS"  expr="5"/>       <!-- blocked sending  -->
+    <data id="ST_BLK_QR"  expr="6"/>       <!-- blocked receiving -->
+    <data id="ST_SUSPEND" expr="7"/>
+
+    <!-- Return codes -->
+    <data id="RC_OK"      expr="0"/>
+    <data id="RC_TIMEOUT" expr="-1"/>
+    <data id="RC_FULL"    expr="-2"/>
+    <data id="RC_EMPTY"   expr="-3"/>
+    <data id="RC_INVAL"   expr="-4"/>
+
+    <!-- Kernel state (populated in <boot>) -->
+    <data id="tcb"        expr="[]"/>      <!-- task control blocks -->
+    <data id="ready"      expr="[]"/>      <!-- ready[prio] = [tid,...] -->
+    <data id="current"    expr="-1"/>      <!-- running tid, -1=none -->
+    <data id="tick_count" expr="0"/>
+    <data id="resched"    expr="false"/>
+
+    <!-- Protection -->
+    <data id="irq_nest"   expr="0"/>       <!-- critical section depth -->
+    <data id="sched_lock" expr="0"/>       <!-- scheduler suspend depth -->
+    <data id="pend_ticks" expr="0"/>       <!-- ticks deferred while locked -->
+
+    <!-- Sync objects -->
+    <data id="sems"       expr="[]"/>      <!-- {valid,count,max,waiters[]} -->
+    <data id="queues"     expr="[]"/>      <!-- {valid,buf[],cap,count,sendw[],recvw[]} -->
+
+    <!-- Last syscall immediate result -->
+    <data id="rc"         expr="0"/>
+  </datamodel>
+
+  <!-- =================================================================== -->
+  <!--  HELPERS                                                            -->
+  <!-- =================================================================== -->
+  <script><![CDATA[
+
+    // Initialize parallel ready queues, one per priority.
+    function readyq_init() {
+      ready = [];
+      for (var i = 0; i < MAX_PRIO; i++) ready.push([]);
+    }
+
+    // Push tid onto tail of its priority queue, mark READY.
+    function ready_push(tid) {
+      ready[tcb[tid].prio].push(tid);
+      tcb[tid].state = ST_READY;
+    }
+
+    // Remove tid from its priority queue (no-op if absent).
+    function ready_remove(tid) {
+      var p = tcb[tid].prio;
+      var idx = ready[p].indexOf(tid);
+      if (idx >= 0) ready[p].splice(idx, 1);
+    }
+
+    // Pop highest-priority ready task (FIFO within priority). -1 if none.
+    function ready_pop_highest() {
+      for (var p = MAX_PRIO - 1; p >= 0; p--) {
+        if (ready[p].length > 0) return ready[p].shift();
+      }
+      return -1;
+    }
+
+    // Insert tid into a waiter list ordered by priority descending,
+    // FIFO within priority. Used for sems and queue send/recv waiters.
+    function waiters_insert(arr, tid) {
+      var p = tcb[tid].prio;
+      var i = 0;
+      while (i < arr.length && tcb[arr[i]].prio >= p) i++;
+      arr.splice(i, 0, tid);
+    }
+
+    // Block currently running task on an object with optional deadline.
+    // deadline=0 means infinite wait.
+    function block_current(state_code, obj_id, deadline) {
+      tcb[current].state    = state_code;
+      tcb[current].blk_obj  = obj_id;
+      tcb[current].deadline = deadline;
+      current = -1;
+      resched = true;
+    }
+
+    // Move tid back to READY, clear block info, request reschedule.
+    function unblock(tid) {
+      tcb[tid].deadline = 0;
+      tcb[tid].blk_obj  = -1;
+      ready_push(tid);
+      resched = true;
+    }
+
+    // Cancel a tid's waiter slot when timing out. obj_id and which list
+    // are inferred from the task's blocked state.
+    function waiter_cancel(tid) {
+      var t = tcb[tid];
+      var lst = null;
+      if      (t.state == ST_BLK_SEM) lst = sems[t.blk_obj].waiters;
+      else if (t.state == ST_BLK_QS)  lst = queues[t.blk_obj].sendw;
+      else if (t.state == ST_BLK_QR)  lst = queues[t.blk_obj].recvw;
+      if (lst) {
+        var i = lst.indexOf(tid);
+        if (i >= 0) lst.splice(i, 1);
+      }
+    }
+
+    // Scheduler step: if a higher-priority READY task exists, switch.
+    // Round-robin within priority: re-queue current at tail before pop.
+    function pick_next() {
+      if (current >= 0 && tcb[current].state == ST_RUNNING) {
+        // Place running task at tail of its priority for round-robin.
+        tcb[current].state = ST_READY;
+        ready[tcb[current].prio].push(current);
+      }
+      var n = ready_pop_highest();
+      if (n >= 0) {
+        tcb[n].state = ST_RUNNING;
+        current = n;
+      } else {
+        current = -1;
+      }
+      resched = false;
+    }
+
+  ]]></script>
+
+  <!-- =================================================================== -->
+  <!--  BOOT                                                               -->
+  <!-- =================================================================== -->
+  <state id="boot" position_x="350" position_y="20">
+    <onentry>
+      <script><![CDATA[
+        readyq_init();
+
+        // Allocate TCB pool. Task 0 reserved as idle at priority 0.
+        for (var i = 0; i < MAX_TASKS; i++) {
+          tcb.push({ id: i, prio: 0, state: ST_DORMANT,
+                     deadline: 0, blk_obj: -1, msg: null });
+        }
+        tcb[0].prio = 0;
+        ready_push(0);
+
+        // Allocate sem and queue pools as invalid descriptors.
+        for (var i = 0; i < MAX_SEMS; i++)
+          sems.push({ valid: false, count: 0, max: 0, waiters: [] });
+        for (var i = 0; i < MAX_QUEUES; i++)
+          queues.push({ valid: false, buf: [], cap: 0, count: 0,
+                        sendw: [], recvw: [] });
+
+        // Bring idle to RUNNING.
+        pick_next();
+      ]]></script>
+      <raise event="kernel.boot.done"/>
+    </onentry>
+    <transition event="kernel.boot.done" target="running"/>
+  </state>
+
+  <!-- =================================================================== -->
+  <!--  RUNNING: four concurrent kernel regions                            -->
+  <!-- =================================================================== -->
+  <parallel id="running" position_x="20" position_y="150">
+
+    <!-- ----------------------------------------------------------------- -->
+    <!--  SCHEDULER                                                         -->
+    <!--  Listens for sched.run. While sched_lock>0, defers context switch. -->
+    <!-- ----------------------------------------------------------------- -->
+    <state id="scheduler" initial="sched_idle" position_x="40" position_y="200">
+      <state id="sched_idle" position_x="60" position_y="270">
+        <!-- Permitted: run scheduler when lock is clear -->
+        <transition event="sched.run" cond="sched_lock == 0">
+          <script>pick_next();</script>
+        </transition>
+        <!-- Locked: drop, will be re-raised on sched.resume -->
+        <transition event="sched.run" cond="sched_lock &gt; 0"/>
+      </state>
+    </state>
+
+    <!-- ----------------------------------------------------------------- -->
+    <!--  TICK SERVICE                                                      -->
+    <!--  sys.tick from external timer ISR. Advances time, expires delays   -->
+    <!--  and timeouts. Defers tick processing while protected.             -->
+    <!-- ----------------------------------------------------------------- -->
+    <state id="tick_service" initial="tick_idle" position_x="220" position_y="200">
+      <state id="tick_idle" position_x="240" position_y="270">
+        <transition event="sys.tick">
+          <script><![CDATA[
+            if (irq_nest > 0 || sched_lock > 0) {
+              // Cannot mutate ready queue safely; defer.
+              pend_ticks++;
+            } else {
+              tick_count++;
+              for (var i = 0; i < MAX_TASKS; i++) {
+                var t = tcb[i];
+
+                // Pure delay expiration
+                if (t.state == ST_DELAY && t.deadline <= tick_count) {
+                  t.msg = RC_OK;
+                  unblock(i);
+                  continue;
+                }
+                // Timeout on a blocked-with-deadline task
+                if ((t.state == ST_BLK_SEM ||
+                     t.state == ST_BLK_QS  ||
+                     t.state == ST_BLK_QR) &&
+                    t.deadline > 0 && t.deadline <= tick_count) {
+                  waiter_cancel(i);
+                  t.msg = RC_TIMEOUT;
+                  unblock(i);
+                }
+              }
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+      </state>
+    </state>
+
+    <!-- ----------------------------------------------------------------- -->
+    <!--  SYSCALLS                                                          -->
+    <!--  Each external syscall event mutates kernel state and raises       -->
+    <!--  sched.run. Caller polls `rc` immediately; if blocked, the         -->
+    <!--  ultimate result is deposited at unblock in tcb[id].msg.           -->
+    <!-- ----------------------------------------------------------------- -->
+    <state id="syscalls" initial="sys_idle" position_x="400" position_y="200">
+      <state id="sys_idle" position_x="420" position_y="270">
+
+        <!-- =========== Task ops ============================ -->
+
+        <!-- _event.data: { id, prio }  -->
+        <transition event="task.create">
+          <script><![CDATA[
+            var d = _event.data;
+            var t = tcb[d.id];
+            if (t.state != ST_DORMANT) { rc = RC_INVAL; }
+            else {
+              t.prio    = d.prio;
+              t.deadline = 0;
+              t.blk_obj  = -1;
+              t.msg      = null;
+              ready_push(d.id);
+              resched = true;
+              rc = RC_OK;
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <!-- _event.data: { ticks }   ticks<=0 acts as yield -->
+        <transition event="task.delay">
+          <script><![CDATA[
+            var n = _event.data.ticks;
+            if (n > 0) {
+              block_current(ST_DELAY, -1, tick_count + n);
+            } else {
+              resched = true;
+            }
+            rc = RC_OK;
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <transition event="task.yield">
+          <script>resched = true; rc = RC_OK;</script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <!-- _event.data: { id } -->
+        <transition event="task.suspend">
+          <script><![CDATA[
+            var id = _event.data.id;
+            var s  = tcb[id].state;
+            if (s == ST_READY) {
+              ready_remove(id);
+              tcb[id].state = ST_SUSPEND;
+              rc = RC_OK;
+            } else if (s == ST_RUNNING) {
+              tcb[id].state = ST_SUSPEND;
+              current = -1;
+              resched = true;
+              rc = RC_OK;
+            } else {
+              rc = RC_INVAL;  // suspend of blocked task not modeled
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <!-- _event.data: { id } -->
+        <transition event="task.resume">
+          <script><![CDATA[
+            var id = _event.data.id;
+            if (tcb[id].state == ST_SUSPEND) {
+              ready_push(id);
+              resched = true;
+              rc = RC_OK;
+            } else {
+              rc = RC_INVAL;
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <!-- =========== Semaphore ops ======================= -->
+
+        <!-- _event.data: { id, initial, max }  binary => max=1 -->
+        <transition event="sem.create">
+          <script><![CDATA[
+            var d = _event.data;
+            var s = sems[d.id];
+            s.valid   = true;
+            s.count   = d.initial;
+            s.max     = d.max;
+            s.waiters = [];
+            rc = RC_OK;
+          ]]></script>
+        </transition>
+
+        <!-- _event.data: { sid, timeout }
+             timeout: 0=no wait, -1=forever, >0=ticks -->
+        <transition event="sem.take">
+          <script><![CDATA[
+            var d = _event.data;
+            var s = sems[d.sid];
+            if (!s.valid) { rc = RC_INVAL; }
+            else if (s.count > 0) {
+              s.count--;
+              rc = RC_OK;
+            } else if (d.timeout == 0) {
+              rc = RC_TIMEOUT;
+            } else {
+              var dl = (d.timeout < 0) ? 0 : tick_count + d.timeout;
+              waiters_insert(s.waiters, current);
+              block_current(ST_BLK_SEM, d.sid, dl);
+              rc = RC_OK;   // final result delivered via tcb[current].msg
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <!-- _event.data: { sid } -->
+        <transition event="sem.give">
+          <script><![CDATA[
+            var s = sems[_event.data.sid];
+            if (!s.valid) { rc = RC_INVAL; }
+            else if (s.waiters.length > 0) {
+              var w = s.waiters.shift();
+              tcb[w].msg = RC_OK;
+              unblock(w);
+              rc = RC_OK;
+            } else if (s.count < s.max) {
+              s.count++;
+              rc = RC_OK;
+            } else {
+              rc = RC_FULL;
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <!-- ISR-safe variant; never blocks, never assumes current task -->
+        <transition event="sem.give_from_isr">
+          <script><![CDATA[
+            var s = sems[_event.data.sid];
+            if (s.valid) {
+              if (s.waiters.length > 0) {
+                var w = s.waiters.shift();
+                tcb[w].msg = RC_OK;
+                unblock(w);
+              } else if (s.count < s.max) {
+                s.count++;
+              }
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <!-- =========== Message queue ops ==================== -->
+
+        <!-- _event.data: { id, cap } -->
+        <transition event="queue.create">
+          <script><![CDATA[
+            var d = _event.data;
+            var q = queues[d.id];
+            q.valid = true;
+            q.cap   = d.cap;
+            q.buf   = [];
+            q.count = 0;
+            q.sendw = [];
+            q.recvw = [];
+            rc = RC_OK;
+          ]]></script>
+        </transition>
+
+        <!-- _event.data: { qid, msg, timeout } -->
+        <transition event="queue.send">
+          <script><![CDATA[
+            var d = _event.data;
+            var q = queues[d.qid];
+            if (!q.valid) { rc = RC_INVAL; }
+            else if (q.recvw.length > 0) {
+              // Direct handoff: skip buffer
+              var w = q.recvw.shift();
+              tcb[w].msg = d.msg;
+              unblock(w);
+              rc = RC_OK;
+            } else if (q.count < q.cap) {
+              q.buf.push(d.msg);
+              q.count++;
+              rc = RC_OK;
+            } else if (d.timeout == 0) {
+              rc = RC_FULL;
+            } else {
+              var dl = (d.timeout < 0) ? 0 : tick_count + d.timeout;
+              tcb[current].msg = d.msg;   // pending payload
+              waiters_insert(q.sendw, current);
+              block_current(ST_BLK_QS, d.qid, dl);
+              rc = RC_OK;
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <!-- _event.data: { qid, timeout } -->
+        <transition event="queue.receive">
+          <script><![CDATA[
+            var d = _event.data;
+            var q = queues[d.qid];
+            if (!q.valid) { rc = RC_INVAL; }
+            else if (q.count > 0) {
+              var m = q.buf.shift();
+              q.count--;
+              tcb[current].msg = m;
+              // Pull from blocked sender if any (buffered case)
+              if (q.sendw.length > 0) {
+                var w = q.sendw.shift();
+                q.buf.push(tcb[w].msg);
+                q.count++;
+                tcb[w].msg = RC_OK;
+                unblock(w);
+              }
+              rc = RC_OK;
+            } else if (q.sendw.length > 0) {
+              // Zero-capacity or contended path: direct handoff
+              var w = q.sendw.shift();
+              tcb[current].msg = tcb[w].msg;
+              tcb[w].msg = RC_OK;
+              unblock(w);
+              rc = RC_OK;
+            } else if (d.timeout == 0) {
+              rc = RC_EMPTY;
+            } else {
+              var dl = (d.timeout < 0) ? 0 : tick_count + d.timeout;
+              waiters_insert(q.recvw, current);
+              block_current(ST_BLK_QR, d.qid, dl);
+              rc = RC_OK;
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <!-- _event.data: { qid, msg } -->
+        <transition event="queue.send_from_isr">
+          <script><![CDATA[
+            var d = _event.data;
+            var q = queues[d.qid];
+            if (q.valid) {
+              if (q.recvw.length > 0) {
+                var w = q.recvw.shift();
+                tcb[w].msg = d.msg;
+                unblock(w);
+              } else if (q.count < q.cap) {
+                q.buf.push(d.msg);
+                q.count++;
+              }
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+      </state>
+    </state>
+
+    <!-- ----------------------------------------------------------------- -->
+    <!--  PROTECTION                                                        -->
+    <!--  Critical section nesting and scheduler suspend nesting. Both      -->
+    <!--  defer reschedule and tick processing. On unlock, deferred ticks   -->
+    <!--  are flushed and a reschedule is requested.                        -->
+    <!-- ----------------------------------------------------------------- -->
+    <state id="protection" initial="prot_idle" position_x="580" position_y="200">
+      <state id="prot_idle" position_x="600" position_y="270">
+
+        <transition event="crit.enter">
+          <script>irq_nest++;</script>
+        </transition>
+
+        <transition event="crit.exit">
+          <script><![CDATA[
+            if (irq_nest > 0) irq_nest--;
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+        <transition event="sched.suspend">
+          <script>sched_lock++;</script>
+        </transition>
+
+        <transition event="sched.resume">
+          <script><![CDATA[
+            if (sched_lock > 0) sched_lock--;
+            if (sched_lock == 0 && pend_ticks > 0) {
+              // Flush deferred ticks; replay deadline checks.
+              while (pend_ticks > 0) {
+                pend_ticks--;
+                tick_count++;
+                for (var i = 0; i < MAX_TASKS; i++) {
+                  var t = tcb[i];
+                  if (t.state == ST_DELAY && t.deadline <= tick_count) {
+                    t.msg = RC_OK;
+                    unblock(i);
+                  } else if ((t.state == ST_BLK_SEM ||
+                              t.state == ST_BLK_QS  ||
+                              t.state == ST_BLK_QR) &&
+                             t.deadline > 0 && t.deadline <= tick_count) {
+                    waiter_cancel(i);
+                    t.msg = RC_TIMEOUT;
+                    unblock(i);
+                  }
+                }
+              }
+            }
+          ]]></script>
+          <raise event="sched.run"/>
+        </transition>
+
+      </state>
+    </state>
+
+  </parallel>
+
+</scxml>

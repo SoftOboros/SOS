@@ -1,0 +1,45 @@
+# SOS-01 SCXML lint CI gate.
+#
+# Specified by docs/concepts/SOS-01-CONCEPTS.md §7. The workflow validates
+# rtos_kernel.scxml against the vendored W3C SCXML 1.0 XSD and runs the
+# in-repo lint runner. Any error-severity finding fails the job
+# (INV-S-LINT-1, INV-S-LINT-8).
+
+name: scxml-lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rtos_kernel.scxml'
+      - 'docs/REFERENCE.md'
+      - 'docs/specs/scxml.xsd'
+      - 'tools/scxml-lint/**'
+      - '.github/workflows/scxml-lint.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'rtos_kernel.scxml'
+      - 'docs/REFERENCE.md'
+      - 'docs/specs/scxml.xsd'
+      - 'tools/scxml-lint/**'
+      - '.github/workflows/scxml-lint.yml'
+
+jobs:
+  scxml-lint:
+    name: scxml-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install lint runner dependencies
+        run: pip install -r tools/scxml-lint/requirements.txt
+
+      - name: Run scxml-lint
+        run: python tools/scxml-lint/main.py rtos_kernel.scxml

@@ -1,0 +1,29 @@
+# sos-m7-rust-trace — pure-logic JSON trace writer for the SOS-04 M7 Rust
+# port. Extracted into a sibling `no_std` crate so the host-side test
+# crate (`sos-m7-rust-tests`, PCDN-SOS-04-018) can exercise the writer
+# without dragging in `cortex-m` / `cortex-m-rt`. The firmware crate
+# (`sos-m7-rust`) re-uses it via a thin adapter in its own `trace.rs`.
+#
+# Architecture choice (per the agent-dispatch prompt for SOS-04 phase 3):
+# the writer's input is a `TraceInput<'a>` struct of borrowed slices that
+# mirror the trace-relevant subset of `sos-m7-rust::kernel::Datamodel`.
+# Both the firmware adapter and the host tests construct `TraceInput`
+# values; the writer itself is a pure function on `&TraceInput`.
+
+[package]
+name = "sos-m7-rust-trace"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Hand-rolled SOS-02 §7 JSONL trace writer (no_std, host-testable)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "sos_m7_rust_trace"
+path = "src/lib.rs"
+
+[dependencies]
+# No dependencies. core::fmt::Write + integer formatting are sufficient
+# for SOS-02 §7's JSONL grammar; INV-S-PORT-9 makes adding a dependency
+# strictly worse than the ~300 LOC hand-rolled writer.

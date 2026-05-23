@@ -1,0 +1,43 @@
+# sos-m7-rust — the SOS-04 M7 Rust reference port (skeleton).
+#
+# Per SOS-04-CONCEPTS.md §6.1 (crate layout) and §15 ratification.
+# Targets thumbv7em-none-eabihf; flashed to the STM32H747I-DISCO CM7.
+# Skeleton commit only — kernel/handler bodies + JSON writer + host
+# adapter land in subsequent commits.
+
+[package]
+name = "sos-m7-rust"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "SOS M7 Rust reference port (firmware crate; thumbv7em-none-eabihf)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "sos-m7-rust"
+path = "src/main.rs"
+
+[dependencies]
+# §4 source-of-truth map: pinned to the surfaces SOS-00 §4 enumerates.
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+stm32h7 = { version = "0.15", features = ["stm32h747cm7"] }
+heapless = "0.8"
+# Pure-logic JSONL writer (PCDN-SOS-04-008 + PCDN-SOS-04-018). Lives in
+# a sibling `no_std` crate so the host-side `sos-m7-rust-tests` crate
+# can exercise the writer without dragging in cortex-m / cortex-m-rt.
+sos-m7-rust-trace = { path = "../sos-m7-rust-trace" }
+
+[features]
+# PCDN-SOS-04-015: one feature gate at v1 — selects Standalone mode
+# (compiled-in static smoke vector) per PCDN-SOS-04-004.
+standalone-smoke = []
+
+# Note: the release / dev profile choices required by SOS-04-CONCEPTS.md
+# §6.1 (`lto = "fat"`, `codegen-units = 1`, `opt-level = "s"`,
+# `panic = "abort"`) belong at the workspace root because cargo ignores
+# `[profile.*]` tables on non-root members. Profile placement lands in
+# the implementation phase together with the host-adapter crate so the
+# workspace's host crates can keep their own (host-friendly) profile.

@@ -1,0 +1,21 @@
+# .clang-tidy — SOS-05 M7 C port static-analysis configuration.
+#
+# Per SOS-05-CONCEPTS.md PCDN-SOS-05-005. The check list captures the
+# classes of bugs that matter for embedded firmware (bug-prone patterns,
+# CERT C compliance, portability) without inviting bikeshedding over
+# style. WarningsAsErrors stays empty at v1 — warnings are upgrades-to-
+# errors via a future amendment when the implementation surface has
+# enough volume for a stable signal.
+
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  misc-*,
+  portability-*,
+  readability-*,
+  clang-analyzer-*
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*/include/sos/.*'
+FormatStyle: file
