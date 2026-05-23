@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-08-C wave-2 fixture: a single-region SCXML chart whose source
+  state has TWO outgoing transitions, the first guarded with
+  `cond="counter > 0"` and the second unguarded (default fall-through).
+
+  Drives the cross-dialect integration suite at
+  `tests/test_hdl_wave_2_integration.py::TestSingleGuardedTransition`:
+
+   - VHDL emit produces the standard `if (<expr>) then state_next <= <T>;
+     else state_next <= state_q;` arm (SOS-08-C §5.2 + §6.3 transition mux
+     priority discipline + guard compilation table).
+   - SystemVerilog emit produces `if (<expr>) state_next = <T>; else
+     state_next = state_q;` (same shape, dialect-localised).
+   - Document-order priority (SOS-08-C §5.2) places the guarded arm
+     first; the unguarded "default" arm comes second.
+
+  Shape:
+    - one region; three states: idle, ready, done.
+    - <datamodel>: one entry `counter` with initial expression `0`,
+      providing the signal that the guard references (per §5.4 the
+      signal is registered + exposed at the FSM port surface).
+    - idle  -> ready  on `tick`, cond="counter > 0"   (guarded; depth 1)
+    - idle  -> ready  on `tick`                       (unguarded default)
+    - ready -> done   on `stop`                       (unguarded)
+
+  Cited spec rules:
+    - SOS-08-C §5.2 (document-order priority for transition mux).
+    - SOS-08-C §5.3 (guard expression compilation table; depth budget
+      8 per PCDN-C-004 / §15 amendment).
+    - SOS-08-C §5.4 (datamodel signal typing — `counter` is i32-default).
+    - INV-S-HDL-C-4 (guard expression is synthesizable).
+
+  Excluded:
+    - <parallel>, <script>, multi-clock-domain annotations.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="idle">
+
+  <datamodel>
+    <data id="counter" expr="0"/>
+  </datamodel>
+
+  <state id="idle">
+    <!-- First (guarded) transition: per §5.2 the first arm whose guard
+         evaluates true wins. The chart-author-visible priority is the
+         document order of the <transition> children of this state. -->
+    <transition event="tick" cond="counter &gt; 0" target="ready"/>
+    <!-- Second (unguarded) transition: serves as the unconditional
+         fall-through arm for the wave-2 priority mux. -->
+    <transition event="tick" target="ready"/>
+  </state>
+
+  <state id="ready">
+    <transition event="stop" target="done"/>
+  </state>
+
+  <state id="done">
+    <!-- sink -->
+  </state>
+
+</scxml>

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-08-C wave-2 fixture: a single-region SCXML chart whose source
+  state has THREE outgoing transitions, each carrying a distinct
+  `cond` attribute. The chart exercises the priority-chain shape
+  ratified at SOS-08-C §5.2:
+
+    VHDL  -> if (a == 1) then ... elsif (b > 5) then ... elsif (c != 0)
+             then ... else state_next <= state_q;
+    SV    -> if (a == 1) ...
+             else if (b > 5) ...
+             else if (c != 0) ...
+             else state_next = state_q;
+
+  Drives `TestMultipleGuardedTransitions` in the wave-2 integration
+  suite. The test inspects the EMITTED order of guard conditions to
+  prove document-order priority (SOS-08-C §5.2; PCDN-SOS-08-C-006's
+  lint rule SCXML-LINT-C-1 surfaces the priority dependence at
+  chart-compile time but does NOT reorder).
+
+  Shape:
+    - one region; four states: choose, alpha, beta, gamma.
+    - <datamodel>: three entries `a`, `b`, `c` (i32-default per §5.4).
+    - choose -> alpha on `eval`, cond="a == 1"   (depth 1)
+    - choose -> beta  on `eval`, cond="b > 5"    (depth 1)
+    - choose -> gamma on `eval`, cond="c != 0"   (depth 1)
+
+  Cited spec rules:
+    - SOS-08-C §5.2 (document-order priority).
+    - SOS-08-C §5.3 (guard expression compilation: ==, >, !=).
+    - SOS-08-C §6.3 (transition mux compilation surface).
+    - INV-S-HDL-C-4 (guard expression is synthesizable).
+    - PCDN-SOS-08-C-006 (resolved 2026-05-23): SCXML-LINT-C-1 warns
+      when two transitions in the same source state could
+      simultaneously be guard-true under bounded reachability.
+
+  Excluded:
+    - <parallel>, <script>, multi-clock-domain annotations.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="choose">
+
+  <datamodel>
+    <data id="a" expr="0"/>
+    <data id="b" expr="0"/>
+    <data id="c" expr="0"/>
+  </datamodel>
+
+  <state id="choose">
+    <!-- Document order = priority order. The first matching guard
+         wins; subsequent arms are unreachable on that cycle. -->
+    <transition event="eval" cond="a == 1" target="alpha"/>
+    <transition event="eval" cond="b &gt; 5" target="beta"/>
+    <transition event="eval" cond="c != 0" target="gamma"/>
+  </state>
+
+  <state id="alpha">
+    <!-- sink -->
+  </state>
+
+  <state id="beta">
+    <!-- sink -->
+  </state>
+
+  <state id="gamma">
+    <!-- sink -->
+  </state>
+
+</scxml>

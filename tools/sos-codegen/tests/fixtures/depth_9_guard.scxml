@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-08-C wave-2 fixture: a chart whose single transition carries a
+  guard expression with NINE chained `and` operators (depth 9).
+
+  Per PCDN-SOS-08-C-004 (resolved 2026-05-23) the emitter publishes
+  a guard-depth budget of 8 chained operators; deeper guards SHALL be
+  rejected at codegen time with a chart-vocabulary failure (per
+  INV-S-HDL-5 / INV-S-HDL-C-4) and SCXML-LINT-C-2 fires at chart-
+  compile time before the codegen tool ever runs.
+
+  This fixture exists ONLY to drive the over-budget rejection test
+  `TestDepth9GuardRejected` in the wave-2 integration suite. The
+  failure message MUST cite both the guard's measured depth (9) and
+  the configured budget (8) so the chart author sees a chart-
+  vocabulary error rather than an opaque RTL-synth-tool error.
+
+  Cited spec rules:
+    - PCDN-SOS-08-C-004 (resolved): guard-depth budget = 8 chained
+      operators; reject at codegen-time with chart-vocabulary message.
+    - INV-S-HDL-C-4 (post-§15 amendment): "guard expressions are
+      bounded at default depth 8 combinational operators".
+    - INV-S-HDL-5 (chart-vocabulary traceability).
+
+  The depth-9 expression below uses nine top-level `&&` operators
+  spanning ten datamodel signals (a..j); per
+  `hdl_common.compute_guard_depth` each `&&` contributes one operator
+  unit. The cond attribute is written with `&amp;&amp;` so the XML
+  attribute value is the literal `&&` that the walker measures.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="busy">
+
+  <datamodel>
+    <data id="a" expr="0"/><data id="b" expr="0"/><data id="c" expr="0"/>
+    <data id="d" expr="0"/><data id="e" expr="0"/><data id="f" expr="0"/>
+    <data id="g" expr="0"/><data id="h" expr="0"/><data id="i" expr="0"/>
+    <data id="j" expr="0"/>
+  </datamodel>
+
+  <state id="busy">
+    <transition event="tick"
+                cond="a &amp;&amp; b &amp;&amp; c &amp;&amp; d &amp;&amp; e &amp;&amp; f &amp;&amp; g &amp;&amp; h &amp;&amp; i &amp;&amp; j"
+                target="done"/>
+  </state>
+
+  <state id="done"/>
+
+</scxml>

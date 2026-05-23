@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-08-C wave-2 fixture: a chart with a top-level <parallel> element
+  enclosing two orthogonal regions, each driven independently.
+
+  Drives `TestParallelTwoRegions` in the wave-2 integration suite. The
+  test asserts:
+    - VHDL emit produces THREE files:
+        * <chart>_region_region_a.vhd   (region_a's region FSM module)
+        * <chart>_region_region_b.vhd   (region_b's region FSM module)
+        * <chart>_top.vhd               (chart-top wrapper instantiating
+                                         both region modules)
+    - SystemVerilog emit produces three matching `.sv` files.
+    - The chart-top wrapper instantiates each region module exactly
+      once (SOS-08-C §6.10 step 10).
+
+  Per SOS-08-C §6.1 the region tree carries one region per top-level
+  state PLUS one region per child of every <parallel>. This fixture
+  exercises the second clause: the <parallel> wrapper itself is not a
+  region — its two child <state> nodes (region_a, region_b) are.
+
+  Shape:
+    - one <parallel> root: id="par".
+    - region_a (2 states): a_idle, a_ready; transition a_idle -> a_ready on `go_a`.
+    - region_b (2 states): b_idle, b_ready; transition b_idle -> b_ready on `go_b`.
+    - No <datamodel>; no cross-region signal sharing; both regions
+      default to the chart-root clock domain (PCDN-SOS-08-C-001:
+      inherit-from-parent, root defaults to `main`).
+
+  Cited spec rules:
+    - SOS-08-C §6.1 (region tree construction; one region per
+      <parallel> child).
+    - SOS-08-C §6.10 (chart-top wrapper emission).
+    - SOS-08-C §5.7 (cooperative-only emission: both regions run to
+      completion within one macrostep tick).
+    - PCDN-SOS-08-C-001 (resolved 2026-05-23): clock-domain default
+      inherit-from-parent.
+    - INV-S-HDL-C-1 (deterministic emission).
+
+  Excluded:
+    - Cross-domain (lands in `parallel_with_cross_domain.scxml`).
+    - Guards (lands in `single_guarded_transition.scxml`).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="par">
+
+  <parallel id="par">
+
+    <state id="region_a" initial="a_idle">
+      <state id="a_idle">
+        <transition event="go_a" target="a_ready"/>
+      </state>
+      <state id="a_ready">
+        <!-- sink -->
+      </state>
+    </state>
+
+    <state id="region_b" initial="b_idle">
+      <state id="b_idle">
+        <transition event="go_b" target="b_ready"/>
+      </state>
+      <state id="b_ready">
+        <!-- sink -->
+      </state>
+    </state>
+
+  </parallel>
+
+</scxml>

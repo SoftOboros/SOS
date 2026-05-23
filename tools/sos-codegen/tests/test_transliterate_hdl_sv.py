@@ -1,33 +1,34 @@
-"""SOS-08-C SystemVerilog chart→FSM emitter tests.
+"""SOS-08-C SystemVerilog chart→FSM emitter tests (wave-2).
 
 @spec docs/concepts/SOS-08-C-CONCEPTS.md §6 (10-step emission algorithm)
+      docs/concepts/SOS-08-C-CONCEPTS.md §6.3 (guard compilation — wave-2)
+      docs/concepts/SOS-08-C-CONCEPTS.md §6.7 (cross-domain wiring)
+      docs/concepts/SOS-08-C-CONCEPTS.md §6.10 (chart-top wrapper)
       docs/concepts/SOS-08-C-CONCEPTS.md §12 (acceptance checklist)
       docs/concepts/SOS-08-C-CONCEPTS.md §7  (INV-S-HDL-C-1..5)
       docs/concepts/SOS-08-C-CONCEPTS.md §15 (2026-05-23 ratification)
 
-These tests verify the wave-1 scope of `transliterate_hdl_sv.render_target`:
+These tests verify the wave-2 surface of
+`transliterate_hdl_sv.render_target`:
   * Single-region SCXML → single SV module emitted.
-  * Datamodel signals surface as registered + exposed via output port.
+  * Datamodel signals surface as registered + exposed via output port,
+    with multi-bit widths honoured per §5.4 / SOS-04 i32 default.
   * One-hot state encoding is the default (PCDN-SOS-08-C-005).
   * Initial state equals the reset state (SOS-08-C §5.6).
-  * Document-order priority is preserved for outgoing transitions
-    (SOS-08-C §5.2; lint warning `SCXML-LINT-C-1` proposed but the
-    emitter itself respects the order).
-  * Guards are rejected at wave-1 with a chart-vocabulary error.
-  * Parallel regions are rejected at wave-1 with a chart-vocabulary
-    error citing SOS-08-C §6.1.
-
-The SV walker (post-SOS-08-C wave-1 integration fix) consumes the raw
-scjson dict shape — the same shape the VHDL walker reads. These tests
-build the dict inline so the suite has no cross-agent fixture dependency.
+  * Document-order priority is preserved for outgoing transitions.
+  * Guards compile to `if (<expr>) / else if (<expr>) / else` chains
+    inside each source-state arm (§6.3 / INV-S-HDL-C-4).
+  * Over-budget guards raise `UnsupportedChartError` (or
+    `GuardDepthExceeded`) per PCDN-C-004.
+  * `<parallel>` regions emit N region modules + one chart-top wrapper.
+  * Cross-domain signals get `sos_synchronizer` instances in the wrapper.
+  * Wave-3 features (`<raise>`, `<script>`) still reject with wave-3
+    citations.
 
 Cross-dialect:
   * `test_sv_and_vhdl_have_equivalent_state_constants` loads the same
     fixture and renders once as VHDL and once as SV, asserting state
-    names + bit patterns match. This catches drift between the two
-    dialects. The test is skipped when the VHDL emitter is not yet
-    present (the sibling agent's file lands concurrently); CI will
-    re-run it once both are committed.
+    names + bit patterns match.
 """
 
 from __future__ import annotations
@@ -47,10 +48,7 @@ TOOL_DIR = TESTS_DIR.parent
 if str(TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(TOOL_DIR))
 
-# hdl_common is authored by a sibling agent in this wave. When the
-# sibling's commit has not yet landed (e.g. transient state during
-# fan-out), skip the entire suite with a clear message rather than
-# raising ImportError during collection.
+# hdl_common is authored by a sibling agent in this wave.
 hdl_common = pytest.importorskip(
     "hdl_common",
     reason="hdl_common sibling-agent module not yet on disk; SV emit tests "
@@ -68,18 +66,6 @@ pytestmark = pytest.mark.hdl_sv
 
 # ---------------------------------------------------------------------------
 # Inline scjson-dict builders.
-#
-# The wave-1 `render_target` contract takes the raw scjson dict shape,
-# not a file path — so tests can synthesize charts without going through
-# the `scjson json` shell-out. This keeps the test suite hermetic and
-# disjoint from the sibling agent's fixture file plans. The builders
-# below mirror the loader's `_collect_states` / `_collect_datamodel`
-# expected shapes:
-#   chart["initial"]    -> str (state-id)
-#   chart["state"]      -> list of { "id": str, "transition": [...],
-#                                    "onentry": [...], "onexit": [...] }
-#   chart["datamodel"]  -> list of { "data": [{"id": ..., "expr": ...}] }
-#   chart["parallel"]   -> list (triggers wave-1 rejection)
 # ---------------------------------------------------------------------------
 
 
@@ -96,9 +82,7 @@ def _state(state_id, *, onentry=None, onexit=None, transitions=None):
 
 
 def _simple_chart():
-    """A three-state linear chart: A → B → C. No datamodel; transitions
-    carry events (wave-1 accepts events — the wave-1 cut just doesn't
-    decode them, so the first listed transition wins unconditionally)."""
+    """A three-state linear chart: A → B → C. No datamodel."""
     return {
         "initial": "A",
         "state": [
@@ -128,11 +112,32 @@ def _chart_with_datamodel():
     }
 
 
+def _chart_with_typed_datamodel():
+    """Wave-2: chart whose <data> carries `type="int"` (32-bit signed)."""
+    return {
+        "initial": "IDLE",
+        "datamodel": [
+            {
+                "data": [
+                    {"id": "counter", "expr": "0", "type": "int"},
+                ],
+            }
+        ],
+        "state": [
+            _state("IDLE", transitions=[{"target": "ACTIVE"}]),
+            _state("ACTIVE"),
+        ],
+    }
+
+
 def _chart_with_guard():
-    """A chart whose transition carries a `cond` attribute — wave-1
-    rejects with GuardNotSupportedError."""
+    """Wave-2: chart whose transition carries a `cond` attribute — now
+    ACCEPTED (was wave-1 reject)."""
     return {
         "initial": "A",
+        "datamodel": [
+            {"data": [{"id": "counter", "expr": "0", "type": "int"}]},
+        ],
         "state": [
             _state(
                 "A",
@@ -145,22 +150,115 @@ def _chart_with_guard():
     }
 
 
+def _chart_with_multiple_guards():
+    """Wave-2: three guarded transitions out of state A in document order.
+    Final unguarded transition becomes the `else` arm."""
+    return {
+        "initial": "A",
+        "datamodel": [
+            {"data": [{"id": "counter", "expr": "0", "type": "int"}]},
+        ],
+        "state": [
+            _state(
+                "A",
+                transitions=[
+                    {"target": "B", "cond": "counter == 1"},
+                    {"target": "C", "cond": "counter == 2"},
+                    {"target": "D", "cond": "counter == 3"},
+                    {"target": "A"},  # unguarded default → else arm
+                ],
+            ),
+            _state("B"),
+            _state("C"),
+            _state("D"),
+        ],
+    }
+
+
+def _chart_with_deep_guard():
+    """Wave-2: chart whose guard has 9 boolean operators chained — over
+    the default depth budget of 8 (PCDN-C-004)."""
+    # 9 && operators (depth 9) — over the default budget.
+    cond = "a && b && c && d && e && f && g && h && i && j"
+    return {
+        "initial": "A",
+        "state": [
+            _state("A", transitions=[{"target": "B", "cond": cond}]),
+            _state("B"),
+        ],
+    }
+
+
 def _chart_with_parallel():
-    """A chart with a top-level <parallel> — wave-1 rejects with
-    ParallelNotSupportedError."""
+    """Wave-2: chart with a top-level <parallel> — now ACCEPTED."""
     return {
         "initial": "p",
         "parallel": [
             {
-                "id": "p",
-                "state": [_state("p_left"), _state("p_right")],
-            }
+                "id": "left",
+                "initial": "L1",
+                "state": [
+                    _state("L1", transitions=[{"target": "L2"}]),
+                    _state("L2"),
+                ],
+            },
+            {
+                "id": "right",
+                "initial": "R1",
+                "state": [
+                    _state("R1", transitions=[{"target": "R2"}]),
+                    _state("R2"),
+                ],
+            },
+        ],
+    }
+
+
+def _chart_with_cross_domain():
+    """Wave-2: <parallel> with two regions on different clock domains
+    that both touch the same datamodel signal — wrapper must instantiate
+    a synchronizer."""
+    return {
+        "initial": "p",
+        "datamodel": [
+            {"data": [{"id": "shared", "expr": "0", "type": "int"}]},
+        ],
+        "parallel": [
+            {
+                "id": "fast",
+                "clock": "fast",
+                "initial": "F1",
+                "state": [
+                    _state(
+                        "F1",
+                        onentry=[
+                            {"assign": [{"location": "shared", "expr": "1"}]}
+                        ],
+                        transitions=[{"target": "F2"}],
+                    ),
+                    _state("F2"),
+                ],
+            },
+            {
+                "id": "slow",
+                "clock": "slow",
+                "initial": "S1",
+                "state": [
+                    _state(
+                        "S1",
+                        transitions=[
+                            {"target": "S2", "cond": "shared > 0"},
+                        ],
+                    ),
+                    _state("S2"),
+                ],
+            },
         ],
     }
 
 
 def _chart_with_script():
-    """A chart whose <onentry> carries a <script> body — wave-1 rejects."""
+    """A chart whose <onentry> carries a <script> body — wave-3 still rejects."""
     return {
         "initial": "s",
         "state": [
@@ -172,10 +270,25 @@ def _chart_with_script():
     }
 
 
+def _chart_with_raise():
+    """A chart whose transition carries a <raise> — wave-3 still rejects."""
+    return {
+        "initial": "A",
+        "state": [
+            _state(
+                "A",
+                transitions=[
+                    {"target": "B", "raise_value": [{"event": "go"}]},
+                ],
+            ),
+            _state("B"),
+        ],
+    }
+
+
 def _chart_with_doc_order():
-    """A chart whose first state has two outgoing transitions in
-    document order — wave-1 takes the first one (doc-order priority,
-    SOS-08-C §5.2)."""
+    """A chart whose first state has two outgoing unguarded transitions.
+    Document-order priority — first wins."""
     return {
         "initial": "A",
         "state": [
@@ -192,9 +305,8 @@ def _chart_with_doc_order():
     }
 
 
-# Cross-dialect equivalence fixture: the same chart shape used by both
-# walkers' equivalence test below.
 def _three_state_chart():
+    """Cross-dialect equivalence fixture."""
     return {
         "initial": "A",
         "state": [
@@ -206,13 +318,11 @@ def _three_state_chart():
 
 
 # ---------------------------------------------------------------------------
-# Single-region clean emit.
+# Single-region clean emit (wave-1 surface preserved).
 # ---------------------------------------------------------------------------
 
 
 def test_single_region_renders_one_sv_file():
-    """SOS-08-C §6 ten-step walk: a single-region chart produces a
-    single {filename: source} entry from render_target."""
     chart = _simple_chart()
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "simple"})
     assert isinstance(out, dict)
@@ -225,9 +335,6 @@ def test_single_region_renders_one_sv_file():
 
 
 def test_single_region_module_contains_state_constants():
-    """SOS-08-C §5.1 + §6.2: state-encoding constants are emitted as
-    localparam-style declarations, one per chart state, with names
-    `ST_<state_id_upper>`."""
     chart = _simple_chart()
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "simple"})
     src = next(iter(out.values()))
@@ -237,21 +344,15 @@ def test_single_region_module_contains_state_constants():
 
 
 def test_single_region_includes_clk_rst_current_state_ports():
-    """The emitted module SHALL expose clk, rst, current_state per the
-    wave-1 port surface (SOS-08-C §6.2 worked example + INV-S-HDL-C-2)."""
     chart = _simple_chart()
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "simple"})
     src = next(iter(out.values()))
-    # Tolerant of formatting variations.
     assert re.search(r"\bclk\b", src)
     assert re.search(r"\brst\b", src)
     assert re.search(r"\bcurrent_state\b", src)
 
 
 def test_module_uses_unique_case_for_transition_mux():
-    """Per parent CLAUDE.md SV synthesis convention + SOS-08-C §6.2's
-    worked example: the transition mux SHALL use `unique case` (SV-2017)
-    so synthesis tools enforce exhaustiveness."""
     chart = _simple_chart()
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "simple"})
     src = next(iter(out.values()))
@@ -259,8 +360,6 @@ def test_module_uses_unique_case_for_transition_mux():
 
 
 def test_module_uses_always_ff_and_always_comb():
-    """SOS-08-C §6.2: register process is sequential (`always_ff`);
-    transition mux is combinational (`always_comb`)."""
     chart = _simple_chart()
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "simple"})
     src = next(iter(out.values()))
@@ -274,29 +373,32 @@ def test_module_uses_always_ff_and_always_comb():
 
 
 def test_datamodel_entries_emit_as_signals():
-    """SOS-08-C §5.4 + §6.6: each `<data>` element compiles to one
-    output port + one internal register."""
     chart = _chart_with_datamodel()
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "dm_chart"})
     src = next(iter(out.values()))
-    # The emitter sanitizes chart-side identifiers and prefixes them
-    # with `data_` — match either bare or prefixed form.
     assert "data_counter" in src
     assert "data_flag" in src
 
 
 def test_datamodel_signals_have_registered_storage():
-    """Per §5.4: signals modified by `<assign>` are registered. Wave-1
-    has no `<assign>` compile yet, so signals are registered but hold
-    their reset value. Verify the `_q` register exists alongside the
-    output wire."""
     chart = _chart_with_datamodel()
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "dm_chart"})
     src = next(iter(out.values()))
     assert "data_counter_q" in src
-    # The reset block in always_ff should reference the datamodel
-    # register reset value (0 for `counter`, 0 / 1'b0 for `flag`).
     assert "if (rst)" in src
+
+
+def test_port_width_follows_signal_width():
+    """Wave-2: a chart `<data id="counter" type="int"/>` should emit a
+    multi-bit port — `wire [31:0] data_counter` — not a scalar."""
+    chart = _chart_with_typed_datamodel()
+    out = transliterate_hdl_sv.render_target(chart, {"chart_name": "dm"})
+    src = next(iter(out.values()))
+    # Match the output-port declaration with a 32-bit width.
+    assert re.search(r"output\s+wire\s+\[31:0\]\s+data_counter", src), (
+        "expected `output wire [31:0] data_counter` per SOS-08-C §5.4 "
+        "(SOS-04 i32 default width)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -305,34 +407,21 @@ def test_datamodel_signals_have_registered_storage():
 
 
 def test_one_hot_is_default_encoding():
-    """SOS-08-C §5.1 + PCDN-SOS-08-C-005: one-hot is the default
-    encoding at wave-1. The state register width SHALL equal the state
-    count (one-hot), and the constants SHALL be powers-of-two."""
     chart = _simple_chart()  # 3 states
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "simple"})
     _, metadata = transliterate_hdl_sv.render_target_with_metadata(
         chart, {"chart_name": "simple"}
     )
-    # 3 state-constants, one per state, in document order.
     assert len(metadata["state_constants"]) == 3
     assert metadata["state_names"] == ["A", "B", "C"]
-    # The emitted source should declare a state_q register of width
-    # equal to the state count.
     src = next(iter(out.values()))
-    # Width literal appears in the localparam declarations; tolerate
-    # either `3'b001` style or `3'b0...` length prefixes.
     assert re.search(r"3'(?:b|d|h)", src) or "[2:0]" in src
 
 
 def test_initial_state_equals_reset_state():
-    """SOS-08-C §5.6 + PCDN-SOS-08-C-003: SCXML `<initial>` is the
-    FSM's reset state. The reset block in `always_ff` SHALL assign the
-    initial state's constant to `state_q`."""
     chart = _simple_chart()  # initial="A"
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "simple"})
     src = next(iter(out.values()))
-    # In the reset branch, state_q is assigned ST_A.
-    # Tolerant of formatting (newlines, indentation).
     reset_match = re.search(
         r"if\s*\(\s*rst\s*\).*?state_q\s*<=\s*ST_A", src, re.S
     )
@@ -343,8 +432,6 @@ def test_initial_state_equals_reset_state():
 
 
 def test_reset_state_follows_chart_initial_attribute():
-    """Changing the chart's `initial` attribute changes the reset
-    state assignment."""
     chart = {
         "initial": "C",
         "state": [
@@ -367,17 +454,12 @@ def test_reset_state_follows_chart_initial_attribute():
 
 
 def test_document_order_priority_first_transition_wins():
-    """SOS-08-C §5.2: document-order priority — the first transition in
-    the SCXML source out of a state wins on simultaneous-guard-true
-    cycles. Wave-1 has no guards; the first transition out of A SHALL
-    drive the next-state to B (not C)."""
     chart = _chart_with_doc_order()
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "docord"})
     src = next(iter(out.values()))
-    # In the transition mux, the arm for ST_A SHALL assign ST_B (not
-    # ST_C) as next_state.
+    # The ST_A arm assigns ST_B (the first unguarded transition).
     arm_match = re.search(
-        r"ST_A\s*:.*?state_next\s*=\s*(ST_[A-Z]+)", src, re.S
+        r"ST_A\s*:\s*begin.*?state_next\s*=\s*(ST_[A-Z]+)", src, re.S
     )
     assert arm_match is not None, "expected an ST_A arm in the case"
     assert arm_match.group(1) == "ST_B", (
@@ -387,50 +469,153 @@ def test_document_order_priority_first_transition_wins():
 
 
 # ---------------------------------------------------------------------------
-# Wave-1 narrow-scope rejections.
+# Guard emission (wave-2).
 # ---------------------------------------------------------------------------
 
 
-def test_guards_rejected_at_wave_1():
-    """SOS-08-C §6.3: guards compile to combinational RTL in a
-    follow-on wave. Wave-1 rejects with a chart-vocabulary error."""
+def test_guarded_transition_emits_if_block():
+    """Wave-2 §6.3 / INV-S-HDL-C-4: a chart transition with a `cond`
+    becomes an `if (<expr>) state_next = ST_X;` inside the source-state
+    arm — accepted, not rejected."""
     chart = _chart_with_guard()
-    with pytest.raises(transliterate_hdl_sv.GuardNotSupportedError) as excinfo:
-        transliterate_hdl_sv.render_target(chart, {"chart_name": "guarded"})
+    out = transliterate_hdl_sv.render_target(chart, {"chart_name": "guarded"})
+    assert len(out) == 1
+    src = next(iter(out.values()))
+    # Look for an `if (...)` line inside the ST_A arm that assigns ST_B.
+    arm_match = re.search(
+        r"ST_A\s*:\s*begin(?P<body>.*?)end", src, re.S
+    )
+    assert arm_match is not None
+    body = arm_match.group("body")
+    assert re.search(
+        r"if\s*\(.*?\)\s*state_next\s*=\s*ST_B", body
+    ), f"expected `if (<expr>) state_next = ST_B` inside ST_A; got {body!r}"
+
+
+def test_multiple_guards_become_elseif_chain():
+    """Wave-2 §6.3 + PCDN-C-006: three guarded transitions yield an
+    `if / else if / else if / else` chain in document order."""
+    chart = _chart_with_multiple_guards()
+    out = transliterate_hdl_sv.render_target(chart, {"chart_name": "multi"})
+    src = next(iter(out.values()))
+    arm_match = re.search(
+        r"ST_A\s*:\s*begin(?P<body>.*?)end", src, re.S
+    )
+    assert arm_match is not None
+    body = arm_match.group("body")
+    # First guard → `if (...)` → ST_B.
+    assert re.search(
+        r"if\s*\(.*?\)\s*state_next\s*=\s*ST_B", body
+    ), body
+    # Second + third → `else if (...)` → ST_C / ST_D.
+    assert re.search(
+        r"else\s+if\s*\(.*?\)\s*state_next\s*=\s*ST_C", body
+    ), body
+    assert re.search(
+        r"else\s+if\s*\(.*?\)\s*state_next\s*=\s*ST_D", body
+    ), body
+    # Trailing unguarded → final `else state_next = ST_A;`.
+    assert re.search(r"else\s+state_next\s*=\s*ST_A", body), body
+
+
+def test_guard_depth_over_budget_fails():
+    """Wave-2 PCDN-C-004: a guard whose compiled depth exceeds the budget
+    raises a chart-vocabulary error."""
+    chart = _chart_with_deep_guard()
+    with pytest.raises(transliterate_hdl_sv.UnsupportedChartError) as excinfo:
+        transliterate_hdl_sv.render_target(
+            chart,
+            {"chart_name": "deep", "guard_depth_budget": 8},
+        )
     msg = str(excinfo.value)
     assert "SOS-08-C" in msg
-    assert "§6.3" in msg or "INV-S-HDL-C-4" in msg
+    # Either §6.3 or PCDN-C-004 must surface in the chart-vocabulary
+    # message.
+    assert "§6.3" in msg or "PCDN-C-004" in msg or "depth" in msg.lower()
 
 
-def test_parallel_rejected_at_wave_1():
-    """SOS-08-C §6.1: <parallel> region emission lands in a follow-on
-    wave. Wave-1 rejects with a chart-vocabulary error."""
+# ---------------------------------------------------------------------------
+# Parallel regions + chart-top wrapper (wave-2).
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_regions_emit_separate_modules():
+    """Wave-2 §6.1: `<parallel>` with N children emits N region modules
+    plus one chart-top wrapper (N+1 files total)."""
     chart = _chart_with_parallel()
-    with pytest.raises(
-        transliterate_hdl_sv.ParallelNotSupportedError
-    ) as excinfo:
-        transliterate_hdl_sv.render_target(chart, {"chart_name": "par"})
-    msg = str(excinfo.value)
-    assert "SOS-08-C" in msg
-    assert "§6.1" in msg or "<parallel>" in msg
+    out = transliterate_hdl_sv.render_target(chart, {"chart_name": "par"})
+    assert len(out) == 3, (
+        f"expected 3 output files (2 regions + chart-top wrapper); got "
+        f"{sorted(out.keys())!r}"
+    )
+    # Each region module is `par_region_<name>_fsm.sv`.
+    names = sorted(out.keys())
+    assert "par_region_left_fsm.sv" in names
+    assert "par_region_right_fsm.sv" in names
+    assert "par_top.sv" in names
 
 
-def test_script_bodies_rejected_at_wave_1():
-    """SOS-08-C wave-1: ECMAScript <script> bodies in onentry/onexit
-    are rejected; assign-only at v1."""
+def test_chart_top_wrapper_instantiates_regions():
+    """Wave-2 §6.10: the wrapper instantiates each region FSM with the
+    per-region module name + a sensible instance name."""
+    chart = _chart_with_parallel()
+    out = transliterate_hdl_sv.render_target(chart, {"chart_name": "par"})
+    wrapper = out["par_top.sv"]
+    # Each region should be instantiated under `u_region_<name>`.
+    assert re.search(
+        r"par_region_left_fsm\s+u_region_left\s*\(", wrapper
+    ), wrapper
+    assert re.search(
+        r"par_region_right_fsm\s+u_region_right\s*\(", wrapper
+    ), wrapper
+
+
+def test_cross_domain_signal_gets_synchronizer():
+    """Wave-2 §6.7 + PCDN-C-002: when two regions on different clock
+    domains share a datamodel signal, the chart-top wrapper SHALL
+    instantiate an `sos_synchronizer` for that signal."""
+    chart = _chart_with_cross_domain()
+    out = transliterate_hdl_sv.render_target(chart, {"chart_name": "cdc"})
+    wrapper = out["cdc_top.sv"]
+    # The synchronizer instance has parameterised stages + width.
+    assert "sos_synchronizer" in wrapper, wrapper
+    # Per-domain clk/rst ports surface in the wrapper.
+    assert re.search(r"\bclk_fast\b", wrapper), wrapper
+    assert re.search(r"\bclk_slow\b", wrapper), wrapper
+    # PCDN-C-002 citation in the synchronizer block.
+    assert "PCDN-C-002" in wrapper or "MTBF" in wrapper
+
+
+# ---------------------------------------------------------------------------
+# Wave-3 narrow-scope rejections (script + raise still rejected).
+# ---------------------------------------------------------------------------
+
+
+def test_script_bodies_rejected_at_wave_2():
+    """Wave-2 still rejects <script> bodies; message cites wave-3."""
     chart = _chart_with_script()
     with pytest.raises(transliterate_hdl_sv.UnsupportedChartError) as excinfo:
         transliterate_hdl_sv.render_target(chart, {"chart_name": "scr"})
     msg = str(excinfo.value)
     assert "SOS-08-C" in msg
     assert "script" in msg.lower()
+    assert "wave-3" in msg
+
+
+def test_raise_rejected_at_wave_2():
+    """Wave-2 still rejects <raise>; message cites wave-3 + §6.4/§6.5."""
+    chart = _chart_with_raise()
+    with pytest.raises(
+        transliterate_hdl_sv.EventIngressNotSupportedError
+    ) as excinfo:
+        transliterate_hdl_sv.render_target(chart, {"chart_name": "r"})
+    msg = str(excinfo.value)
+    assert "SOS-08-C" in msg
+    assert "§6.4" in msg or "§6.5" in msg
+    assert "wave-3" in msg.lower()
 
 
 def test_render_target_rejects_non_dict_chart_ir():
-    """The wave-1 contract is raw-scjson-dict input; non-dict shapes
-    surface a clear UnsupportedChartError so main.py callers see the
-    failure in chart vocabulary."""
-
     class _NotADict:
         pass
 
@@ -445,8 +630,6 @@ def test_render_target_rejects_non_dict_chart_ir():
 
 
 def test_emission_is_deterministic():
-    """Per INV-S-HDL-C-1: given a fixed chart-IR + fixed config, the
-    emitter SHALL produce byte-identical output across runs."""
     chart = _simple_chart()
     out1 = transliterate_hdl_sv.render_target(chart, {"chart_name": "simple"})
     out2 = transliterate_hdl_sv.render_target(chart, {"chart_name": "simple"})
@@ -454,33 +637,23 @@ def test_emission_is_deterministic():
 
 
 def test_emission_contains_spec_citations():
-    """Per parent CLAUDE.md `Spec-Before-Code Planning Discipline /
-    Execution discipline`: emitted files SHALL cite the spec sections
-    they implement. The header comment carries the citations."""
     chart = _simple_chart()
     out = transliterate_hdl_sv.render_target(chart, {"chart_name": "simple"})
     src = next(iter(out.values()))
     assert "SOS-08-C" in src
-    assert "§6" in src  # the ten-step algorithm
-    assert "INV-S-HDL-C-" in src  # at least one of C-1..5 cited
+    assert "§6" in src
+    assert "INV-S-HDL-C-" in src
 
 
 # ---------------------------------------------------------------------------
-# Cross-dialect equivalence — VHDL vs SV state constants must match.
-# This is the load-bearing drift-detection test mandated by the task.
+# Cross-dialect equivalence.
 # ---------------------------------------------------------------------------
 
 
 def test_sv_and_vhdl_have_equivalent_state_constants():
     """Cross-dialect drift detection: render the same chart-IR as both
     VHDL and SV, parse the state-constant declarations out of each,
-    and assert the state names + bit patterns match.
-
-    The test is skipped if the VHDL emitter is not yet importable
-    (sibling agent's file lands concurrently). When both are present,
-    a passing test confirms the two walkers consume the same chart-IR
-    shape and produce a consistent state encoding.
-    """
+    and assert the state names + bit patterns match."""
     vhdl_module = pytest.importorskip(
         "transliterate_hdl_vhdl",
         reason="VHDL sibling emitter not yet present; cross-dialect "
@@ -490,12 +663,8 @@ def test_sv_and_vhdl_have_equivalent_state_constants():
     chart = _three_state_chart()
     cfg = {"chart_name": "simple"}
 
-    # Render SV side (with metadata).
     sv_out, sv_meta = transliterate_hdl_sv.render_target_with_metadata(chart, cfg)
 
-    # Render VHDL side. The VHDL walker doesn't yet expose
-    # `render_target_with_metadata`, so parse the emitted source for
-    # state-constant identifiers.
     vhdl_meta: dict[str, Any]
     if hasattr(vhdl_module, "render_target_with_metadata"):
         _vhdl_out, vhdl_meta = vhdl_module.render_target_with_metadata(chart, cfg)
@@ -509,13 +678,11 @@ def test_sv_and_vhdl_have_equivalent_state_constants():
             state_names.append(m.group(1))
         vhdl_meta = {"state_constants": state_names, "state_names": state_names}
 
-    # State-constant identifier sets MUST match across dialects.
     assert set(sv_meta["state_constants"]) == set(vhdl_meta["state_constants"]), (
         "SV vs VHDL state constants drifted: "
         f"SV={sv_meta['state_constants']!r} VHDL={vhdl_meta['state_constants']!r}"
     )
 
-    # Ordering MUST also match (one-hot bit positions follow doc order).
     assert sv_meta["state_constants"] == vhdl_meta["state_constants"], (
         "state-constant ORDER differs between SV and VHDL — "
         "one-hot bit positions will not align"

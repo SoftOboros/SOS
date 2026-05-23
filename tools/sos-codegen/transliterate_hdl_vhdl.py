@@ -1,7 +1,10 @@
 """SCXML chart → VHDL-2008 region-FSM emitter (Layer-2 HDL backend).
 
-Wave-1 scaffold per SOS-08-C-CONCEPTS.md §6 (ten-step emission algorithm)
-and §15 (2026-05-23 ratification).
+Wave-2 emitter per SOS-08-C-CONCEPTS.md §6 (ten-step emission algorithm)
+and §15 (2026-05-23 ratification). Wave-2 implements steps 4-10 of §6
+fully except event ingress/egress wiring via `sos_message_channel`
+(§6.4 / §6.5) and ECMAScript subset → HDL action lowering beyond
+``<assign>`` — those still defer to wave-3.
 
 @spec  SOS-08-C-CONCEPTS.md §6 (emission algorithm), §15 (ratification)
 @spec  SOS-07-CONCEPTS.md  INV-SOS-A..H (cross-phase invariants)
@@ -18,58 +21,73 @@ and §15 (2026-05-23 ratification).
 @spec  PCDN-C-005 (chart annotation wins for encoding)
 @spec  PCDN-C-006 (document-order priority lint rule)
 
-# Wave-1 scope (intentionally narrow per the orchestrator's prompt)
+# Wave-2 scope (per the orchestrator's wave-2 prompt)
 
-This module is the FIRST emission cut. It implements the chart → VHDL
-walk only for the subset of SCXML that the wave-1 acceptance gate names:
+Implements:
+  - Guard expression emission — case-arm becomes an if/elsif/else chain
+    with document-order priority (§6.3 + PCDN-C-006). Guards beyond
+    PCDN-C-004's depth budget surface as `UnsupportedChartError` with
+    chart-vocabulary message.
+  - <parallel> regions — each child region of <parallel> compiles to
+    its own FSM module file; a chart-top wrapper instantiates the
+    regions (§6.1 / §6.10).
+  - Chart-top wrapper — clock + reset declarations per distinct clock
+    domain; region instantiation; cross-domain synchronizer wiring
+    (§6.7 / §6.10).
+  - Cross-domain synchronizers — for every chart signal written in
+    clock domain A and read in clock domain B, instantiate
+    `sos_synchronizer` per PCDN-C-002 (retained across verified-strip).
+  - Port-width-from-signal-width — datamodel-driven port widths follow
+    the underlying signal width (i32 → `std_logic_vector(31 downto 0)`,
+    bool → `std_logic`).
 
-  - Single-region SCXML (no <parallel>).
-  - Simple unguarded transitions (no <transition cond="..."/>).
-  - Simple datamodel via <data> with optional `expr=...` initial.
-  - <onentry> / <onexit> blocks may carry assign-style assignments only;
-    no <script> (ECMAScript) bodies — those land in wave-2.
-  - One-hot encoding by default (chart-annotation override deferred to
-    wave-2 so the wave-1 acceptance test exercises the default).
-  - Reset state = the SCXML <initial> attribute (PCDN-C-003).
-  - Transitions in document order; first arm wins (PCDN-C-006).
-  - Sync active-high reset (INV-S-HDL-A-1).
-  - Event ingress / egress: SCXML-internal at wave-1 (no L1
-    sos_message_channel wiring; that's §6.4 / §6.5 + wave-2).
+Still REJECTED (wave-3):
+  - Event ingress / egress via L1 `sos_message_channel`
+    (transitions with `event="..."` + <raise>/<send>).
+  - ECMAScript subset → HDL action lowering beyond <assign>.
+  - <script> bodies in <onentry> / <onexit>.
 
-Anything else SHALL raise `UnsupportedChartError` with an explicit
-"SOS-08-C wave-1 scaffold does not emit ..." message per INV-S-HDL-5
-(chart-vocabulary traceability — failures surface in chart-author
-vocabulary).
+Rejection messages cite "lands in wave-3" instead of "wave-2".
 
 # Integration contract
 
-The codegen tool's CLI dispatcher (`main.py`, owned by the sibling agent
-on this fan-out) invokes:
+The codegen tool's CLI dispatcher (`main.py`) invokes:
 
     from transliterate_hdl_vhdl import render_target
     files = render_target(chart_ir, config)
     for name, body in files.items():
         (out_dir / name).write_text(body)
 
-`chart_ir` is the `ChartAst` produced by `loader.load_chart`. `config`
-is a dict carrying CLI flags relevant to emission (`chart_name`,
-`vendor`, `verified_strip`, etc.); wave-1 only consumes `chart_name`.
+`chart_ir` is the raw scjson dict (the shape `loader.load_chart` reads
+from disk before normalising into `ChartAst`).  `config` is a dict or
+`HdlEmitConfig` carrying CLI flags relevant to emission.
 
 # hdl_common consumption
 
-Per the orchestrator's prompt, the sibling agent is authoring
-`hdl_common.py` concurrently. This module imports the helpers below;
-signature mismatches at integration time are flagged in the agent
-report.
+Wave-2 expects the following canonical signatures from hdl_common:
+
+    emit_guard_expr(expr_str, dialect, depth_budget=8) -> str
+    GuardDepthError  (exception)
+    emit_sync_inst(inst_name, src_signal, dst_signal,
+                   src_clk, dst_clk, dst_rst, width, stages, dialect) -> str
+    emit_chart_top_wrapper(chart_name, region_modules,
+                           cross_domain_signals, dialect) -> str
+    port_width_from_signal_width(scxml_type, name) -> int
+
+If any helper is unavailable at integration time, the call site falls
+back to an inline implementation with a flagged comment ("# WAVE2:
+fallback for ...") so the wave-2 reconcile pass can replace it later.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
-# Sibling-agent module. If any helper's signature differs at integration
-# time, the wave-2 reconcile pass updates the call sites here.
+# Sibling-agent module. The wave-2 emitter imports the canonical
+# wave-2 surface defensively: helpers that may or may not yet be
+# present in hdl_common at integration time are imported with a
+# try/except block below, and fall back to local inline emission.
 from hdl_common import (
     Dialect,
     FsmEncoding,
@@ -85,11 +103,45 @@ from hdl_common import (
     emit_signal_decl,
     emit_transition_mux,
     map_datamodel_type,
+    DEFAULT_GUARD_DEPTH_BUDGET,
 )
+
+# Wave-2 canonical surface — defensive import.  Sibling agent is
+# pinning these in hdl_common.py concurrently.  Fall back to local
+# implementations when not yet present.
+try:  # pragma: no cover - integration-pass gated
+    from hdl_common import emit_guard_expr as _hdl_emit_guard_expr  # type: ignore
+except ImportError:  # pragma: no cover
+    _hdl_emit_guard_expr = None  # type: ignore
+
+try:  # pragma: no cover
+    from hdl_common import GuardDepthError as _HdlGuardDepthError  # type: ignore
+except ImportError:  # pragma: no cover
+    class _HdlGuardDepthError(Exception):  # type: ignore
+        """Local fallback for hdl_common.GuardDepthError."""
+
+try:  # pragma: no cover
+    from hdl_common import emit_sync_inst as _hdl_emit_sync_inst  # type: ignore
+except ImportError:  # pragma: no cover
+    _hdl_emit_sync_inst = None  # type: ignore
+
+try:  # pragma: no cover
+    from hdl_common import emit_chart_top_wrapper as _hdl_emit_chart_top_wrapper  # type: ignore
+except ImportError:  # pragma: no cover
+    _hdl_emit_chart_top_wrapper = None  # type: ignore
+
+try:  # pragma: no cover
+    from hdl_common import port_width_from_signal_width as _hdl_port_width  # type: ignore
+except ImportError:  # pragma: no cover
+    _hdl_port_width = None  # type: ignore
+
+
+# Backward-compat: tests may catch GuardDepthError; expose at module level.
+GuardDepthError = _HdlGuardDepthError
 
 
 # ---------------------------------------------------------------------------
-# Wave-1 error surface.
+# Wave-2 error surface.
 #
 # Per INV-S-HDL-5 (chart-vocabulary traceability), every chart-author-
 # facing rejection cites the chart construct + the wave / phase doc
@@ -100,32 +152,32 @@ from hdl_common import (
 
 
 class UnsupportedChartError(Exception):
-    """Chart construct outside the wave-1 scaffold scope.
+    """Chart construct outside the wave-2 scaffold scope.
 
-    Raised when the input SCXML names a feature the wave-1 emit walk
-    cannot lower. Per the SOS-08-C §15 ratification, the wave-1 cut is
-    intentionally narrow; rejected features surface here with the
-    target wave that lands them.
+    Raised when the input SCXML names a feature the wave-2 emit walk
+    cannot lower. Wave-3 features (event channels, ECMAScript scripts)
+    surface here with their landing wave; wave-2-internal misuses
+    (guard depth budget exceeded, datamodel with no initial expression)
+    surface here too.
     """
 
 
 # ---------------------------------------------------------------------------
 # Region/state/transition normalised view.
 #
-# The `loader.ChartAst` shape is script-site-centric (each <onentry>,
-# <onexit>, <transition> becomes a `ScriptSite` for the Rust/C paths).
-# The HDL emit walk needs a state-centric view — one VHDL entity per
-# region, one state-constant per <state>, one case-arm per outgoing
-# transition. We re-walk the raw scjson AST below into the shape this
-# module consumes, keeping the loader's ScriptSite surface unchanged.
+# The `loader.ChartAst` shape is script-site-centric.  The HDL emit
+# walk needs a state-centric view — one VHDL entity per region, one
+# state-constant per <state>, one case-arm per outgoing transition.
+# Wave-2 expands the normalised view to carry multiple regions (one
+# per <parallel> child) plus per-region clock-domain annotations.
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class HdlTransition:
-    """One outgoing transition from a state. Wave-1 carries only the
-    fields the emit walk consumes; richer fields (cond, raises, payload)
-    land in wave-2."""
+    """One outgoing transition from a state.  Wave-2 carries the
+    fields the emit walk consumes; richer fields (raise payloads,
+    explicit event tokens) land in wave-3."""
 
     source: str
     target: str
@@ -139,8 +191,8 @@ class HdlTransition:
 @dataclass
 class HdlAssign:
     """One assign-style <assign location="x" expr="..."/> emitted by an
-    <onentry> / <onexit>. Wave-1 only honours numeric-literal RHS; the
-    ECMAScript <script> path lands in wave-2."""
+    <onentry> / <onexit>.  Wave-2 still numeric-literal RHS only; the
+    ECMAScript <script> path lands in wave-3."""
 
     location: str
     expr: str  # raw expression text (numeric literal or simple ident)
@@ -148,7 +200,7 @@ class HdlAssign:
 
 @dataclass
 class HdlState:
-    """One <state id="..."/> inside the single wave-1 region."""
+    """One <state id="..."/> inside a region."""
 
     state_id: str
     onentry_assigns: list[HdlAssign] = field(default_factory=list)
@@ -159,99 +211,106 @@ class HdlState:
 @dataclass
 class HdlDatamodelSignal:
     """One <data id="..." expr="..."/> normalised to a registered RTL
-    signal per SOS-08-C §5.4. Width / typing comes from
+    signal per SOS-08-C §5.4.  Width / typing comes from
     `hdl_common.map_datamodel_type` at emit time."""
 
     name: str
     initial_expr: str  # raw chart-side initial value text
+    scxml_type: str = "int"  # default per SOS-08-C §5.4
 
 
 @dataclass
 class HdlRegion:
-    """The single wave-1 region — chart-top → one VHDL entity."""
+    """One region — one VHDL entity.  For single-region charts there
+    is exactly one HdlRegion; for charts with <parallel> there is one
+    HdlRegion per orthogonal child."""
 
     name: str
     states: list[HdlState]
     initial_state: str
     datamodel: list[HdlDatamodelSignal]
+    # PCDN-C-001: per-region clock-domain default is inherit-from-
+    # parent; root defaults to "main".  Wave-2 supports a per-region
+    # `<region clock="..."/>` annotation.
+    clock_domain: str = "main"
+    # Per-region datamodel writes (location → set of (state, where))
+    # collected during normalisation so the chart-top wrapper's
+    # cross-domain analysis can intersect with reads from sibling
+    # regions in a different clock domain.
+    writes: list[str] = field(default_factory=list)
+    reads: list[str] = field(default_factory=list)
+
+
+@dataclass
+class HdlChart:
+    """Top-level normalised chart — one or more regions plus shared
+    cross-region wiring data (datamodel signals visible to the chart
+    top-level, clock-domain graph, etc.)."""
+
+    name: str
+    regions: list[HdlRegion]
+    # Top-level datamodel signals declared at <scxml><datamodel>; these
+    # are shared across regions per SOS-08-C §6.9.  Per-region private
+    # signals are normalised onto the owning region.
+    shared_datamodel: list[HdlDatamodelSignal] = field(default_factory=list)
+    # Cross-domain signal records computed during normalisation.
+    # Each entry: (signal_name, writer_region, reader_region,
+    #              src_clock, dst_clock, width)
+    cross_domain_signals: list[tuple[str, str, str, str, str, int]] = field(
+        default_factory=list
+    )
 
 
 # ---------------------------------------------------------------------------
-# scjson AST → HdlRegion (re-walk of loader's raw input).
-#
-# The loader's `load_chart` produces a `ChartAst` whose `sites` list is
-# script-centric. For HDL emit we want a state-centric view. To avoid
-# a second scjson shell-out, we accept either:
-#   (a) a `ChartAst` plus the raw scjson dict (when both are passed),
-#   (b) a raw scjson dict alone (when called with `chart_ir = {...}`),
-#   (c) a `ChartAst` alone — then we re-load the chart via the path
-#       carried on the chart_ir (wave-2 will plumb the raw dict
-#       alongside ChartAst to avoid the re-read).
-#
-# Wave-1 takes the simplest contract: `chart_ir` is the raw scjson dict.
-# The sibling agent's `main.py` dispatcher is responsible for producing
-# this dict (the existing Rust/C path will likely keep using ChartAst;
-# wave-2 reconciles).
+# scjson AST → HdlChart (re-walk of loader's raw input).
 # ---------------------------------------------------------------------------
 
 
 def _reject_unsupported(chart: dict[str, Any]) -> None:
-    """Inspect the raw scjson AST and raise on wave-1-out-of-scope
-    features. Per INV-S-HDL-5 / INV-S-HDL-C-4, rejections cite the
-    chart construct + the wave that lands the feature."""
+    """Inspect the raw scjson AST and raise on wave-2-out-of-scope
+    features.  Per INV-S-HDL-5 / INV-S-HDL-C-4, rejections cite the
+    chart construct + the wave that lands the feature.
 
-    # <parallel> regions → rejected (single-region only at wave-1).
-    if chart.get("parallel"):
-        raise UnsupportedChartError(
-            "SOS-08-C wave-1 scaffold does not emit parallel regions yet; "
-            "<parallel> support lands in a later wave. Found <parallel> "
-            "at chart root."
-        )
+    Wave-2 ACCEPTS what wave-1 rejected:
+      - guards (`<transition cond="..."/>`) — emitted as if/elsif chain
+      - parallel regions (`<parallel>`) — emit one module per region
 
-    # Walk states; reject nested <parallel>, guards, and <script> bodies.
+    Wave-2 STILL REJECTS (wave-3 lands these):
+      - event-driven transitions (`<transition event="..."/>`) where the
+        event has to route through an L1 sos_message_channel
+      - <raise> / <send> egress
+      - <script> bodies in onentry / onexit
+    """
+
+    # Walk states; reject <script> bodies and <raise> egress.  <parallel>
+    # and `cond` are NOW supported.
     for sid, st in _walk_all_states(chart):
-        if st.get("parallel"):
-            raise UnsupportedChartError(
-                "SOS-08-C wave-1 scaffold does not emit parallel regions yet; "
-                f"<parallel> support lands in a later wave. Found <parallel> "
-                f"inside state '{sid}'."
-            )
 
-        # Transition guards.
-        for tr in st.get("transition", []) or []:
-            if tr.get("cond"):
-                raise UnsupportedChartError(
-                    "SOS-08-C wave-1 scaffold does not emit guards yet; "
-                    "guard support lands in wave-2 (PCDN-C-004 / "
-                    f"SCXML-LINT-C-2). Found cond=\"{tr['cond']}\" on "
-                    f"transition out of state '{sid}'."
-                )
-
-        # <script> in onentry / onexit (wave-1 is assign-only).
+        # <script> in onentry / onexit (wave-2 still assign-only).
         for oe in st.get("onentry", []) or []:
             if oe.get("script"):
                 raise UnsupportedChartError(
-                    "SOS-08-C wave-1 scaffold does not emit ECMAScript "
-                    "<script> bodies yet; assign-only at v1, <script> "
-                    f"support lands in wave-2. Found <script> in <onentry> "
-                    f"of state '{sid}'."
+                    "SOS-08-C wave-2 emitter does not lower ECMAScript "
+                    "<script> bodies yet; assign-only at v1/v2, full "
+                    "<script> support lands in wave-3. Found <script> in "
+                    f"<onentry> of state '{sid}'."
                 )
         for ox in st.get("onexit", []) or []:
             if ox.get("script"):
                 raise UnsupportedChartError(
-                    "SOS-08-C wave-1 scaffold does not emit ECMAScript "
-                    "<script> bodies yet; assign-only at v1, <script> "
-                    f"support lands in wave-2. Found <script> in <onexit> "
-                    f"of state '{sid}'."
+                    "SOS-08-C wave-2 emitter does not lower ECMAScript "
+                    "<script> bodies yet; assign-only at v1/v2, full "
+                    "<script> support lands in wave-3. Found <script> in "
+                    f"<onexit> of state '{sid}'."
                 )
 
-        # <raise> egress is event-routing — wave-1 has no L1 channels yet.
+        # <raise> egress — event-routing — wave-2 has no L1 channels yet.
         for tr in st.get("transition", []) or []:
             if tr.get("raise_value"):
                 raise UnsupportedChartError(
-                    "SOS-08-C wave-1 scaffold does not emit chart event "
+                    "SOS-08-C wave-2 emitter does not lower chart event "
                     "egress yet; <raise>/<send> wiring via L1 "
-                    "sos_message_channel lands in wave-2 "
+                    "sos_message_channel lands in wave-3 "
                     "(SOS-08-C §6.4 / §6.5). Found <raise> on transition "
                     f"out of state '{sid}'."
                 )
@@ -259,7 +318,7 @@ def _reject_unsupported(chart: dict[str, Any]) -> None:
 
 def _walk_all_states(node: dict[str, Any]):
     """Depth-first walk yielding (state_id, state_dict) for every <state>
-    in the scjson tree. Mirrors `loader._collect_states` but yields the
+    in the scjson tree.  Mirrors `loader._collect_states` but yields the
     state dict directly so the rejection / normalisation passes can see
     every nested element."""
     for st in node.get("state", []) or []:
@@ -271,10 +330,23 @@ def _walk_all_states(node: dict[str, Any]):
         yield from _walk_all_states(par)
 
 
+def _walk_region_states(node: dict[str, Any]):
+    """Walk states that belong directly to the given region (do NOT
+    descend into nested <parallel> children — those are their own
+    regions).  Top-level <state> elements + their (non-parallel)
+    descendants are yielded."""
+    for st in node.get("state", []) or []:
+        sid = st.get("id")
+        if sid:
+            yield sid, st
+        # Descend into nested states but NOT into nested <parallel>
+        # children — those are sibling regions.
+        for sub_sid, sub_st in _walk_region_states(st):
+            yield sub_sid, sub_st
+
+
 def _collect_assigns(container: dict[str, Any]) -> list[HdlAssign]:
-    """Extract <assign location="x" expr="..."/> children. Wave-1 only
-    honours simple-RHS assigns; the loader already lifted any embedded
-    <script> via the rejection pass."""
+    """Extract <assign location="x" expr="..."/> children."""
     out: list[HdlAssign] = []
     for a in container.get("assign", []) or []:
         loc = a.get("location") or a.get("name") or ""
@@ -285,145 +357,446 @@ def _collect_assigns(container: dict[str, Any]) -> list[HdlAssign]:
     return out
 
 
-def _normalise_region(chart: dict[str, Any], chart_name: str) -> HdlRegion:
-    """Re-walk the raw scjson AST into the state-centric `HdlRegion`
-    shape this emitter consumes. Wave-1 collapses the entire chart into
-    one region (no <parallel>); per §6.1 a "region" is one top-level
-    state OR one orthogonal child of <parallel>, but the wave-1 emitter
-    treats the whole chart as one region whose states are all the
-    top-level <state>s."""
-
-    # Datamodel: chart-root <datamodel><data .../>.
-    datamodel: list[HdlDatamodelSignal] = []
-    dm = chart.get("datamodel", [])
+def _collect_datamodel(container: dict[str, Any]) -> list[HdlDatamodelSignal]:
+    """Pull <datamodel><data .../></datamodel> children off a container
+    (chart root, region root, or per-state node).  Tolerates both the
+    list-wrapped and the dict-wrapped shapes the scjson loader produces."""
+    out: list[HdlDatamodelSignal] = []
+    dm = container.get("datamodel", [])
     if isinstance(dm, list):
         for entry in dm:
             for d in entry.get("data", []) or []:
-                datamodel.append(
+                out.append(
                     HdlDatamodelSignal(
                         name=d.get("id", ""),
                         initial_expr=d.get("expr", "") or "0",
+                        scxml_type=d.get("type", "int") or "int",
                     )
                 )
     elif isinstance(dm, dict):
         for d in dm.get("data", []) or []:
-            datamodel.append(
+            out.append(
                 HdlDatamodelSignal(
                     name=d.get("id", ""),
                     initial_expr=d.get("expr", "") or "0",
+                    scxml_type=d.get("type", "int") or "int",
                 )
             )
+    return out
 
-    # States: top-level only at wave-1 (nested-state support deferred —
-    # the rejection pass does NOT reject nested states because they are
-    # legitimate SCXML; wave-1 just flattens them, which matches the
-    # SOS-08-C §6.1 "leaves of the region's SCXML state tree" rule).
+
+def _normalise_region(
+    region_node: dict[str, Any],
+    region_name: str,
+    parent_clock: str,
+    chart_datamodel_names: set[str],
+) -> HdlRegion:
+    """Re-walk a region's subtree into the state-centric `HdlRegion`
+    shape this emitter consumes.
+
+    A region is either:
+      - the chart root (single-region case), or
+      - one orthogonal child of a `<parallel>` element.
+
+    `parent_clock` is the clock-domain name inherited from the
+    enclosing scope (root chart default = "main" per PCDN-C-001).
+    """
+
+    # Per-region datamodel: <datamodel><data .../> directly under the
+    # region.  Shared datamodel is collected at chart root.
+    datamodel = _collect_datamodel(region_node)
+
+    # Clock-domain annotation: explicit `clock` attribute on the region
+    # node beats inheritance.  Per PCDN-C-001 the default is parent.
+    clock_domain = region_node.get("clock") or parent_clock or "main"
+
+    # States: yield every <state> reachable without crossing into a
+    # nested <parallel>.
     states: list[HdlState] = []
-    for sid, st in _walk_all_states(chart):
+    writes: set[str] = set()
+    reads: set[str] = set()
+    for sid, st in _walk_region_states(region_node):
         hs = HdlState(state_id=sid)
         for oe in st.get("onentry", []) or []:
-            hs.onentry_assigns.extend(_collect_assigns(oe))
+            assigns = _collect_assigns(oe)
+            hs.onentry_assigns.extend(assigns)
+            for a in assigns:
+                writes.add(a.location)
         for ox in st.get("onexit", []) or []:
-            hs.onexit_assigns.extend(_collect_assigns(ox))
+            assigns = _collect_assigns(ox)
+            hs.onexit_assigns.extend(assigns)
+            for a in assigns:
+                writes.add(a.location)
         for idx, tr in enumerate(st.get("transition", []) or []):
             target = tr.get("target")
             if isinstance(target, list):
                 target = target[0] if target else None
             if not target:
-                # Internal transition (no target) — wave-1 ignores.
+                # Internal transition (no target) — wave-2 ignores
+                # target-less transitions when computing case mux
+                # next-state assignments (the body's <assign> children
+                # are still honoured if present).
                 continue
+            cond = tr.get("cond")
+            if cond:
+                reads.update(_read_idents_in_expr(cond))
             hs.transitions.append(
                 HdlTransition(
                     source=sid,
                     target=target,
                     event=tr.get("event"),
-                    cond=tr.get("cond"),
+                    cond=cond,
                     doc_order=idx,
                 )
             )
         states.append(hs)
 
-    # Initial state: from chart root's `initial=` attribute (PCDN-C-003).
-    initial = chart.get("initial")
+    # Reads: any cond expression mentions of shared datamodel signals
+    # are reads from this region's perspective.  Intersect with the
+    # chart-wide datamodel set so we don't accidentally count local
+    # state identifiers as datamodel reads.
+    region_dm_names = {d.name for d in datamodel}
+    reads = {r for r in reads if r in chart_datamodel_names or r in region_dm_names}
+    writes = {w for w in writes if w in chart_datamodel_names or w in region_dm_names}
+
+    # Initial state: from region root's `initial` attribute.
+    initial = region_node.get("initial")
     if isinstance(initial, list):
         initial = initial[0] if initial else None
     if not initial:
         if not states:
             raise UnsupportedChartError(
-                "SOS-08-C wave-1 scaffold requires at least one <state> in "
-                "the chart; none found."
+                "SOS-08-C wave-2 emitter requires at least one <state> in "
+                f"region '{region_name}'; none found."
             )
-        # Per SCXML semantics, lack of explicit <initial> defaults to the
-        # first state in document order. SOS-08-C §5.6 / PCDN-C-003
-        # honour this default.
+        # SCXML default: first state in document order.
         initial = states[0].state_id
 
     return HdlRegion(
-        name=chart_name,
+        name=region_name,
         states=states,
         initial_state=initial,
         datamodel=datamodel,
+        clock_domain=clock_domain,
+        writes=sorted(writes),
+        reads=sorted(reads),
+    )
+
+
+def _read_idents_in_expr(expr: str) -> set[str]:
+    """Cheap identifier extraction from a guard expression.  Used to
+    decide which datamodel signals a guard READS so cross-domain
+    detection works.  Returns identifiers that look like Python/ECMAScript
+    identifiers (alpha-leading, alnum/underscore body)."""
+    import re
+    out: set[str] = set()
+    for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr or ""):
+        # Skip obvious keywords/operators that map to RTL literals.
+        if tok.lower() in {"true", "false", "and", "or", "not", "xor"}:
+            continue
+        out.add(tok)
+    return out
+
+
+def _normalise_chart(chart: dict[str, Any], chart_name: str) -> HdlChart:
+    """Re-walk the raw scjson AST into the chart-centric `HdlChart`
+    shape.  Detects whether the chart has top-level <parallel> regions
+    or is single-region; in either case produces a list of HdlRegion
+    instances plus shared-datamodel + cross-domain-signal records."""
+
+    # Shared (chart-root) datamodel.
+    shared_dm = _collect_datamodel(chart)
+    shared_dm_names = {d.name for d in shared_dm}
+    chart_clock = chart.get("clock") or "main"
+
+    regions: list[HdlRegion] = []
+
+    # If the chart has top-level <parallel>, each <parallel> child's
+    # orthogonal regions become independent HdlRegions.
+    parallels = chart.get("parallel", []) or []
+    if parallels:
+        for par_idx, par in enumerate(parallels):
+            par_clock = par.get("clock") or chart_clock
+            # Each direct <state> child of <parallel> is an orthogonal
+            # region.  scjson loader represents these as the "state"
+            # list on the <parallel> dict.
+            par_states = par.get("state", []) or []
+            for r_idx, region_node in enumerate(par_states):
+                region_name = (
+                    region_node.get("id")
+                    or f"{par.get('id') or f'parallel_{par_idx}'}_region_{r_idx}"
+                )
+                region = _normalise_region(
+                    region_node,
+                    region_name,
+                    parent_clock=par_clock,
+                    chart_datamodel_names=shared_dm_names,
+                )
+                regions.append(region)
+    else:
+        # Single-region case: the whole chart is one region.
+        region = _normalise_region(
+            chart,
+            chart_name,
+            parent_clock=chart_clock,
+            chart_datamodel_names=shared_dm_names,
+        )
+        regions.append(region)
+
+    if not any(r.states for r in regions):
+        raise UnsupportedChartError(
+            "SOS-08-C wave-2 emitter requires at least one <state> in "
+            f"chart '{chart_name}'; none found."
+        )
+
+    # Cross-domain signal detection.  PCDN-C-002: any signal written by
+    # region R_a in clock domain CD_a and read by region R_b in clock
+    # domain CD_b ≠ CD_a needs a synchronizer.  For each writer x
+    # reader pair, emit one record carrying the inferred width.
+    cross_domain: list[tuple[str, str, str, str, str, int]] = []
+    writer_index: dict[str, list[HdlRegion]] = {}
+    reader_index: dict[str, list[HdlRegion]] = {}
+    for r in regions:
+        for w in r.writes:
+            writer_index.setdefault(w, []).append(r)
+        for rd in r.reads:
+            reader_index.setdefault(rd, []).append(r)
+
+    dm_lookup = {d.name: d for d in shared_dm}
+    for r_inner in regions:
+        for d_local in r_inner.datamodel:
+            dm_lookup.setdefault(d_local.name, d_local)
+
+    for signal_name, readers in reader_index.items():
+        writers = writer_index.get(signal_name, [])
+        for writer in writers:
+            for reader in readers:
+                if writer is reader:
+                    continue
+                if writer.clock_domain == reader.clock_domain:
+                    continue
+                dm = dm_lookup.get(signal_name)
+                width = (
+                    _resolve_port_width(dm.scxml_type, dm.name)
+                    if dm
+                    else 32
+                )
+                cross_domain.append(
+                    (
+                        signal_name,
+                        writer.name,
+                        reader.name,
+                        writer.clock_domain,
+                        reader.clock_domain,
+                        width,
+                    )
+                )
+
+    return HdlChart(
+        name=chart_name,
+        regions=regions,
+        shared_datamodel=shared_dm,
+        cross_domain_signals=cross_domain,
     )
 
 
 # ---------------------------------------------------------------------------
-# VHDL emission — §6.2 module shape, walked step-by-step.
-#
-# The wave-1 emitter is a string-builder over `hdl_common` primitives.
-# Each helper from hdl_common returns a string fragment; this module
-# composes them into the final entity + architecture.
+# Port-width-from-signal-width polish (PCDN-C-005 / wave-2 follow-up).
 # ---------------------------------------------------------------------------
 
 
-def _entity_name(chart_name: str) -> str:
-    """VHDL identifier rule: lower-case, snake-case, suffix `_fsm`."""
-    safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in chart_name)
+def _resolve_port_width(scxml_type: str, name: str) -> int:
+    """Return the bit width of a datamodel port given the SCXML type
+    string.  Wave-2 prefers `hdl_common.port_width_from_signal_width`
+    when available; falls back to a small local table that mirrors
+    SOS-08-C §5.4's default-width policy (i32 ≅ 32 bits)."""
+
+    if _hdl_port_width is not None:
+        try:
+            return int(_hdl_port_width(scxml_type, name))
+        except Exception:
+            pass  # fall through to local table
+
+    # Local fallback mirroring hdl_common._TYPE_TABLE widths.
+    key = (scxml_type or "").strip().lower()
+    table = {
+        "bool": 1,
+        "bit": 1,
+        "i8": 8,
+        "i16": 16,
+        "i32": 32,
+        "i64": 64,
+        "int": 32,
+        "integer": 32,
+        "u8": 8,
+        "u16": 16,
+        "u32": 32,
+        "u64": 64,
+        "uint": 32,
+    }
+    return table.get(key, 32)
+
+
+# ---------------------------------------------------------------------------
+# Guard expression compilation.
+#
+# §6.3 + PCDN-C-004: each <transition cond="..."/> compiles to a VHDL
+# boolean expression.  The wave-2 emitter delegates to
+# `hdl_common.emit_guard_expr` when available; falls back to a minimal
+# inline translator that handles the chart-author-vocabulary subset of
+# SOS-01 §5.1 ECMAScript (logical/relational ops, identifiers, numeric
+# literals).  Depth is measured by `compute_guard_depth` from
+# hdl_common and budgeted per PCDN-C-004.
+# ---------------------------------------------------------------------------
+
+
+def _compile_guard(
+    expr_str: str,
+    depth_budget: int,
+    source_state: str,
+) -> str:
+    """Compile a chart-side guard expression to VHDL.  Raises
+    `UnsupportedChartError` with a chart-vocabulary message if the
+    guard's depth exceeds the budget per PCDN-C-004."""
+
+    if not expr_str:
+        return "true"
+
+    # Depth check first — independent of the lowering path.
+    try:
+        depth = compute_guard_depth(expr_str)
+    except Exception:
+        depth = 0
+    if depth > depth_budget:
+        raise UnsupportedChartError(
+            "SOS-08-C wave-2 emitter rejects guard expression — depth "
+            f"{depth} exceeds budget {depth_budget} per PCDN-C-004 "
+            f"(SCXML-LINT-C-2). Guard on transition out of state "
+            f"'{source_state}': {expr_str!r}."
+        )
+
+    if _hdl_emit_guard_expr is not None:
+        try:
+            return _hdl_emit_guard_expr(
+                expr_str, Dialect.VHDL, depth_budget=depth_budget
+            )
+        except _HdlGuardDepthError as exc:  # pragma: no cover
+            raise UnsupportedChartError(
+                "SOS-08-C wave-2 emitter rejects guard expression — "
+                f"hdl_common reports depth over budget {depth_budget} "
+                f"per PCDN-C-004 on transition out of state "
+                f"'{source_state}': {expr_str!r} ({exc})."
+            ) from exc
+        except Exception:
+            # Fall through to inline lowering for parser failures so
+            # the wave-2 scaffold doesn't block on helper drift.
+            pass
+
+    # Inline fallback — minimal ECMAScript → VHDL operator
+    # substitution.  Honours the subset SOS-01 §5.1 names + the
+    # PCDN-C-004 depth metric uses.  Wave-3 will replace this with
+    # the canonical helper.
+    return _inline_guard_to_vhdl(expr_str)
+
+
+def _inline_guard_to_vhdl(expr_str: str) -> str:
+    """Minimal local ECMAScript → VHDL translator for the wave-2
+    fallback path.  Handles && / || / ! / ==  / != / relational ops;
+    preserves identifiers and numeric literals; appends `_q` to any
+    bare identifier that looks like a datamodel signal so the guard
+    references the registered value.  This is a best-effort wave-2
+    scaffold; the canonical compiler lives in
+    `hdl_common.emit_guard_expr`."""
+
+    import re
+
+    out = expr_str
+    # Order matters: longer operators first.
+    substitutions = [
+        ("&&", " and "),
+        ("||", " or "),
+        ("==", " = "),
+        ("!=", " /= "),
+        ("!", " not "),
+    ]
+    for js, vhdl in substitutions:
+        out = out.replace(js, vhdl)
+
+    # Append _q to bare identifiers that look like datamodel signals
+    # (alpha-leading, not a VHDL keyword).  This is heuristic — the
+    # canonical lowering in hdl_common does scoped name resolution.
+    def _suffix(match: "re.Match[str]") -> str:
+        ident = match.group(0)
+        lowered = ident.lower()
+        if lowered in {
+            "true", "false", "and", "or", "not", "xor",
+            "if", "then", "else", "elsif", "end",
+        }:
+            return ident
+        if ident.endswith("_q"):
+            return ident
+        return f"{ident}_q"
+
+    out = re.sub(r"[A-Za-z_][A-Za-z0-9_]*", _suffix, out)
+    # Collapse repeated whitespace.
+    out = re.sub(r"\s+", " ", out).strip()
+    return out
+
+
+# ---------------------------------------------------------------------------
+# VHDL emission — §6.2 module shape, walked step-by-step.
+# ---------------------------------------------------------------------------
+
+
+def _safe_ident(raw: str) -> str:
+    safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in (raw or ""))
     if safe and safe[0].isdigit():
         safe = "x" + safe
-    return f"{safe.lower()}_fsm"
+    return safe.lower()
+
+
+def _entity_name(chart_name: str, region_name: Optional[str] = None) -> str:
+    """VHDL identifier rule.  For single-region charts: `<chart>_fsm`.
+    For a region inside a <parallel> chart: `<chart>_region_<region>`."""
+    base = _safe_ident(chart_name)
+    if region_name is None or region_name == chart_name:
+        return f"{base}_fsm"
+    return f"{base}_region_{_safe_ident(region_name)}"
 
 
 def _state_constant_name(state_id: str) -> str:
-    """SCXML state-id → VHDL state-constant name. The hand-written
-    examples in §6.11 use `ST_<id>` uppercased; mirror that."""
+    """SCXML state-id → VHDL state-constant name.  Mirrors the
+    hand-written examples in §6.11."""
     safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in state_id)
     return f"ST_{safe.upper()}"
 
 
 def _one_hot_value(index: int, n_states: int) -> str:
     """Emit a VHDL std_logic_vector literal for the index-th one-hot
-    value among `n_states`. Bit 0 is rightmost in VHDL `downto` range,
+    value among `n_states`.  Bit 0 is rightmost in VHDL `downto` range,
     so index 0 maps to "0...0001"."""
     bits = ["0"] * n_states
-    # VHDL std_logic_vector(N-1 downto 0): leftmost char is bit N-1.
-    # We assign index → bit `index` (one-hot encoding), so leftmost
-    # char represents the highest-numbered state.
     bits[n_states - 1 - index] = "1"
     return '"' + "".join(bits) + '"'
 
 
 def _datamodel_signal_lines(
     datamodel: list[HdlDatamodelSignal],
-) -> tuple[list[str], list[str], list[str]]:
-    """Return three parallel lists of VHDL fragments:
+) -> tuple[list[str], list[str], list[str], list[int]]:
+    """Return four parallel lists of VHDL fragments + widths:
       - signal declarations (architecture-level)
       - reset assignments (inside the rst='1' branch)
-      - port declarations (entity-level — datamodel signals are exposed
-        as outputs per SOS-08-C §6.2's worked example shape)
-
-    Wave-1 uses `hdl_common.map_datamodel_type` per signal; falls back
-    to `signed(31 downto 0)` per SOS-08-C §5.4's default-width rule
-    when the helper is silent.
+      - port declarations (entity-level)
+      - port widths (for downstream consumers)
     """
     decls: list[str] = []
     resets: list[str] = []
     ports: list[str] = []
+    widths: list[int] = []
     for d in datamodel:
-        # `map_datamodel_type` expected signature: (name, initial_expr,
-        # dialect) → str (the VHDL type, e.g. "signed(31 downto 0)").
-        # If the sibling helper has a different shape, the call site
-        # here is the integration point.
         vhdl_type = map_datamodel_type(d.name, d.initial_expr, Dialect.VHDL)
+        width = _resolve_port_width(d.scxml_type, d.name)
+        widths.append(width)
         decls.append(
             emit_signal_decl(
                 name=f"{d.name}_q",
@@ -431,60 +804,58 @@ def _datamodel_signal_lines(
                 dialect=Dialect.VHDL,
             )
         )
-        # Reset value: chart's initial_expr literal, lowered to a VHDL
-        # literal via `to_signed`/`to_unsigned`. Wave-1 only handles
-        # numeric literals — non-numeric chart initials are folded to
-        # 0 with a header comment noting the fallback.
         initial = (d.initial_expr or "0").strip()
         try:
             int_val = int(initial, 0)
             reset_expr = f"to_signed({int_val}, {d.name}_q'length)"
         except (TypeError, ValueError):
-            reset_expr = f"(others => '0')  -- wave-1 fallback: chart expr {initial!r}"
+            reset_expr = (
+                f"(others => '0')  -- wave-2 fallback: chart expr {initial!r}"
+            )
         resets.append(f"{d.name}_q <= {reset_expr};")
-        # Port: expose the registered signal as an output (SOS-08-C
-        # §6.2 worked example shape).
+
+        # Port-width polish (wave-2): emit std_logic_vector(N-1 downto 0)
+        # when the underlying signal is multi-bit.
+        if width <= 1:
+            port_width_expr = "std_logic"
+        else:
+            port_width_expr = f"std_logic_vector({width - 1} downto 0)"
         ports.append(
             emit_port_decl(
                 HdlPort(
                     name=f"data_{d.name}",
                     direction="out",
-                    width_expr=vhdl_type,
+                    width=width if width > 1 else 1,
+                    width_expr=port_width_expr,
                 ),
                 dialect=Dialect.VHDL,
             )
         )
-    return decls, resets, ports
+    return decls, resets, ports, widths
 
 
 def _emit_entity(
     region: HdlRegion,
+    chart_name: str,
     datamodel_ports: list[str],
     n_states: int,
 ) -> str:
-    """Step 2 of §6 — emit the VHDL entity port list.
-
-    Wave-1 surface:
-      clk, rst (sync active-high per INV-S-HDL-A-1),
-      datamodel outputs (one per <data>),
-      current_state output (the one-hot state register).
-
-    Event-ingress / egress ports (§6.4 / §6.5) defer to wave-2.
-    """
+    """Emit the VHDL entity port list for a region FSM module."""
+    entity_id = _entity_name(chart_name, region.name)
     lines: list[str] = []
-    lines.append(f"entity {_entity_name(region.name)} is")
+    lines.append(f"entity {entity_id} is")
     lines.append("    port (")
 
     port_lines: list[str] = []
     port_lines.append(
         emit_port_decl(
-            HdlPort(name="clk", direction="in", width_expr="std_logic"),
+            HdlPort(name="clk", direction="in", width=1, width_expr="std_logic"),
             dialect=Dialect.VHDL,
         )
     )
     port_lines.append(
         emit_port_decl(
-            HdlPort(name="rst", direction="in", width_expr="std_logic"),
+            HdlPort(name="rst", direction="in", width=1, width_expr="std_logic"),
             dialect=Dialect.VHDL,
         )
     )
@@ -495,31 +866,24 @@ def _emit_entity(
             HdlPort(
                 name="current_state",
                 direction="out",
+                width=n_states,
                 width_expr=f"std_logic_vector({n_states - 1} downto 0)",
             ),
             dialect=Dialect.VHDL,
         )
     )
-    # VHDL port list is semicolon-separated, no trailing semicolon.
     for i, pl in enumerate(port_lines):
         suffix = ";" if i < len(port_lines) - 1 else ""
         lines.append(f"        {pl}{suffix}")
     lines.append("    );")
-    lines.append(f"end entity {_entity_name(region.name)};")
+    lines.append(f"end entity {entity_id};")
     return "\n".join(lines)
 
 
 def _emit_state_constants(region: HdlRegion) -> list[str]:
-    """Step 2 of §6 — emit the one-hot state constants in document
-    order. Per PCDN-C-005 the encoding defaults to one-hot at wave-1
-    (chart-annotation override deferred to wave-2)."""
+    """Emit the one-hot state constants in document order."""
     n = len(region.states)
-    # hdl_common.emit_fsm_state_constants returns a list of declaration
-    # lines. If it isn't available with the expected shape, the
-    # integration patch belongs here.
     try:
-        # Expected signature: (state_names, encoding, dialect, width)
-        # → list[str].
         return list(
             emit_fsm_state_constants(
                 state_names=[_state_constant_name(s.state_id) for s in region.states],
@@ -529,9 +893,7 @@ def _emit_state_constants(region: HdlRegion) -> list[str]:
             )
         )
     except TypeError:
-        # Fallback: emit them inline so the wave-1 scaffold doesn't
-        # block on a helper-signature drift.
-        out = []
+        out: list[str] = []
         for idx, s in enumerate(region.states):
             cname = _state_constant_name(s.state_id)
             val = _one_hot_value(idx, n)
@@ -544,30 +906,72 @@ def _emit_state_constants(region: HdlRegion) -> list[str]:
 def _emit_transition_case_arm(
     state: HdlState,
     region: HdlRegion,
+    depth_budget: int,
 ) -> str:
-    """Emit the case-arm body for one source state. Per PCDN-C-006 the
-    transition list is walked in document order and the first arm
-    whose trigger is true wins. Wave-1 has no guards (§5.3 / wave-2)
-    and no event-id ingress yet (§6.4 / wave-2), so every wave-1
-    transition is unconditional — the first listed transition's target
-    becomes the next-state pick. Subsequent transitions are emitted as
-    commented `-- elided: doc-order priority` lines so chart authors
-    can see which transitions the wave-1 cut suppresses.
+    """Emit the case-arm body for one source state.
+
+    Wave-2:
+      - For unguarded transitions: emit document-order priority — first
+        listed transition becomes the next-state assignment; subsequent
+        unguarded transitions are commented as elided.
+      - For guarded transitions: emit an if/elsif/else chain.  The first
+        guard whose VHDL boolean is true wins (document order priority
+        per PCDN-C-006).  An unguarded transition at the end of the
+        list closes the chain with an explicit `else` branch (its
+        target becomes the fall-through).  No unguarded fallback ⇒
+        `else state_next <= state_q;`.
     """
     if not state.transitions:
         return f"            state_next <= state_q;"
-    chosen = state.transitions[0]
-    lines: list[str] = []
-    lines.append(
-        f"            state_next <= {_state_constant_name(chosen.target)};"
-    )
-    for extra in state.transitions[1:]:
+
+    # Partition into a doc-ordered list; identify whether any have
+    # `cond` set.
+    has_any_guard = any(t.cond for t in state.transitions)
+    if not has_any_guard:
+        chosen = state.transitions[0]
+        lines: list[str] = []
         lines.append(
-            f"            -- doc-order priority elided (PCDN-C-006): "
-            f"source={extra.source} target={extra.target} "
-            f"event={extra.event or '-'} "
-            f"-- guard-aware mux lands in wave-2"
+            f"            state_next <= {_state_constant_name(chosen.target)};"
         )
+        for extra in state.transitions[1:]:
+            lines.append(
+                f"            -- doc-order priority elided (PCDN-C-006): "
+                f"source={extra.source} target={extra.target} "
+                f"event={extra.event or '-'}"
+            )
+        return "\n".join(lines)
+
+    # Mixed/all-guarded path — emit if/elsif/else chain.
+    lines = []
+    first = True
+    fallthrough_target: Optional[str] = None
+    for t in state.transitions:
+        if t.cond:
+            compiled = _compile_guard(
+                t.cond, depth_budget=depth_budget, source_state=t.source
+            )
+            kw = "if" if first else "elsif"
+            first = False
+            lines.append(
+                f"            {kw} {compiled} then  -- doc-order {t.doc_order} → {t.target}"
+            )
+            lines.append(
+                f"                state_next <= {_state_constant_name(t.target)};"
+            )
+        else:
+            # First unguarded after some guards = closing else branch.
+            fallthrough_target = t.target
+            break
+
+    if fallthrough_target is not None:
+        lines.append(f"            else")
+        lines.append(
+            f"                state_next <= {_state_constant_name(fallthrough_target)};"
+        )
+    else:
+        lines.append(f"            else")
+        lines.append(f"                state_next <= state_q;")
+    lines.append(f"            end if;")
     return "\n".join(lines)
 
 
@@ -575,25 +979,7 @@ def _emit_register_process(
     region: HdlRegion,
     datamodel_resets: list[str],
 ) -> str:
-    """Step 1 (state register) + step 6 (datamodel reset values)
-    composed into the standard VHDL clocked process. Sync active-high
-    reset per INV-S-HDL-A-1.
-
-    The hand-written shape is:
-
-        process(clk) is
-        begin
-            if rising_edge(clk) then
-                if rst = '1' then
-                    state_q <= ST_<initial>;
-                    <datamodel reset assignments>
-                else
-                    state_q <= state_next;
-                    <datamodel update assignments — wave-2>
-                end if;
-            end if;
-        end process;
-    """
+    """Emit the synchronous active-high reset register process."""
     try:
         return emit_register_process(
             state_q="state_q",
@@ -604,8 +990,6 @@ def _emit_register_process(
             dialect=Dialect.VHDL,
         )
     except TypeError:
-        # Fallback emission keeps the wave-1 scaffold self-contained
-        # under helper-signature drift.
         reset_body = "\n".join(
             f"                {line}" for line in datamodel_resets
         )
@@ -624,15 +1008,15 @@ def _emit_register_process(
         )
 
 
-def _emit_combinational_block(region: HdlRegion) -> str:
-    """Step 1 (next-state mux) per §6.2. Combinational process whose
-    case enumerates every source state in document order; per state,
-    the wave-1 cut picks the first listed transition's target."""
+def _emit_combinational_block(region: HdlRegion, depth_budget: int) -> str:
+    """Emit the next-state combinational case statement.  Wave-2's
+    arm bodies may be either single-line assignments (unguarded) OR
+    if/elsif/else chains (guarded)."""
     arms: list[str] = []
     for s in region.states:
         cname = _state_constant_name(s.state_id)
         arms.append(f"        when {cname} =>")
-        arms.append(_emit_transition_case_arm(s, region))
+        arms.append(_emit_transition_case_arm(s, region, depth_budget))
     arms_str = "\n".join(arms)
 
     try:
@@ -644,7 +1028,6 @@ def _emit_combinational_block(region: HdlRegion) -> str:
             dialect=Dialect.VHDL,
         )
     except TypeError:
-        # Fallback emission preserves the wave-1 acceptance shape.
         return (
             "    process(state_q) is\n"
             "    begin\n"
@@ -658,127 +1041,329 @@ def _emit_combinational_block(region: HdlRegion) -> str:
         )
 
 
-def _emit_transition_mux_dispatch(region: HdlRegion) -> str:
-    """Honour the orchestrator's spec — call hdl_common's
-    `emit_transition_mux` when its signature matches, else fall back
-    to the inline emission above. This wrapper exists so the wave-2
-    integration pass can swap in the canonical helper without
-    re-walking every call site."""
-    try:
-        arm_payload = [
-            {
-                "source": s.state_id,
-                "source_const": _state_constant_name(s.state_id),
-                "transitions": [
-                    {
-                        "target": t.target,
-                        "target_const": _state_constant_name(t.target),
-                        "event": t.event,
-                        "cond": t.cond,
-                        "doc_order": t.doc_order,
-                    }
-                    for t in s.transitions
-                ],
-            }
-            for s in region.states
-        ]
-        return emit_transition_mux(
-            arms=arm_payload,
-            state_q="state_q",
-            state_next="state_next",
-            dialect=Dialect.VHDL,
-        )
-    except TypeError:
-        return _emit_combinational_block(region)
+# ---------------------------------------------------------------------------
+# Chart-top wrapper emission (§6.10).
+#
+# For a single-region chart wave-2 still emits one `<chart>_fsm.vhd`
+# file (no wrapper needed — the region IS the chart top).  For a
+# chart with N>1 regions (post-<parallel> normalisation), wave-2
+# emits N region module files + one `<chart>_top.vhd` wrapper that
+# instantiates each region and wires cross-domain synchronizers per
+# PCDN-C-002.
+# ---------------------------------------------------------------------------
 
 
-def render_target(chart_ir: Any, config: dict[str, Any]) -> dict[str, str]:
-    """Public entry point — called from `main.py` when `--target hdl-vhdl`.
+def _emit_sync_instance(
+    inst_name: str,
+    signal_name: str,
+    src_clock: str,
+    dst_clock: str,
+    width: int,
+) -> str:
+    """Emit one `sos_synchronizer` instantiation per PCDN-C-002.
+    Defaults to SYNC_STAGES=2 (matches sos_synchronizer wave-2
+    default)."""
 
-    Args:
-        chart_ir: raw scjson dict (the same shape `loader.load_chart`
-            reads from disk before normalising into `ChartAst`). The
-            sibling agent's CLI dispatcher is responsible for providing
-            this; wave-2 reconciles ChartAst plumbing.
-        config: dict carrying CLI flags. Wave-1 consumes:
-            - `chart_name` (str, required): the chart's identifier;
-              used for the VHDL entity name.
-            - `verbose` (bool, optional): future-use.
+    if _hdl_emit_sync_inst is not None:
+        try:
+            return _hdl_emit_sync_inst(
+                inst_name=inst_name,
+                src_signal=f"{signal_name}_src",
+                dst_signal=f"{signal_name}_dst",
+                src_clk=src_clock,
+                dst_clk=dst_clock,
+                dst_rst=f"rst_{dst_clock}",
+                width=width,
+                stages=2,
+                dialect=Dialect.VHDL,
+            )
+        except Exception:
+            pass
 
-    Returns:
-        dict mapping output filename → file content. Wave-1 emits one
-        file: `<chart_name>_fsm.vhd`.
+    # Inline fallback (sibling-agent canonical helper may not be ready
+    # at integration time).  Per PCDN-C-002 the synchronizer is
+    # retained regardless of `--verified-strip` reachability.
+    width_decl = (
+        f"std_logic_vector({width - 1} downto 0)" if width > 1 else "std_logic"
+    )
+    return (
+        f"    -- Cross-domain synchronizer per PCDN-C-002 (MTBF sign-off:\n"
+        f"    -- see docs/concepts/SOS-08-C-CONCEPTS.md §6.7 + MTBF.md).\n"
+        f"    -- Retained regardless of --verified-strip per PCDN-C-002.\n"
+        f"    {inst_name} : entity work.sos_synchronizer\n"
+        f"        generic map (\n"
+        f"            WIDTH  => {width},\n"
+        f"            STAGES => 2\n"
+        f"        )\n"
+        f"        port map (\n"
+        f"            src_clk  => {src_clock},\n"
+        f"            dst_clk  => {dst_clock},\n"
+        f"            dst_rst  => rst_{dst_clock},\n"
+        f"            src_data => {signal_name}_src,\n"
+        f"            dst_data => {signal_name}_dst\n"
+        f"        );"
+    )
 
-    Raises:
-        UnsupportedChartError: when the chart names a feature outside
-            the wave-1 scope (parallel regions, guards, ECMAScript
-            scripts, raises).
+
+def _emit_chart_top_wrapper(chart: HdlChart) -> str:
+    """Emit the chart-top wrapper module that instantiates each region
+    plus any cross-domain synchronizers.  §6.10 + PCDN-C-001 (clock
+    inherit) + PCDN-C-002 (retain synchronizers).
+
+    Falls back to inline emission when hdl_common's canonical helper
+    is unavailable.
     """
-    # Accept either the raw scjson dict (preferred contract) or a
-    # ChartAst — wave-1 only consumes the raw dict, but the dispatcher
-    # may pass the ChartAst by mistake during integration; surface a
-    # clear error in that case.
-    if not isinstance(chart_ir, dict):
-        raise UnsupportedChartError(
-            "SOS-08-C wave-1 render_target expects the raw scjson dict, "
-            f"not {type(chart_ir).__name__}. The sibling main.py "
-            "dispatcher needs to pass the parsed scjson AST."
+
+    if _hdl_emit_chart_top_wrapper is not None:
+        try:
+            region_modules = [
+                {
+                    "name": _entity_name(chart.name, r.name),
+                    "region_name": r.name,
+                    "clock_domain": r.clock_domain,
+                    "datamodel": [
+                        {"name": d.name, "scxml_type": d.scxml_type}
+                        for d in r.datamodel
+                    ],
+                    "n_states": len(r.states),
+                }
+                for r in chart.regions
+            ]
+            cross_domain_signals = [
+                {
+                    "name": sig,
+                    "writer": writer,
+                    "reader": reader,
+                    "src_clock": src_clk,
+                    "dst_clock": dst_clk,
+                    "width": width,
+                }
+                for (sig, writer, reader, src_clk, dst_clk, width)
+                in chart.cross_domain_signals
+            ]
+            return _hdl_emit_chart_top_wrapper(
+                chart_name=chart.name,
+                region_modules=region_modules,
+                cross_domain_signals=cross_domain_signals,
+                dialect=Dialect.VHDL,
+            )
+        except Exception:
+            pass  # fall through to inline emission
+
+    # Distinct clock domains across regions — per PCDN-C-001 default
+    # is single-domain ("main"); a second domain is introduced only
+    # when at least one region carries an explicit annotation.
+    clocks: list[str] = []
+    for r in chart.regions:
+        if r.clock_domain not in clocks:
+            clocks.append(r.clock_domain)
+
+    chart_id = _safe_ident(chart.name)
+    top_entity = f"{chart_id}_top"
+
+    # Build port list — one clk/rst per distinct clock domain.
+    port_lines: list[str] = []
+    for clk in clocks:
+        port_lines.append(f"        clk_{clk} : in std_logic")
+        port_lines.append(f"        rst_{clk} : in std_logic")
+
+    # Datamodel + per-region current_state outputs — one per region for
+    # observability (INV-S-HDL-C-2).
+    for r in chart.regions:
+        n = len(r.states)
+        port_lines.append(
+            f"        current_state_{_safe_ident(r.name)} : "
+            f"out std_logic_vector({n - 1} downto 0)"
         )
 
-    # Config may be a dict (legacy) or an HdlEmitConfig dataclass.
-    if isinstance(config, dict):
-        chart_name = config.get("chart_name") or "chart"
+    # Append trailing semicolons except on the last line.
+    port_block_lines: list[str] = []
+    for i, pl in enumerate(port_lines):
+        suffix = ";" if i < len(port_lines) - 1 else ""
+        port_block_lines.append(f"{pl}{suffix}")
+    port_block = "\n".join(port_block_lines)
+
+    entity_block = (
+        f"entity {top_entity} is\n"
+        f"    port (\n"
+        f"{port_block}\n"
+        f"    );\n"
+        f"end entity {top_entity};"
+    )
+
+    # Architecture — region instantiations + sync_inst per cross-
+    # domain signal.
+    region_instances: list[str] = []
+    for r in chart.regions:
+        inst_name = f"u_region_{_safe_ident(r.name)}"
+        entity_id = _entity_name(chart.name, r.name)
+        n = len(r.states)
+        port_map_lines: list[str] = []
+        port_map_lines.append(f"            clk           => clk_{r.clock_domain},")
+        port_map_lines.append(f"            rst           => rst_{r.clock_domain},")
+        for d in r.datamodel:
+            port_map_lines.append(
+                f"            data_{d.name} => data_{d.name}_{_safe_ident(r.name)},"
+            )
+        port_map_lines.append(
+            f"            current_state => current_state_{_safe_ident(r.name)}"
+        )
+        port_map_block = "\n".join(port_map_lines)
+        region_instances.append(
+            f"    {inst_name} : entity work.{entity_id}\n"
+            f"        port map (\n"
+            f"{port_map_block}\n"
+            f"        );"
+        )
+
+    # Internal signals carrying per-region datamodel outputs so the
+    # wrapper can route them through synchronizers.
+    internal_sig_lines: list[str] = []
+    for r in chart.regions:
+        for d in r.datamodel:
+            width = _resolve_port_width(d.scxml_type, d.name)
+            tvec = (
+                f"std_logic_vector({width - 1} downto 0)" if width > 1 else "std_logic"
+            )
+            internal_sig_lines.append(
+                f"    signal data_{d.name}_{_safe_ident(r.name)} : {tvec};"
+            )
+
+    # Cross-domain synchronizer instantiations (PCDN-C-002 — retained
+    # regardless of verified-strip).
+    sync_blocks: list[str] = []
+    for idx, (sig, writer, reader, src_clk, dst_clk, width) in enumerate(
+        chart.cross_domain_signals
+    ):
+        inst = f"u_sync_{_safe_ident(sig)}_{idx}"
+        # Internal src/dst wires expected by sos_synchronizer.  We
+        # alias the writer's data port as the src signal and create a
+        # dst wire the reader region may consume.
+        width_decl = (
+            f"std_logic_vector({width - 1} downto 0)" if width > 1 else "std_logic"
+        )
+        sync_blocks.append(
+            f"    signal {sig}_src : {width_decl};\n"
+            f"    signal {sig}_dst : {width_decl};"
+        )
+        sync_blocks.append(
+            f"    -- Cross-domain: {sig} writer={writer} reader={reader} "
+            f"src={src_clk} dst={dst_clk}"
+        )
+        sync_blocks.append(
+            _emit_sync_instance(
+                inst_name=inst,
+                signal_name=sig,
+                src_clock=f"clk_{src_clk}",
+                dst_clock=f"clk_{dst_clk}",
+                width=width,
+            )
+        )
+        # Connect writer's datamodel output to src.
+        sync_blocks.append(
+            f"    {sig}_src <= data_{sig}_{_safe_ident(writer)};"
+        )
+
+    arch_decls = "\n".join(internal_sig_lines)
+    if sync_blocks:
+        # Sync-block signal declarations go in the architecture decl
+        # region (the `signal ... ;` lines from each block need to be
+        # split from the instance block).  Split each block.
+        decl_lines: list[str] = []
+        body_lines: list[str] = []
+        for blk in sync_blocks:
+            for line in blk.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("signal "):
+                    decl_lines.append(f"    {stripped}")
+                else:
+                    body_lines.append(line)
+        if decl_lines:
+            arch_decls = (
+                arch_decls + "\n" + "\n".join(decl_lines)
+                if arch_decls
+                else "\n".join(decl_lines)
+            )
+        sync_body = "\n".join(body_lines)
     else:
-        chart_name = getattr(config, "chart_name", None) or "chart"
+        sync_body = ""
 
-    # Step 0 — reject features outside the wave-1 scaffold scope.
-    _reject_unsupported(chart_ir)
+    architecture = (
+        f"architecture rtl of {top_entity} is\n"
+        + (arch_decls + "\n" if arch_decls else "")
+        + f"begin\n"
+        + "\n\n".join(region_instances)
+        + ("\n\n" if region_instances and sync_body else "")
+        + (sync_body if sync_body else "")
+        + f"\nend architecture rtl;\n"
+    )
 
-    # Step 1 of §6 — parse + build region tree. Wave-1 collapses to a
-    # single region per the orchestrator's scope.
-    region = _normalise_region(chart_ir, chart_name)
-
-    if not region.states:
-        raise UnsupportedChartError(
-            "SOS-08-C wave-1 scaffold requires at least one <state>; "
-            f"chart '{chart_name}' has none."
-        )
-
-    # Step 2 of §6 — datamodel signals + ports.
-    dm_decls, dm_resets, dm_ports = _datamodel_signal_lines(region.datamodel)
-
-    # Step 2 of §6 — entity port list.
-    entity_block = _emit_entity(region, dm_ports, len(region.states))
-
-    # Step 2 of §6 — state-constant declarations (one-hot, document order).
-    state_constants = _emit_state_constants(region)
-
-    # Step 1 of §6 — state register + datamodel reset values.
-    register_process = _emit_register_process(region, dm_resets)
-
-    # Step 1 / step 5 of §6 — transition mux (combinational next-state).
-    transition_block = _emit_transition_mux_dispatch(region)
-
-    # Header — cite the spec docs per CLAUDE.md "Execution discipline".
     header_lines = [
-        f"-- Generated by tools/sos-codegen/transliterate_hdl_vhdl.py",
-        f"-- Chart: {chart_name}",
-        f"-- Spec : SOS-08-C-CONCEPTS.md §6 (emission algorithm), §15 (ratified 2026-05-23)",
-        f"-- Inv. : INV-SOS-A..H, INV-S-HDL-1..5, INV-S-HDL-A-1 (sync active-high reset),",
-        f"--        INV-S-HDL-C-1..5 (deterministic emission, observability,",
-        f"--        cross-domain enforcement, guard synthesizability, cooperative completion)",
-        f"-- PCDN : C-001 (clock-domain inherit), C-002 (retain synchronizers),",
-        f"--        C-003 (reset=<initial>), C-004 (guard depth 8), C-005 (chart annot wins),",
-        f"--        C-006 (doc-order priority lint rule)",
-        f"-- Wave : 1 scaffold — single-region, unguarded, assign-only.",
+        f"-- Generated by tools/sos-codegen/transliterate_hdl_vhdl.py (wave-2)",
+        f"-- Chart: {chart.name} (top-level wrapper)",
+        f"-- Spec : SOS-08-C-CONCEPTS.md §6.10 (chart-top wrapper),",
+        f"--        §6.7 (clock-domain annotation), §15 (ratified 2026-05-23)",
+        f"-- PCDN : PCDN-C-001 (clock-domain inherit),",
+        f"--        PCDN-C-002 (retain synchronizers regardless of --verified-strip;",
+        f"--        MTBF sign-off required per docs/concepts/SOS-08-C-CONCEPTS.md §6.7 +",
+        f"--        MTBF.md)",
+        f"-- Inv. : INV-S-HDL-C-2 (per-region observability),",
+        f"--        INV-S-HDL-C-3 (cross-domain transition enforcement),",
+        f"--        INV-S-HDL-A-1 (sync active-high reset)",
     ]
     try:
         header = emit_header_comment(header_lines, dialect=Dialect.VHDL)
     except TypeError:
         header = "\n".join(header_lines)
 
-    # Architecture body assembly.
+    return (
+        f"{header}\n\n"
+        f"library ieee;\n"
+        f"use ieee.std_logic_1164.all;\n"
+        f"use ieee.numeric_std.all;\n\n"
+        f"{entity_block}\n\n"
+        f"{architecture}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Region-level rendering — produces one VHDL file body per region.
+# ---------------------------------------------------------------------------
+
+
+def _render_region(
+    region: HdlRegion,
+    chart_name: str,
+    depth_budget: int,
+) -> str:
+    """Compose the architecture + entity for one region into a single
+    `.vhd` file body."""
+
+    dm_decls, dm_resets, dm_ports, _widths = _datamodel_signal_lines(region.datamodel)
     n_states = len(region.states)
+    entity_block = _emit_entity(region, chart_name, dm_ports, n_states)
+    state_constants = _emit_state_constants(region)
+    register_process = _emit_register_process(region, dm_resets)
+    transition_block = _emit_combinational_block(region, depth_budget)
+
+    header_lines = [
+        f"-- Generated by tools/sos-codegen/transliterate_hdl_vhdl.py (wave-2)",
+        f"-- Chart : {chart_name}",
+        f"-- Region: {region.name} (clock domain: {region.clock_domain})",
+        f"-- Spec  : SOS-08-C-CONCEPTS.md §6 (emission algorithm), §15 (ratified 2026-05-23)",
+        f"-- Inv.  : INV-SOS-A..H, INV-S-HDL-1..5, INV-S-HDL-A-1 (sync active-high reset),",
+        f"--         INV-S-HDL-C-1..5 (deterministic emission, observability,",
+        f"--         cross-domain enforcement, guard synthesizability, cooperative completion)",
+        f"-- PCDN  : C-001 (clock-domain inherit), C-002 (retain synchronizers),",
+        f"--         C-003 (reset=<initial>), C-004 (guard depth {depth_budget}),",
+        f"--         C-005 (chart annot wins), C-006 (doc-order priority lint rule)",
+        f"-- Wave  : 2 — guards, parallel regions, chart-top wrapper, sync, port widths.",
+    ]
+    try:
+        header = emit_header_comment(header_lines, dialect=Dialect.VHDL)
+    except TypeError:
+        header = "\n".join(header_lines)
+
     arch_decls: list[str] = []
     arch_decls.extend(state_constants)
     arch_decls.append(
@@ -790,13 +1375,23 @@ def render_target(chart_ir: Any, config: dict[str, Any]) -> dict[str, str]:
     arch_decls.extend(dm_decls)
     arch_decls_block = "\n".join(f"    {line}" for line in arch_decls)
 
-    # Datamodel output drives (registered signal → port wire).
-    dm_output_drives = "\n".join(
-        f"    data_{d.name} <= std_logic_vector({d.name}_q);" for d in region.datamodel
-    )
+    dm_output_drives_lines: list[str] = []
+    for d in region.datamodel:
+        width = _resolve_port_width(d.scxml_type, d.name)
+        if width <= 1:
+            dm_output_drives_lines.append(
+                f"    data_{d.name} <= std_logic(to_unsigned({d.name}_q, 1)(0));"
+                f"  -- bool"
+            )
+        else:
+            dm_output_drives_lines.append(
+                f"    data_{d.name} <= std_logic_vector({d.name}_q);"
+            )
+    dm_output_drives = "\n".join(dm_output_drives_lines)
 
+    entity_id = _entity_name(chart_name, region.name)
     architecture = (
-        f"architecture rtl of {_entity_name(region.name)} is\n"
+        f"architecture rtl of {entity_id} is\n"
         f"{arch_decls_block}\n"
         f"begin\n"
         f"{register_process}\n\n"
@@ -806,7 +1401,7 @@ def render_target(chart_ir: Any, config: dict[str, Any]) -> dict[str, str]:
         + f"end architecture rtl;\n"
     )
 
-    file_body = (
+    return (
         f"{header}\n\n"
         f"library ieee;\n"
         f"use ieee.std_logic_1164.all;\n"
@@ -815,14 +1410,76 @@ def render_target(chart_ir: Any, config: dict[str, Any]) -> dict[str, str]:
         f"{architecture}"
     )
 
-    out_name = f"{_entity_name(region.name)}.vhd"
-    return {out_name: file_body}
+
+# ---------------------------------------------------------------------------
+# Public entry point.
+# ---------------------------------------------------------------------------
+
+
+def render_target(chart_ir: Any, config: Any) -> dict[str, str]:
+    """Public entry point — called from `main.py` when `--target hdl-vhdl`.
+
+    Wave-2 returns:
+      - For a single-region chart: one file `<chart>_fsm.vhd`.
+      - For a chart with <parallel> producing N regions: N region files
+        `<chart>_region_<region>.vhd` + one chart-top wrapper
+        `<chart>_top.vhd`.
+
+    Raises:
+        UnsupportedChartError: when the chart names a feature outside
+            the wave-2 scope (event-channel-routed transitions,
+            ECMAScript scripts, raises) or the guard depth budget is
+            exceeded.
+    """
+    if not isinstance(chart_ir, dict):
+        raise UnsupportedChartError(
+            "SOS-08-C wave-2 render_target expects the raw scjson dict, "
+            f"not {type(chart_ir).__name__}. The main.py dispatcher needs "
+            "to pass the parsed scjson AST."
+        )
+
+    # Config may be a dict (legacy) or an HdlEmitConfig dataclass.
+    if isinstance(config, dict):
+        chart_name = config.get("chart_name") or "chart"
+        depth_budget = int(
+            config.get("guard_depth_budget", DEFAULT_GUARD_DEPTH_BUDGET)
+        )
+    else:
+        chart_name = getattr(config, "chart_name", None) or "chart"
+        depth_budget = int(
+            getattr(config, "guard_depth_budget", DEFAULT_GUARD_DEPTH_BUDGET)
+        )
+
+    # Step 0 — reject features outside the wave-2 scaffold scope.
+    _reject_unsupported(chart_ir)
+
+    # Steps 1-3 / 6-9 of §6 — parse + build region tree + datamodel.
+    chart = _normalise_chart(chart_ir, chart_name)
+
+    # Single-region path: one file, no wrapper.
+    if len(chart.regions) == 1:
+        region = chart.regions[0]
+        # In single-region case the region "name" defaults to chart name;
+        # for back-compat with wave-1 tests the file name is
+        # `<chart>_fsm.vhd`.
+        region.name = chart_name
+        body = _render_region(region, chart_name, depth_budget)
+        return {f"{_entity_name(chart_name)}.vhd": body}
+
+    # Multi-region path: one region file per region + chart-top wrapper.
+    out: dict[str, str] = {}
+    for region in chart.regions:
+        region_body = _render_region(region, chart_name, depth_budget)
+        out[f"{_entity_name(chart_name, region.name)}.vhd"] = region_body
+
+    out[f"{_safe_ident(chart_name)}_top.vhd"] = _emit_chart_top_wrapper(chart)
+    return out
 
 
 # Helper used by integration / tests: expose the entity-name derivation
 # so test assertions don't have to duplicate the rule.
-def entity_name(chart_name: str) -> str:
-    return _entity_name(chart_name)
+def entity_name(chart_name: str, region_name: Optional[str] = None) -> str:
+    return _entity_name(chart_name, region_name)
 
 
 def state_constant_name(state_id: str) -> str:

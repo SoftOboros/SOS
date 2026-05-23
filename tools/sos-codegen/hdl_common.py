@@ -33,21 +33,27 @@ Specs cited (read these before modifying this module):
       ECMAScript subset compilation; datamodel typing; verified-strip;
       reset-state default; cooperative-only emission);
       §6 ten-step emission algorithm — this module implements the
-      dialect-neutral surface called from steps 2, 3, 4, 5, 6, 9, 10;
+      dialect-neutral surface called from steps 2, 3, 4, 5, 6, 7, 9, 10;
       §7 INV-S-HDL-C-1..5 (deterministic emission; per-region
       observability; cross-domain transition enforcement; guard
       synthesizability; cooperative completion);
       §15 ratification entry (2026-05-23) — PCDN-SOS-08-C-001..006
-      resolutions.
+      resolutions; wave-2 reconciliation pins canonical helper
+      signatures + adds the guard / parallel / chart-top / synchronizer
+      surface.
   - ``docs/concepts/SOS-08-A-CONCEPTS.md`` §6 — L0 primitive contracts
     this layer instantiates via SOS-08-B services. Per §5.1 / INV-S-
     HDL-A-1 reset is synchronous active-high; this module mirrors
     that for chart-emitted region FSMs (INV-S-HDL-A-1 → INV-S-HDL-C
-    by composition).
+    by composition). §6.9 owns the ``sos_synchronizer`` primitive
+    (`STAGES` mandatory no-default per §15 wave-2 amendment; ports
+    `clk_dst`, `rst_dst`, `d_src`, `d_dst`) instantiated by
+    :func:`emit_sync_inst`.
   - ``docs/concepts/SOS-08-B-CONCEPTS.md`` §6 — L1 service contracts
     for event ingress/egress.
   - ``docs/concepts/SOS-01-CONCEPTS.md`` §5.1 — ECMAScript subset
-    that guard expressions compile from.
+    that guard expressions compile from; :func:`emit_guard_expr` is
+    the dialect-neutral lowering point.
 
 Invariants concretised by helpers in this module:
   - **INV-S-HDL-A-1** (sync active-high reset, uniform across L0) —
@@ -60,25 +66,34 @@ Invariants concretised by helpers in this module:
   - **INV-S-HDL-C-2** (per-region observability) — :func:`emit_port_decl`
     callers SHOULD emit ``state_observable`` + ``transition_observable``
     on every region FSM module per SOS-08-C §6.2.
-  - **INV-S-HDL-C-3** (cross-domain transition enforcement) — out of
-    scope for this module; enforced at the chart-top wrapper emit step
-    by the per-dialect walker, which consults the ``cdc-audit.json``
-    artifact (SOS-08-C §6.7).
+  - **INV-S-HDL-C-3** (cross-domain transition enforcement) — enforced
+    at the chart-top wrapper emit step by :func:`emit_chart_top_wrapper`,
+    which instantiates one :func:`emit_sync_inst` per cross-domain edge
+    declared in the ``cross_domain_signals`` argument. Per PCDN-C-002
+    resolution (SOS-08-C §15) the synchronizer is retained regardless
+    of ``--verified-strip`` reachability.
   - **INV-S-HDL-C-4** (guard expression synthesizability) — partially
     enforced here via :func:`compute_guard_depth` against the default
-    budget; the per-dialect walker MUST reject guards whose depth
-    exceeds the configured budget per PCDN-SOS-08-C-004 / SCXML-LINT-C-2.
+    budget; :func:`emit_guard_expr` is the defense-in-depth emit-time
+    gate that raises :class:`GuardDepthError` if the configured budget
+    is exceeded. SCXML-LINT-C-2 SHOULD have caught the over-depth case
+    at chart-compile time per PCDN-SOS-08-C-004.
   - **INV-S-HDL-C-5** (cooperative completion) — no preemption /
     save-restore registers are emitted by anything in this module;
     callers MUST honour that by construction.
 
 PCDN resolutions (SOS-08-C §15, 2026-05-23) consulted:
-  - PCDN-C-001 (clock-domain default = inherit-from-parent).
-  - PCDN-C-002 (verified-strip × multi-clock = retain synchronizers).
+  - PCDN-C-001 (clock-domain default = inherit-from-parent;
+    :func:`emit_chart_top_wrapper` honours this by deduplicating
+    clock-input ports across regions sharing a domain).
+  - PCDN-C-002 (verified-strip × multi-clock = retain synchronizers;
+    :func:`emit_sync_inst` is unconditionally emitted from
+    :func:`emit_chart_top_wrapper`).
   - PCDN-C-003 (reset-state default = SCXML ``<initial>`` w/ optional
     ``<reset state="..."/>`` override).
   - PCDN-C-004 (guard-depth budget default = 8 chained operators;
-    enforced via SCXML-LINT-C-2 at chart-compile time).
+    enforced via SCXML-LINT-C-2 at chart-compile time AND
+    :func:`emit_guard_expr` at emit time).
   - PCDN-C-005 (chart annotation wins for state encoding; ``--target``
     is a hint only for unannotated regions).
   - PCDN-C-006 (document-order priority lint warning; SCXML-LINT-C-1).
@@ -86,15 +101,37 @@ PCDN resolutions (SOS-08-C §15, 2026-05-23) consulted:
 This module is dialect-neutral substrate; it does NOT crawl SCXML, does
 NOT touch templates, and does NOT shell out. The chart-IR transit is
 the per-dialect walker's responsibility.
+
+Wave-2 reconciliation (2026-05-23):
+  - ``HdlPort`` fields ratified canonical (no bridge / canonical split).
+    ``width: int`` is canonical; ``width_expr: Optional[str]`` is the
+    symbolic-expression escape hatch (e.g. ``"N_STATES-1 downto 0"``).
+  - ``ResetPolarity.SYNC_ACTIVE_HIGH`` is canonical; ``ACTIVE_HIGH_SYNC``
+    retained as a deprecated alias for in-flight wave-1 call sites
+    (VHDL walker `transliterate_hdl_vhdl.py:603`).
+  - ``map_datamodel_type`` canonical 3-arg shape returns a dialect-typed
+    string. The 1-arg form is RETAINED for backward compatibility (emits
+    a ``DeprecationWarning``) and returns the historical
+    ``(width, hint)`` tuple. ``datamodel_width`` is the sibling helper
+    for callers that want just the integer width.
+  - ``emit_signal_decl`` canonical signature takes a pre-rendered
+    ``signal_type: str``; ``emit_signal_decl_int`` is the sibling helper
+    for callers that pass an integer ``width``.
+  - New helpers landed: :class:`GuardDepthError`, :func:`emit_guard_expr`,
+    :func:`emit_sync_inst`, :func:`emit_chart_top_wrapper`,
+    :func:`port_width_from_signal_width`, :func:`datamodel_width`,
+    :func:`emit_signal_decl_int`.
 """
 
 from __future__ import annotations
 
+import ast
 import math
 import re
+import warnings
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +198,11 @@ class ResetPolarity(Enum):
     release. Asynchronous resets are prohibited; CDC-bearing reset
     distribution is the chart-top wrapper's responsibility.
 
+    Wave-2 reconciliation: ``SYNC_ACTIVE_HIGH`` is the canonical name.
+    ``ACTIVE_HIGH_SYNC`` is retained as a deprecated alias for in-flight
+    wave-1 call sites (notably ``transliterate_hdl_vhdl.py:603``); new
+    code SHOULD use ``SYNC_ACTIVE_HIGH``.
+
     Registration policy: **Standards Action** (changing this requires
     a coordinated §15 amendment in SOS-08-A AND SOS-08-C; downstream
     L0 primitives all assume this convention).
@@ -170,15 +212,16 @@ class ResetPolarity(Enum):
 
     @classmethod
     def _missing_(cls, value):
-        # Accept the sibling-walker spelling `ACTIVE_HIGH_SYNC` as an alias
-        # for the canonical `SYNC_ACTIVE_HIGH` to bridge wave-1 sibling
-        # signature drift. Wave-2 reconciliation will pin one spelling.
+        # Accept the sibling-walker spelling `active_high_sync` as an alias
+        # for the canonical `sync_active_high`. Deprecated; wave-3 will
+        # remove once walkers migrate.
         if value == "active_high_sync":
             return cls.SYNC_ACTIVE_HIGH
         return None
 
 
-# Backward-compat alias for the sibling-walker spelling (wave-1 drift).
+# Deprecated alias for the sibling-walker spelling (wave-1 drift).
+# Marked for removal once the VHDL walker migrates to `SYNC_ACTIVE_HIGH`.
 ResetPolarity.ACTIVE_HIGH_SYNC = ResetPolarity.SYNC_ACTIVE_HIGH  # type: ignore[attr-defined]
 
 
@@ -191,22 +234,43 @@ ResetPolarity.ACTIVE_HIGH_SYNC = ResetPolarity.SYNC_ACTIVE_HIGH  # type: ignore[
 class HdlPort:
     """Dialect-neutral abstract port representation.
 
-    The ``dialect_hint`` field carries an optional dialect-specific type
-    name (e.g. ``"std_logic_vector"`` vs ``"logic"``) when the caller
-    wants to override the default rendering. ``None`` means "let
-    :func:`emit_port_decl` choose the default for the requested
-    dialect".
+    Wave-2 canonical surface (all fields are canonical; no canonical /
+    bridge split):
+
+    * ``name`` — port identifier (must be a valid VHDL + SV identifier).
+    * ``direction`` — one of ``"in"`` / ``"out"`` / ``"inout"``.
+    * ``width`` — integer bit-width. ``1`` → scalar (``std_logic`` /
+      ``wire``); ``>1`` → vector. The canonical width source when known.
+    * ``dialect_hint`` — optional dialect-specific type override. ``None``
+      means "let :func:`emit_port_decl` choose the default rendering for
+      the requested dialect from ``width``".
+    * ``width_expr`` — optional symbolic-width expression
+      (e.g. ``"N_STATES-1 downto 0"``, ``"std_logic_vector(7 downto 0)"``).
+      Used when the width is a generic/parameter expression that cannot
+      be reduced to an integer at emit time. Walkers prefer integer
+      ``width`` when it is known; fall back to ``width_expr`` when
+      symbolic. When both are set, ``width_expr`` wins (it is the more
+      specific / pre-rendered form, typically inherited from
+      :func:`map_datamodel_type`'s 3-arg shape output).
+    * ``kind`` — optional dialect-extension type hint (e.g. ``"signed"`` /
+      ``"unsigned"`` / ``"logic"``). Informational; the per-dialect
+      walker MAY consume it to refine rendering.
+    * ``signed`` — flag for signed integer interpretation. Informational
+      (the dialect-rendering helper does NOT currently switch on it; the
+      ``kind`` / ``dialect_hint`` channel is the authoritative path).
+    * ``comment`` — optional trailing comment (rendered as ``--`` /
+      ``//`` per dialect).
+
+    Cites: SOS-08-C §6.2 (region FSM module port list); SOS-08-A §5.1
+    (handshake-port shape ratification); §15 wave-2 reconciliation entry.
     """
 
     name: str
     direction: Literal["in", "out", "inout"]
     width: int = 1  # in bits; 1 → scalar (std_logic / wire), >1 → vector
     dialect_hint: Optional[str] = None
-    # Wave-1 sibling-walker bridge: some walkers carry a symbolic width
-    # expression (e.g. `"N_STATES-1 downto 0"`) instead of an integer.
-    # Accept both; emit_port_decl prefers `width_expr` if present.
     width_expr: Optional[str] = None
-    kind: Optional[str] = None  # sibling: optional type-hint extension
+    kind: Optional[str] = None
     signed: bool = False
     comment: Optional[str] = None
 
@@ -235,6 +299,18 @@ def _sv_direction(direction: str) -> str:
 def emit_port_decl(port: HdlPort, dialect: Dialect) -> str:
     """Emit a single port declaration line for the requested dialect.
 
+    Resolution order for the rendered type form:
+
+    1. ``port.width_expr`` (pre-rendered symbolic) — wins when set; the
+       caller already knows the dialect-typed string.
+    2. ``port.dialect_hint`` (pre-rendered dialect-typed string).
+    3. Auto-render from ``port.width``: scalar (``std_logic`` / ``wire``)
+       for width 1; vector (``std_logic_vector(W-1 downto 0)`` /
+       ``wire [W-1:0]``) for width > 1.
+
+    Wave-2: the width>1 auto-render path is now correct; the wave-1
+    shape always emitted scalar form regardless of width.
+
     Examples
     --------
     ``HdlPort("rst", "in", 1)`` →
@@ -247,61 +323,146 @@ def emit_port_decl(port: HdlPort, dialect: Dialect) -> str:
       * VHDL: ``evt_payload : in std_logic_vector(63 downto 0)``
       * SV:   ``input wire [63:0] evt_payload``
 
-    1-bit signals render as ``std_logic`` / ``wire`` (no vector form)
-    per the SOS-08-A §5.1 port-shape convention.
+    ``HdlPort("state", "out", width_expr="std_logic_vector(3 downto 0)")``
+    (VHDL) → ``state : out std_logic_vector(3 downto 0)``.
 
     Cites: SOS-08-C §6.2 (region FSM module port list); SOS-08-A §5.1
-    (handshake-port shape ratification).
+    (handshake-port shape ratification); §15 wave-2 reconciliation.
     """
     if port.width < 1:
         raise ValueError(f"port {port.name!r} has invalid width {port.width}")
 
     if dialect is Dialect.VHDL:
         direction = _vhdl_direction(port.direction)
-        if port.width == 1:
-            type_form = port.dialect_hint or "std_logic"
+        if port.width_expr is not None:
+            type_form = port.width_expr
+        elif port.dialect_hint is not None:
+            type_form = port.dialect_hint
+        elif port.width == 1:
+            type_form = "std_logic"
         else:
-            type_form = (
-                port.dialect_hint
-                or f"std_logic_vector({port.width - 1} downto 0)"
-            )
+            type_form = f"std_logic_vector({port.width - 1} downto 0)"
         return f"{port.name} : {direction} {type_form}"
 
     if dialect is Dialect.SV:
         direction = _sv_direction(port.direction)
+        if port.width_expr is not None:
+            # The SV wave-1 convention places the symbolic width between
+            # `wire` and the port name (e.g. `wire [N-1:0]`). Callers MAY
+            # also pass a fully-rendered type string in `dialect_hint`.
+            return f"{direction} wire {port.width_expr} {port.name}"
+        if port.dialect_hint is not None:
+            type_form = port.dialect_hint
+            if port.width == 1:
+                return f"{direction} {type_form} {port.name}"
+            return f"{direction} {type_form} [{port.width - 1}:0] {port.name}"
         if port.width == 1:
-            type_form = port.dialect_hint or "wire"
-            return f"{direction} {type_form} {port.name}"
-        type_form = port.dialect_hint or "wire"
-        return f"{direction} {type_form} [{port.width - 1}:0] {port.name}"
+            return f"{direction} wire {port.name}"
+        return f"{direction} wire [{port.width - 1}:0] {port.name}"
 
     raise ValueError(f"unsupported dialect {dialect!r}")
 
 
 def emit_signal_decl(
     name: str,
-    width=None,
+    signal_type: Optional[str] = None,
     dialect: Dialect = Dialect.VHDL,
-    registered: bool = False,
     *,
-    signal_type=None,
-    kind=None,
-    signed=False,
-    comment=None,
+    comment: Optional[str] = None,
+    # ---- deprecated/legacy keyword channels retained for wave-1 callers ----
+    width: Optional[int] = None,
+    registered: bool = False,
+    kind: Optional[str] = None,
+    signed: bool = False,
 ) -> str:
-    """(Sibling-walker bridge: accepts `signal_type` kwarg with a dialect-typed
-    string in place of `width: int`. Wave-2 reconciliation will pin one shape.)
+    """Emit an internal signal declaration (wave-2 canonical signature).
+
+    Wave-2 canonical signature::
+
+        emit_signal_decl(name, signal_type, dialect, *, comment=None)
+
+    Where ``signal_type`` is a pre-rendered dialect-typed string
+    (e.g. ``"std_logic"``, ``"std_logic_vector(31 downto 0)"`` for VHDL;
+    ``"logic"``, ``"logic [31:0]"`` for SV). The integer-width form
+    lives in :func:`emit_signal_decl_int`.
+
+    Wave-1 backward-compat shim: if ``signal_type`` is ``None`` and
+    ``width`` is passed (kw or positional), the call is silently
+    rewritten as ``emit_signal_decl_int(name, width, dialect,
+    registered=registered)`` with a :class:`DeprecationWarning`. This
+    keeps in-flight sibling walkers compiling until they migrate.
+
+    Examples
+    --------
+    VHDL: ``signal state : std_logic_vector(3 downto 0);``
+    SV:   ``logic [3:0] state;``
+
+    Cites: SOS-08-C §5.4 (datamodel signal typing: registered iff
+    written by ``<assign>``); §15 wave-2 reconciliation.
     """
-    # Wave-1 sibling-walker shape: `signal_type` is a pre-rendered dialect string.
-    if signal_type is not None:
-        if dialect is Dialect.VHDL:
-            return f"signal {name:10s} : {signal_type};"
-        # SV
-        return f"logic {signal_type} {name};"
-    # Canonical signature continues below; require width.
-    if width is None:
-        width = 1
-    """Emit an internal signal declaration.
+    # Wave-1 shim: caller passed an integer width via the positional
+    # second arg OR the `width=` kwarg. Detect and route through the
+    # integer helper.
+    if signal_type is None or isinstance(signal_type, int):
+        # `signal_type` was the int (positional wave-1 form
+        # `emit_signal_decl(name, width, dialect, registered)`).
+        if isinstance(signal_type, int):
+            effective_width = signal_type
+        elif width is not None:
+            effective_width = width
+        else:
+            effective_width = 1
+        warnings.warn(
+            "emit_signal_decl(name, width, ...) is deprecated; pass a "
+            "pre-rendered `signal_type` string or call "
+            "emit_signal_decl_int(name, width, dialect, registered=...) "
+            "explicitly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return emit_signal_decl_int(
+            name,
+            int(effective_width),
+            dialect,
+            registered=registered,
+            comment=comment,
+        )
+
+    if not isinstance(signal_type, str):
+        raise TypeError(
+            f"emit_signal_decl: signal_type must be a str (dialect-rendered "
+            f"type form); got {type(signal_type).__name__}"
+        )
+
+    trailing = ""
+    if comment:
+        trailing = f"  -- {comment}" if dialect is Dialect.VHDL else f"  // {comment}"
+
+    if dialect is Dialect.VHDL:
+        return f"signal {name} : {signal_type};{trailing}"
+    if dialect is Dialect.SV:
+        # If the caller already pre-rendered the storage class (`logic` /
+        # `bit` / `reg`) into `signal_type`, don't re-prefix it. Otherwise
+        # default to `logic`.
+        stripped = signal_type.lstrip()
+        if stripped.startswith(("logic", "bit", "reg")):
+            return f"{signal_type} {name};{trailing}"
+        return f"logic {signal_type} {name};{trailing}"
+    raise ValueError(f"unsupported dialect {dialect!r}")
+
+
+def emit_signal_decl_int(
+    name: str,
+    width: int,
+    dialect: Dialect,
+    *,
+    registered: bool = False,
+    comment: Optional[str] = None,
+) -> str:
+    """Emit an internal signal declaration from an integer ``width``.
+
+    Sibling to :func:`emit_signal_decl` for callers that have not
+    pre-rendered the dialect type string. Wave-2 helper.
 
     The ``registered`` flag selects the form synthesis tools recognise
     as a clocked register vs a combinational net:
@@ -327,15 +488,18 @@ def emit_signal_decl(
             type_form = "std_logic"
         else:
             type_form = f"std_logic_vector({width - 1} downto 0)"
-        suffix = "  -- registered" if registered else "  -- combinational"
+        suffix_bits: list[str] = []
+        if comment:
+            suffix_bits.append(comment)
+        suffix_bits.append("registered" if registered else "combinational")
+        suffix = "  -- " + "; ".join(suffix_bits)
         return f"signal {name} : {type_form};{suffix}"
     if dialect is Dialect.SV:
+        intent = "registered" if registered else "combinational"
+        comment_bits = f"{comment}; {intent}" if comment else intent
         if width == 1:
-            return f"logic {name};  // {'registered' if registered else 'combinational'}"
-        return (
-            f"logic [{width - 1}:0] {name};  "
-            f"// {'registered' if registered else 'combinational'}"
-        )
+            return f"logic {name};  // {comment_bits}"
+        return f"logic [{width - 1}:0] {name};  // {comment_bits}"
     raise ValueError(f"unsupported dialect {dialect!r}")
 
 
@@ -694,44 +858,109 @@ _TYPE_TABLE: dict[str, tuple[int, str]] = {
 }
 
 
-def map_datamodel_type(scxml_type, initial_expr=None, dialect=None):
-    """Map an SCXML datamodel type identifier to ``(width_bits, hint)``.
+def _lookup_type(scxml_type: Optional[str]) -> tuple[int, str]:
+    """Internal: resolve ``(width, hint)`` from a chart datamodel type
+    identifier, defaulting to signed-32 per SOS-08-C §5.4."""
+    key = (scxml_type or "").strip().lower()
+    return _TYPE_TABLE.get(key, (32, f"unknown[{scxml_type}]→signed32"))
 
-    Canonical signature: ``map_datamodel_type(scxml_type: str) -> (int, str)``.
 
-    Wave-1 sibling-walker bridge: some walkers call with a 3-arg shape
-    ``(data_id, initial_expr, dialect)`` and expect a dialect-typed string
-    back (e.g. ``"signed(31 downto 0)"`` for VHDL). When called that way,
-    we synthesize a dialect-appropriate type string from the inferred
-    width. Wave-2 reconciliation will pick one canonical shape.
+def datamodel_width(scxml_type: Optional[str]) -> int:
+    """Return the bit-width for an SCXML datamodel type identifier.
 
-    Unknown types default to 32-bit signed per SOS-08-C §5.4. The hint
-    string is informational; the per-dialect walker may inject it into
-    a comment next to the signal declaration to aid review.
+    Wave-2 helper: wraps :data:`_TYPE_TABLE` so callers that just need
+    the integer width (e.g. for ``HdlPort.width`` or a register length)
+    can avoid the dialect-string rendering done by
+    :func:`map_datamodel_type`.
+
+    Unknown types default to 32 bits (signed) per SOS-08-C §5.4 and
+    INV-S-HDL-C-4 (the budget metric depends on a fixed default).
+
+    Cites: SOS-08-C §5.4; SOS-04 / SOS-05 default width.
+    """
+    width, _hint = _lookup_type(scxml_type)
+    return width
+
+
+def port_width_from_signal_width(scxml_type: Optional[str], name: str) -> int:
+    """Return the appropriate ``HdlPort.width`` for a chart datamodel
+    declaration named ``name`` of type ``scxml_type``.
+
+    Wave-2 helper (mirror of :func:`datamodel_width` with a chart-
+    author-friendly signature that names the datamodel id; the ``name``
+    is currently informational — preserved in the signature so a future
+    wave can specialise width for named annotations like
+    ``<data id="x" width="8"/>`` without changing the call site).
+
+    Cites: SOS-08-C §5.4; §6.2 (region FSM datamodel port shape).
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("port_width_from_signal_width: name must be non-empty str")
+    return datamodel_width(scxml_type)
+
+
+def map_datamodel_type(
+    scxml_type: str,
+    initial_expr: Optional[str] = None,
+    dialect: Optional[Union[Dialect, str]] = None,
+):
+    """Map an SCXML datamodel type identifier to a dialect-typed string.
+
+    Wave-2 canonical signature (3-arg)::
+
+        map_datamodel_type(scxml_type: str,
+                           initial_expr: Optional[str],
+                           dialect: Dialect) -> str
+
+    Returns a pre-rendered dialect type form suitable for
+    :class:`HdlPort` ``width_expr`` / :func:`emit_signal_decl`
+    ``signal_type``:
+
+      * VHDL: ``"std_logic"`` (1-bit) or ``"signed(W-1 downto 0)"``.
+      * SV:   ``"logic"`` (1-bit) or ``"logic signed [W-1:0]"``.
+
+    ``initial_expr`` is currently informational (preserved for symmetry
+    with the C / Rust transliterators which use it to widen the inferred
+    type beyond the chart's declared one). The L2 emitter trusts the
+    chart's declared type.
+
+    Backward-compat (wave-1 1-arg shape)::
+
+        map_datamodel_type(scxml_type) -> (width_bits, hint)
+
+    Calls without ``dialect`` return the historical ``(width, hint)``
+    tuple AND emit a :class:`DeprecationWarning`. New code SHOULD call
+    :func:`datamodel_width` for just the integer width, or pass an
+    explicit ``dialect`` for the rendered-type form.
+
+    Unknown types default to 32-bit signed per SOS-08-C §5.4.
 
     Cites: SOS-08-C §5.4 (datamodel signal typing); SOS-04-CONCEPTS.md
-    (i32 default width); SOS-05-CONCEPTS.md (C port mirrors).
+    (i32 default width); SOS-05-CONCEPTS.md (C port mirrors);
+    §15 wave-2 reconciliation.
     """
-    key = (scxml_type or "").strip().lower()
-    width, hint = _TYPE_TABLE.get(key, (32, f"unknown[{scxml_type}]→signed32"))
-    # 3-arg sibling-walker shape: return a dialect-typed string instead.
-    if dialect is not None:
-        # ``dialect`` may be the Dialect enum or a string alias.
-        d_value = getattr(dialect, "value", dialect)
-        if d_value in ("vhdl", "VHDL"):
-            return (
-                f"signed({width - 1} downto 0)"
-                if width > 1
-                else "std_logic"
-            )
-        if d_value in ("sv", "SV", "systemverilog", "SYSTEMVERILOG"):
-            return (
-                f"logic signed [{width - 1}:0]"
-                if width > 1
-                else "logic"
-            )
-        # Unknown dialect: fall through to the canonical tuple form.
-    return (width, hint)
+    width, hint = _lookup_type(scxml_type)
+    if dialect is None:
+        warnings.warn(
+            "map_datamodel_type(scxml_type) 1-arg form is deprecated; "
+            "call with (scxml_type, initial_expr, dialect) to receive a "
+            "dialect-typed string, or call datamodel_width(scxml_type) "
+            "for just the integer width.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return (width, hint)
+
+    d_value = getattr(dialect, "value", dialect)
+    if d_value in ("vhdl", "VHDL"):
+        if width == 1:
+            return "std_logic"
+        return f"signed({width - 1} downto 0)"
+    if d_value in ("sv", "SV", "systemverilog", "SYSTEMVERILOG"):
+        if width == 1:
+            return "logic"
+        return f"logic signed [{width - 1}:0]"
+    raise ValueError(f"map_datamodel_type: unsupported dialect {dialect!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -813,7 +1042,7 @@ def emit_transition_mux(
     # order, the emitted mux reflects document-order priority.
     ordered = sorted(transitions, key=lambda t: t.document_order)
 
-    arms: list[str] = []
+    arms: list[tuple[str, str, int]] = []
     for t in ordered:
         # Combine event_guard and guard_expr into one boolean. Both
         # may be None (for an unconditional internal transition); the
@@ -876,37 +1105,683 @@ _GUARD_OPERATORS = (
 DEFAULT_GUARD_DEPTH_BUDGET = 8  # Per PCDN-SOS-08-C-004.
 
 
+class GuardDepthError(ValueError):
+    """Raised when a guard expression exceeds the configured depth budget.
+
+    Sibling to ``SCXML-LINT-C-2`` (PCDN-SOS-08-C-004): the lint catches
+    over-depth guards at chart-compile time; :class:`GuardDepthError`
+    is the defense-in-depth gate at emit time for charts that bypassed
+    or pre-date the lint pass.
+
+    The error message is rendered in chart vocabulary per INV-S-HDL-5
+    (the failing ``cond`` string + the depth + the budget).
+    """
+
+    def __init__(self, expr: str, depth: int, budget: int):
+        self.expr = expr
+        self.depth = depth
+        self.budget = budget
+        super().__init__(
+            f"guard expression {expr!r} has depth {depth} which exceeds the "
+            f"configured budget {budget} (PCDN-SOS-08-C-004; "
+            f"SCXML-LINT-C-2 should have rejected this at chart-compile "
+            f"time)."
+        )
+
+
 def compute_guard_depth(guard_expr: str) -> int:
     """Return the count of guard-depth-contributing operators in
     ``guard_expr``.
 
-    The metric counts each occurrence of every operator in
-    :data:`_GUARD_OPERATORS`. Multi-character operators are matched
-    before their single-character prefixes (e.g. ``<=`` is counted
-    once as ``<=``, not twice as ``<`` and ``=``).
+    Convention (matches SCXML-LINT-C-2 sibling): a Python ``BoolOp``
+    like ``a and b and c`` contributes ``N-1`` operators to the path
+    where N is the number of operands. The metric counts:
+
+    * Each ``BoolOp`` contributes ``len(values) - 1`` (the join count).
+    * Each ``Compare`` contributes ``len(ops)`` (the comparator count;
+      a chained compare ``a < b < c`` counts 2).
+    * Each ``UnaryOp`` (``not`` / ``~`` / unary ``+`` / ``-``) counts 1.
+    * Each ``BinOp`` (``+`` / ``-`` / ``*`` / ``&`` / ``|`` / ``^``) counts 1.
+    * Function calls (only ``In(...)`` is permitted) count 1.
 
     Used by the per-dialect walker to enforce SCXML-LINT-C-2 at
     emission time (per PCDN-SOS-08-C-004; lint also runs at chart-
     compile time inside SOS-01's linter pipeline).
 
-    Trailing/leading whitespace is irrelevant; the metric counts
-    operators only.
+    Falls back to a regex over :data:`_GUARD_OPERATORS` (the wave-1
+    behaviour) when the input is not parseable as a Python expression
+    — useful when callers pass pre-compiled dialect-specific guard
+    strings (e.g. ``a && b``) instead of chart-source syntax.
+
+    Trailing/leading whitespace is irrelevant.
 
     Cites: PCDN-SOS-08-C-004; SCXML-LINT-C-2.
     """
     if not guard_expr:
         return 0
 
-    remaining = guard_expr
+    text = guard_expr.strip()
+    if not text:
+        return 0
+
+    # Preferred path: parse as a Python expression and walk the AST.
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError:
+        # Fall through to regex over dialect-specific operator strings.
+        operators_by_length = sorted(_GUARD_OPERATORS, key=len, reverse=True)
+        pattern = "|".join(re.escape(op) for op in operators_by_length)
+        return len(re.findall(pattern, text))
+
     count = 0
-    # Match in order of operator length to avoid double-counting ``<=``
-    # as ``<`` + ``=``.
-    operators_by_length = sorted(_GUARD_OPERATORS, key=len, reverse=True)
-    # Build a regex that matches any operator (escape so e.g. `||`
-    # doesn't get interpreted as alternation).
-    pattern = "|".join(re.escape(op) for op in operators_by_length)
-    count = len(re.findall(pattern, remaining))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BoolOp):
+            count += max(0, len(node.values) - 1)
+        elif isinstance(node, ast.Compare):
+            count += len(node.ops)
+        elif isinstance(node, (ast.UnaryOp, ast.BinOp)):
+            count += 1
+        elif isinstance(node, ast.Call):
+            count += 1
     return count
+
+
+# ---------------------------------------------------------------------------
+# Guard expression compilation (wave-2; SOS-08-C §5.3 + §6.3).
+# ---------------------------------------------------------------------------
+
+
+# Operator translation tables. Indexed by AST node class names so the
+# walker can dispatch via `type(node).__name__` — keeps the table data,
+# not control flow.
+_GUARD_COMPARE_OPS_VHDL: dict[str, str] = {
+    "Eq":    "=",
+    "NotEq": "/=",
+    "Lt":    "<",
+    "LtE":   "<=",
+    "Gt":    ">",
+    "GtE":   ">=",
+}
+_GUARD_COMPARE_OPS_SV: dict[str, str] = {
+    "Eq":    "==",
+    "NotEq": "!=",
+    "Lt":    "<",
+    "LtE":   "<=",
+    "Gt":    ">",
+    "GtE":   ">=",
+}
+_GUARD_BOOL_OPS_VHDL: dict[str, str] = {"And": "and", "Or": "or"}
+_GUARD_BOOL_OPS_SV:   dict[str, str] = {"And": "&&", "Or": "||"}
+_GUARD_UNARY_OPS_VHDL: dict[str, str] = {"Not": "not", "Invert": "not", "USub": "-", "UAdd": "+"}
+_GUARD_UNARY_OPS_SV:   dict[str, str] = {"Not": "!",   "Invert": "~",   "USub": "-", "UAdd": "+"}
+_GUARD_BINOP_OPS_VHDL: dict[str, str] = {
+    "Add": "+", "Sub": "-", "Mult": "*",
+    "BitAnd": "and", "BitOr": "or", "BitXor": "xor",
+}
+_GUARD_BINOP_OPS_SV: dict[str, str] = {
+    "Add": "+", "Sub": "-", "Mult": "*",
+    "BitAnd": "&", "BitOr": "|", "BitXor": "^",
+}
+
+
+def emit_guard_expr(
+    expr_str: str,
+    dialect: Dialect,
+    *,
+    depth_budget: int = DEFAULT_GUARD_DEPTH_BUDGET,
+) -> str:
+    """Compile an SCXML ``cond`` Python-syntax expression to a dialect-
+    specific combinational HDL expression.
+
+    Per SOS-08-C §5.3 + §6.3 + INV-S-HDL-C-4: the supported subset is
+    the SOS-01 §5.1 12-feature ECMAScript subset rendered via Python
+    syntax (the SCXML `cond` is Python-shape in this project). Wave-2
+    surface:
+
+    * Comparisons: ``==``, ``!=``, ``<``, ``<=``, ``>``, ``>=``
+      (single-comparator AND chains of comparators per Python's chained
+      compare semantics).
+    * Boolean ops: ``and``, ``or``, ``not`` (Python keywords).
+    * Arithmetic: ``+``, ``-``, ``*``.
+    * Bitwise: ``&``, ``|``, ``^``, ``~``.
+    * Identifiers: map to ``<name>_q`` signal references (registered
+      datamodel signal naming convention per the wave-1 walker).
+    * Integer / boolean literals: rendered directly. ``True`` /
+      ``False`` in VHDL render as ``true`` / ``false``; in SV as
+      ``1'b1`` / ``1'b0``.
+    * Parenthesised sub-expressions: preserved.
+
+    Honors :data:`DEFAULT_GUARD_DEPTH_BUDGET` (default 8) per
+    PCDN-SOS-08-C-004. Raises :class:`GuardDepthError` if the operator
+    count exceeds ``depth_budget`` — defense in depth; SCXML-LINT-C-2
+    SHOULD have caught this at lint time.
+
+    Returns a single-line expression (no embedded newlines). The caller
+    decides how to parenthesise it within the larger mux arm.
+
+    Cites: SOS-08-C §5.3 (RTL realisation table); §6.3 (compile pass);
+    INV-S-HDL-C-4 (synthesizable subset); PCDN-SOS-08-C-004 (depth budget).
+    """
+    if dialect not in (Dialect.VHDL, Dialect.SV):
+        raise ValueError(f"emit_guard_expr: unsupported dialect {dialect!r}")
+    if not isinstance(expr_str, str):
+        raise TypeError(
+            f"emit_guard_expr: expr_str must be str; got {type(expr_str).__name__}"
+        )
+
+    expr_clean = expr_str.strip()
+    if not expr_clean:
+        # Empty guard means "unconditional"; surface as the dialect
+        # literal-true so the mux arm renders cleanly.
+        return "true" if dialect is Dialect.VHDL else "1'b1"
+
+    depth = compute_guard_depth(expr_clean)
+    if depth > depth_budget:
+        raise GuardDepthError(expr_clean, depth, depth_budget)
+
+    try:
+        tree = ast.parse(expr_clean, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(
+            f"emit_guard_expr: cannot parse guard {expr_clean!r}: {e}"
+        ) from e
+
+    return _render_guard_node(tree.body, dialect)
+
+
+def _render_guard_node(node: ast.AST, dialect: Dialect) -> str:
+    """Render one AST node to the dialect's HDL surface. Recursive.
+
+    Closed over the operator-table dicts above. The dispatch is by
+    ``type(node)`` rather than a visitor pattern because the surface
+    is small (8 node classes) and the registry policy keeps it
+    inspectable.
+    """
+    # ---- Boolean operators (and / or) ----
+    if isinstance(node, ast.BoolOp):
+        table = _GUARD_BOOL_OPS_VHDL if dialect is Dialect.VHDL else _GUARD_BOOL_OPS_SV
+        op_name = type(node.op).__name__
+        if op_name not in table:
+            raise ValueError(f"emit_guard_expr: unsupported BoolOp {op_name!r}")
+        op = table[op_name]
+        parts = [_render_guard_node(v, dialect) for v in node.values]
+        # Wrap each operand to preserve precedence.
+        return f" {op} ".join(f"({p})" for p in parts)
+
+    # ---- Unary operators (not / ~ / unary +/-) ----
+    if isinstance(node, ast.UnaryOp):
+        table_u = _GUARD_UNARY_OPS_VHDL if dialect is Dialect.VHDL else _GUARD_UNARY_OPS_SV
+        op_name = type(node.op).__name__
+        if op_name not in table_u:
+            raise ValueError(f"emit_guard_expr: unsupported UnaryOp {op_name!r}")
+        operand = _render_guard_node(node.operand, dialect)
+        op = table_u[op_name]
+        # `not` (VHDL) / `!` (SV) needs the parens around its operand.
+        return f"{op} ({operand})"
+
+    # ---- Binary operators (arithmetic + bitwise) ----
+    if isinstance(node, ast.BinOp):
+        table_b = _GUARD_BINOP_OPS_VHDL if dialect is Dialect.VHDL else _GUARD_BINOP_OPS_SV
+        op_name = type(node.op).__name__
+        if op_name not in table_b:
+            raise ValueError(f"emit_guard_expr: unsupported BinOp {op_name!r}")
+        left = _render_guard_node(node.left, dialect)
+        right = _render_guard_node(node.right, dialect)
+        op = table_b[op_name]
+        return f"({left} {op} {right})"
+
+    # ---- Compare ops (==, !=, <, <=, >, >=). Python allows chains
+    #      like `a < b < c`; we expand into `(a < b) and (b < c)`. ----
+    if isinstance(node, ast.Compare):
+        table_c = _GUARD_COMPARE_OPS_VHDL if dialect is Dialect.VHDL else _GUARD_COMPARE_OPS_SV
+        # Build pairwise comparisons.
+        bool_join = "and" if dialect is Dialect.VHDL else "&&"
+        operands = [node.left] + list(node.comparators)
+        sub_exprs: list[str] = []
+        for i, cmp_op in enumerate(node.ops):
+            op_name = type(cmp_op).__name__
+            if op_name not in table_c:
+                raise ValueError(
+                    f"emit_guard_expr: unsupported Compare op {op_name!r}"
+                )
+            lhs = _render_guard_node(operands[i], dialect)
+            rhs = _render_guard_node(operands[i + 1], dialect)
+            sub_exprs.append(f"({lhs} {table_c[op_name]} {rhs})")
+        if len(sub_exprs) == 1:
+            return sub_exprs[0]
+        return f" {bool_join} ".join(sub_exprs)
+
+    # ---- Identifier ----
+    if isinstance(node, ast.Name):
+        return f"{node.id}_q"
+
+    # ---- Attribute access (e.g. `_event.data.foo`) — emit a flattened
+    # signal name so the walker can recognise the chart-side scope
+    # without re-parsing. The chart-compile-time slice is the walker's
+    # job; here we render the access as a dotted identifier that the
+    # caller MAY normalise. ----
+    if isinstance(node, ast.Attribute):
+        base = _render_guard_node(node.value, dialect)
+        # Strip the auto-suffixed `_q` from `Name` rendering when
+        # composing attributes — `_event.data.foo` should render as
+        # `_event_data_foo` not `_event_q_data_foo`.
+        if base.endswith("_q"):
+            base = base[:-2]
+        return f"{base}_{node.attr}"
+
+    # ---- Constants ----
+    if isinstance(node, ast.Constant):
+        v = node.value
+        if isinstance(v, bool):
+            if dialect is Dialect.VHDL:
+                return "true" if v else "false"
+            return "1'b1" if v else "1'b0"
+        if isinstance(v, int):
+            return str(v)
+        # Strings / floats / None / bytes are not in the synthesizable
+        # subset per SOS-01 §5.1.
+        raise ValueError(
+            f"emit_guard_expr: literal {v!r} of type {type(v).__name__} is "
+            f"outside the SOS-01 §5.1 ECMAScript subset"
+        )
+
+    # ---- Function call — restricted to In(state_id) per SOS-08-C §5.3. ----
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id != "In":
+            fn_name = getattr(node.func, "id", repr(node.func))
+            raise ValueError(
+                f"emit_guard_expr: call to {fn_name!r} is not in the "
+                f"synthesizable subset; only `In(state_id)` is permitted "
+                f"per SOS-08-C §5.3"
+            )
+        if len(node.args) != 1 or not isinstance(node.args[0], ast.Constant):
+            raise ValueError(
+                "emit_guard_expr: In(...) requires exactly one string-literal "
+                "argument (the state-id)"
+            )
+        state_id = node.args[0].value
+        if not isinstance(state_id, str):
+            raise ValueError(
+                f"emit_guard_expr: In(...) argument must be a string state-id; "
+                f"got {state_id!r}"
+            )
+        if dialect is Dialect.VHDL:
+            return f"(state = ST_{state_id})"
+        return f"(state == ST_{state_id})"
+
+    raise ValueError(
+        f"emit_guard_expr: AST node {type(node).__name__!r} is outside the "
+        f"SOS-01 §5.1 ECMAScript subset (SOS-08-C §5.3 RTL realisation)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-domain synchronizer instantiation (wave-2; SOS-08-A §6.9 binding).
+# ---------------------------------------------------------------------------
+
+
+def emit_sync_inst(
+    inst_name: str,
+    src_signal: str,
+    dst_signal: str,
+    src_clk: str,
+    dst_clk: str,
+    dst_rst: str,
+    width: int,
+    stages: int,
+    dialect: Dialect,
+) -> str:
+    """Emit an ``sos_synchronizer`` instance per SOS-08-A §6.9.
+
+    Used by :func:`emit_chart_top_wrapper` at every cross-domain edge
+    declared in the chart's ``cross_domain_signals`` audit. Per PCDN-
+    SOS-08-C-002 (resolved retain_synchronizers): synchronizer instances
+    are retained regardless of ``--verified-strip`` reachability — the
+    MTBF claim is independent of chart reachability proofs.
+
+    Parameters
+    ----------
+    inst_name : str
+        Instance name (must be a valid VHDL + SV identifier).
+    src_signal : str
+        Source-domain signal name (caller's responsibility to Gray-code
+        for ``width > 1`` per SOS-08-A §6.9 contract).
+    dst_signal : str
+        Destination-domain signal name.
+    src_clk : str
+        Source-domain clock name. NOT a port on the synchronizer per
+        SOS-08-A §15 wave-2 (the source clock is asynchronous to the
+        destination by definition); preserved in the signature so the
+        cdc-audit.json artifact can record which crossing this instance
+        services.
+    dst_clk : str
+        Destination-domain clock name (the ``clk_dst`` port).
+    dst_rst : str
+        Destination-domain reset name (the ``rst_dst`` port).
+    width : int
+        Bit-width of the signal (``WIDTH`` generic).
+    stages : int
+        Number of synchronizer flip-flop stages (``STAGES`` generic;
+        mandatory no-default per SOS-08-A §15 wave-2; must be ≥ 2).
+    dialect : Dialect
+        Output HDL dialect.
+
+    Returns
+    -------
+    str
+        Multi-line instance declaration.
+
+    Cites: SOS-08-A §6.9 (`sos_synchronizer` interface signature);
+    SOS-08-A §15 wave-2 (`STAGES` mandatory; no `src_clk` port);
+    SOS-08-C §6.7 (cross-domain transition wiring); INV-S-HDL-C-3
+    (cross-domain transition enforcement); PCDN-SOS-08-C-002
+    (retain_synchronizers).
+    """
+    if stages < 2:
+        raise ValueError(
+            f"emit_sync_inst: stages must be ≥ 2 per SOS-08-A §6.9 contract; "
+            f"got {stages}"
+        )
+    if width < 1:
+        raise ValueError(f"emit_sync_inst: width must be ≥ 1; got {width}")
+
+    # Note: `src_clk` is NOT routed as a port (per SOS-08-A §15 wave-2)
+    # — it's emitted as an inline comment so the cdc-audit consumer can
+    # see which domain originated this crossing.
+    audit_comment_vhdl = (
+        f"-- cdc-audit: {src_clk} -> {dst_clk} (width={width}, stages={stages})"
+    )
+    audit_comment_sv = (
+        f"// cdc-audit: {src_clk} -> {dst_clk} (width={width}, stages={stages})"
+    )
+
+    if dialect is Dialect.VHDL:
+        return (
+            f"{audit_comment_vhdl}\n"
+            f"{inst_name} : entity work.sos_synchronizer\n"
+            f"    generic map (\n"
+            f"        STAGES => {stages},\n"
+            f"        WIDTH  => {width}\n"
+            f"    )\n"
+            f"    port map (\n"
+            f"        clk_dst => {dst_clk},\n"
+            f"        rst_dst => {dst_rst},\n"
+            f"        d_src   => {src_signal},\n"
+            f"        d_dst   => {dst_signal}\n"
+            f"    );"
+        )
+    if dialect is Dialect.SV:
+        return (
+            f"{audit_comment_sv}\n"
+            f"sos_synchronizer #(\n"
+            f"    .STAGES({stages}),\n"
+            f"    .WIDTH({width})\n"
+            f") {inst_name} (\n"
+            f"    .clk_dst({dst_clk}),\n"
+            f"    .rst_dst({dst_rst}),\n"
+            f"    .d_src({src_signal}),\n"
+            f"    .d_dst({dst_signal})\n"
+            f");"
+        )
+    raise ValueError(f"emit_sync_inst: unsupported dialect {dialect!r}")
+
+
+# ---------------------------------------------------------------------------
+# Chart-top wrapper emission (wave-2; SOS-08-C §6.10).
+# ---------------------------------------------------------------------------
+
+
+def emit_chart_top_wrapper(
+    chart_name: str,
+    region_modules: list[dict],
+    cross_domain_signals: list[dict],
+    dialect: Dialect,
+) -> str:
+    """Emit the chart-top wrapper per SOS-08-C §6.10.
+
+    The wrapper instantiates one ``sos_region_<id>`` per region in the
+    chart's region tree, deduplicates clock + reset ports across
+    regions sharing a domain (PCDN-C-001 / inherit-from-parent), and
+    instantiates one :func:`emit_sync_inst` per cross-domain edge
+    (PCDN-C-002 / retain_synchronizers — synchronizers stay regardless
+    of ``--verified-strip`` reachability).
+
+    Parameters
+    ----------
+    chart_name : str
+        The chart's name; used to derive the wrapper module name
+        (``<chart_name>_top``).
+    region_modules : list[dict]
+        One entry per region in the region tree. Each entry MUST carry
+        at least ``"name"`` (the region id, used for the instance name
+        + the module name ``sos_region_<name>``), ``"clock"`` (the
+        clock-domain name), ``"reset"`` (the reset signal name), and
+        ``"ports"`` (a list of :class:`HdlPort` objects that the region
+        FSM module exposes; the wrapper hoists these to its boundary).
+    cross_domain_signals : list[dict]
+        One entry per cross-domain edge in the chart's ``cdc-audit.json``
+        artifact. Each entry MUST carry ``"name"`` (the chart-side
+        signal name), ``"src_region"`` (the source region's id; this
+        wrapper consults the matching ``region_modules`` entry for its
+        clock + reset), ``"dst_region"`` (the destination region's id),
+        and ``"width"`` (the bit-width). Optional ``"stages"`` overrides
+        the default of 2 (SOS-08-A §6.9 / §15 wave-2 default).
+    dialect : Dialect
+        Output HDL dialect.
+
+    Returns
+    -------
+    str
+        Multi-line wrapper module declaration. The wrapper exposes the
+        union of all region-FSM ports at its top boundary; clock /
+        reset signals are deduplicated (one input per distinct domain).
+
+    Cites: SOS-08-C §6.10 (chart-top wrapper emission); §6.7 (per-
+    region clock annotation); PCDN-SOS-08-C-001 (inherit-from-parent
+    default); PCDN-SOS-08-C-002 (retain_synchronizers); INV-S-HDL-C-3
+    (cross-domain transition enforcement).
+    """
+    if dialect not in (Dialect.VHDL, Dialect.SV):
+        raise ValueError(f"emit_chart_top_wrapper: unsupported dialect {dialect!r}")
+    if not isinstance(chart_name, str) or not chart_name:
+        raise ValueError("emit_chart_top_wrapper: chart_name must be non-empty str")
+    if not isinstance(region_modules, list) or not region_modules:
+        raise ValueError(
+            "emit_chart_top_wrapper: region_modules must be a non-empty list"
+        )
+
+    # ---- Deduplicate clock + reset domains across regions. ----
+    # Determinism per INV-S-HDL-C-1: preserve first-seen order.
+    clock_order: list[str] = []
+    reset_order: list[str] = []
+    region_index: dict[str, dict] = {}
+    for rm in region_modules:
+        if "name" not in rm or "clock" not in rm or "reset" not in rm:
+            raise ValueError(
+                f"emit_chart_top_wrapper: region_modules entry missing "
+                f"required keys (name/clock/reset): {rm!r}"
+            )
+        region_index[rm["name"]] = rm
+        if rm["clock"] not in clock_order:
+            clock_order.append(rm["clock"])
+        if rm["reset"] not in reset_order:
+            reset_order.append(rm["reset"])
+
+    top_name = f"{chart_name}_top"
+
+    # ---- Build the top-boundary port list. ----
+    # Order: clocks, resets, then the union of each region's non-clock/
+    # non-reset ports preserving region order. Deduplicate by name so a
+    # cross-region shared signal (e.g. a shared `tick`) appears once.
+    seen_port_names: set[str] = set(clock_order) | set(reset_order)
+    boundary_ports: list[HdlPort] = []
+    for ck in clock_order:
+        boundary_ports.append(HdlPort(name=ck, direction="in", width=1))
+    for rs in reset_order:
+        boundary_ports.append(HdlPort(name=rs, direction="in", width=1))
+    for rm in region_modules:
+        for p in rm.get("ports", []):
+            if not isinstance(p, HdlPort):
+                raise TypeError(
+                    f"emit_chart_top_wrapper: region {rm['name']!r} port "
+                    f"entries must be HdlPort instances; got "
+                    f"{type(p).__name__}"
+                )
+            if p.name in seen_port_names:
+                continue
+            seen_port_names.add(p.name)
+            boundary_ports.append(p)
+
+    # ---- Emit. ----
+    if dialect is Dialect.VHDL:
+        return _emit_chart_top_wrapper_vhdl(
+            top_name, boundary_ports, region_modules,
+            cross_domain_signals, region_index,
+        )
+    return _emit_chart_top_wrapper_sv(
+        top_name, boundary_ports, region_modules,
+        cross_domain_signals, region_index,
+    )
+
+
+def _emit_chart_top_wrapper_vhdl(
+    top_name: str,
+    boundary_ports: list[HdlPort],
+    region_modules: list[dict],
+    cross_domain_signals: list[dict],
+    region_index: dict[str, dict],
+) -> str:
+    """VHDL realisation of the wrapper (SOS-08-C §6.10)."""
+    lines: list[str] = []
+    lines.append(f"entity {top_name} is")
+    lines.append("    port (")
+    rendered = [emit_port_decl(p, Dialect.VHDL) for p in boundary_ports]
+    for i, pl in enumerate(rendered):
+        suffix = ";" if i < len(rendered) - 1 else ""
+        lines.append(f"        {pl}{suffix}")
+    lines.append("    );")
+    lines.append(f"end entity {top_name};")
+    lines.append("")
+    lines.append(f"architecture rtl of {top_name} is")
+    # Declare cross-domain wires (one wire per CDC edge, in dst domain).
+    for cd in cross_domain_signals:
+        w = int(cd.get("width", 1))
+        name = cd["name"]
+        if w == 1:
+            lines.append(f"    signal {name}_sync : std_logic;")
+        else:
+            lines.append(
+                f"    signal {name}_sync : std_logic_vector({w - 1} downto 0);"
+            )
+    lines.append("begin")
+    # Synchronizer instances (retain regardless of --verified-strip
+    # per PCDN-C-002).
+    for i, cd in enumerate(cross_domain_signals):
+        src_id = cd["src_region"]
+        dst_id = cd["dst_region"]
+        src_rm = region_index.get(src_id)
+        dst_rm = region_index.get(dst_id)
+        if src_rm is None or dst_rm is None:
+            raise ValueError(
+                f"emit_chart_top_wrapper: cross_domain_signals[{i}] references "
+                f"unknown region(s): src={src_id!r} dst={dst_id!r}"
+            )
+        lines.append(
+            emit_sync_inst(
+                inst_name=f"u_sync_{cd['name']}",
+                src_signal=cd["name"],
+                dst_signal=f"{cd['name']}_sync",
+                src_clk=src_rm["clock"],
+                dst_clk=dst_rm["clock"],
+                dst_rst=dst_rm["reset"],
+                width=int(cd.get("width", 1)),
+                stages=int(cd.get("stages", 2)),
+                dialect=Dialect.VHDL,
+            )
+        )
+    # Region instances.
+    for rm in region_modules:
+        inst = f"u_{rm['name']}"
+        lines.append(
+            f"    {inst} : entity work.sos_region_{rm['name']}"
+        )
+        lines.append("        port map (")
+        port_lines: list[str] = []
+        port_lines.append(f"clk => {rm['clock']}")
+        port_lines.append(f"rst => {rm['reset']}")
+        for p in rm.get("ports", []):
+            # Wire region port to top-boundary signal of the same name.
+            port_lines.append(f"{p.name} => {p.name}")
+        for j, pl in enumerate(port_lines):
+            suffix = "," if j < len(port_lines) - 1 else ""
+            lines.append(f"            {pl}{suffix}")
+        lines.append("        );")
+    lines.append("end architecture rtl;")
+    return "\n".join(lines)
+
+
+def _emit_chart_top_wrapper_sv(
+    top_name: str,
+    boundary_ports: list[HdlPort],
+    region_modules: list[dict],
+    cross_domain_signals: list[dict],
+    region_index: dict[str, dict],
+) -> str:
+    """SystemVerilog realisation of the wrapper (SOS-08-C §6.10)."""
+    lines: list[str] = []
+    lines.append(f"module {top_name} (")
+    rendered = [emit_port_decl(p, Dialect.SV) for p in boundary_ports]
+    for i, pl in enumerate(rendered):
+        suffix = "," if i < len(rendered) - 1 else ""
+        lines.append(f"    {pl}{suffix}")
+    lines.append(");")
+    # Declare cross-domain wires.
+    for cd in cross_domain_signals:
+        w = int(cd.get("width", 1))
+        name = cd["name"]
+        if w == 1:
+            lines.append(f"    logic {name}_sync;")
+        else:
+            lines.append(f"    logic [{w - 1}:0] {name}_sync;")
+    # Synchronizer instances.
+    for i, cd in enumerate(cross_domain_signals):
+        src_id = cd["src_region"]
+        dst_id = cd["dst_region"]
+        src_rm = region_index.get(src_id)
+        dst_rm = region_index.get(dst_id)
+        if src_rm is None or dst_rm is None:
+            raise ValueError(
+                f"emit_chart_top_wrapper: cross_domain_signals[{i}] references "
+                f"unknown region(s): src={src_id!r} dst={dst_id!r}"
+            )
+        lines.append(
+            emit_sync_inst(
+                inst_name=f"u_sync_{cd['name']}",
+                src_signal=cd["name"],
+                dst_signal=f"{cd['name']}_sync",
+                src_clk=src_rm["clock"],
+                dst_clk=dst_rm["clock"],
+                dst_rst=dst_rm["reset"],
+                width=int(cd.get("width", 1)),
+                stages=int(cd.get("stages", 2)),
+                dialect=Dialect.SV,
+            )
+        )
+    # Region instances.
+    for rm in region_modules:
+        inst = f"u_{rm['name']}"
+        lines.append(f"    sos_region_{rm['name']} {inst} (")
+        port_lines: list[str] = []
+        port_lines.append(f".clk({rm['clock']})")
+        port_lines.append(f".rst({rm['reset']})")
+        for p in rm.get("ports", []):
+            port_lines.append(f".{p.name}({p.name})")
+        for j, pl in enumerate(port_lines):
+            suffix = "," if j < len(port_lines) - 1 else ""
+            lines.append(f"        {pl}{suffix}")
+        lines.append("    );")
+    lines.append("endmodule")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -972,16 +1847,24 @@ __all__ = [
     # Per-dialect emit helpers
     "emit_port_decl",
     "emit_signal_decl",
+    "emit_signal_decl_int",
     "emit_fsm_state_encoding",
     "emit_fsm_state_constants",
     "emit_register_process",
     "emit_combinational_block",
     "emit_header_comment",
     "emit_transition_mux",
+    "emit_guard_expr",
+    "emit_sync_inst",
+    "emit_chart_top_wrapper",
     # Datamodel + analysis
     "map_datamodel_type",
+    "datamodel_width",
+    "port_width_from_signal_width",
     "compute_guard_depth",
     "encoding_width",
+    # Exceptions
+    "GuardDepthError",
     # Constants
     "DEFAULT_GUARD_DEPTH_BUDGET",
 ]

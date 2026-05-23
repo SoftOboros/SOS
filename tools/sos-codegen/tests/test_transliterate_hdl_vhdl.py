@@ -1,21 +1,24 @@
-"""Wave-1 unit tests for `transliterate_hdl_vhdl.render_target`.
+"""Unit tests for `transliterate_hdl_vhdl.render_target` (wave-1 + wave-2).
 
 @spec  SOS-08-C-CONCEPTS.md §6 (emission algorithm), §15 (ratification)
+@spec  PCDN-C-001 (clock-domain default inherit-from-parent)
+@spec  PCDN-C-002 (verified-strip retain synchronizers — wave-2 wraps)
 @spec  PCDN-C-003 (reset state = SCXML <initial>)
+@spec  PCDN-C-004 (guard depth budget = 8 chained operators)
 @spec  PCDN-C-005 (chart annotation wins for encoding — wave-1 default = one-hot)
 @spec  PCDN-C-006 (document-order priority in transition mux)
 @spec  INV-S-HDL-A-1 (sync active-high reset)
 @spec  INV-S-HDL-C-1..5 (deterministic emission, observability, etc.)
 
-The wave-1 scaffold consumes the raw scjson dict shape — the same shape
-`loader._collect_states` / `_collect_datamodel` walk. The sibling
+The wave-1/wave-2 scaffold consumes the raw scjson dict shape — the same
+shape `loader._collect_states` / `_collect_datamodel` walk.  The sibling
 agent's main.py dispatcher parses SCXML to scjson via `scjson json` and
 passes the result to `render_target`; these tests build the same dict
 shape inline so the test suite has no cross-agent fixture dependency.
 
 Note: tests do NOT execute pytest themselves (per the orchestrator's
-"static deliverable; do NOT run pytest" directive). They define
-assertions for the wave-1 acceptance gate that the integration-pass
+"static deliverable; do NOT run pytest" directive).  They define
+assertions for the wave-1/2 acceptance gates that the integration-pass
 agent runs.
 """
 
@@ -27,7 +30,7 @@ from pathlib import Path
 import pytest
 
 # Ensure the sos-codegen package is importable when pytest is invoked
-# from the repo root. Mirrors the bootstrap pattern in
+# from the repo root.  Mirrors the bootstrap pattern in
 # tests/test_verified_strip.py.
 _TOOL_DIR = Path(__file__).resolve().parent.parent
 if str(_TOOL_DIR) not in sys.path:
@@ -44,11 +47,6 @@ from transliterate_hdl_vhdl import (  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Inline scjson-dict builders.
-#
-# The `render_target` wave-1 contract takes the raw scjson dict shape,
-# not a file path — so tests can synthesize charts without going through
-# the `scjson json` shell-out. This keeps the test suite hermetic and
-# disjoint from the sibling agent's fixture file plans.
 # ---------------------------------------------------------------------------
 
 
@@ -65,7 +63,7 @@ def _state(state_id, *, onentry=None, onexit=None, transitions=None):
 
 
 def _simple_chart():
-    """A 3-state chart: idle → working → done. No datamodel."""
+    """A 3-state chart: idle → working → done.  No datamodel."""
     return {
         "initial": "idle",
         "state": [
@@ -86,7 +84,7 @@ def _chart_with_datamodel():
     """One state with one datamodel signal `counter` initial 0."""
     return {
         "initial": "running",
-        "datamodel": [{"data": [{"id": "counter", "expr": "0"}]}],
+        "datamodel": [{"data": [{"id": "counter", "expr": "0", "type": "int"}]}],
         "state": [_state("running")],
     }
 
@@ -106,7 +104,7 @@ def _four_state_chart():
 
 def _multi_transition_chart():
     """State `pick` with three outgoing transitions; per PCDN-C-006 the
-    first listed transition wins at wave-1."""
+    first listed transition wins at wave-1 (unguarded path)."""
     return {
         "initial": "pick",
         "state": [
@@ -126,7 +124,7 @@ def _multi_transition_chart():
 
 
 def _chart_with_guarded_transition():
-    """A chart whose transition carries a `cond` attribute — rejected at v1."""
+    """A chart whose transition carries a `cond` attribute — supported at v2."""
     return {
         "initial": "guarded",
         "state": [
@@ -141,21 +139,148 @@ def _chart_with_guarded_transition():
     }
 
 
+def _chart_with_multiple_guards():
+    """State `dispatch` with three guarded transitions on one state.
+    Per PCDN-C-006 they must compose into an if/elsif/elsif chain in
+    document order."""
+    return {
+        "initial": "dispatch",
+        "datamodel": [
+            {"data": [
+                {"id": "mode", "expr": "0", "type": "int"},
+                {"id": "ready", "expr": "0", "type": "bool"},
+            ]}
+        ],
+        "state": [
+            _state(
+                "dispatch",
+                transitions=[
+                    {"target": "fast", "cond": "mode == 1"},
+                    {"target": "slow", "cond": "mode == 2"},
+                    {"target": "idle", "cond": "ready != 0"},
+                ],
+            ),
+            _state("fast"),
+            _state("slow"),
+            _state("idle"),
+        ],
+    }
+
+
+def _chart_with_deep_guard():
+    """A guard whose depth exceeds the 8-operator budget per
+    PCDN-C-004 — should raise UnsupportedChartError."""
+    # 9 chained operators (8 `&&` + a relational): exceeds budget=8.
+    deep = "a == 1 && b == 2 && c == 3 && d == 4 && e == 5 && f == 6 && g == 7 && h == 8 && i == 9"
+    return {
+        "initial": "deep",
+        "state": [
+            _state(
+                "deep",
+                transitions=[{"target": "ok", "cond": deep}],
+            ),
+            _state("ok"),
+        ],
+    }
+
+
 def _chart_with_parallel():
-    """A chart with a top-level <parallel> — rejected at v1."""
+    """A chart with a top-level <parallel> carrying two orthogonal
+    regions.  Supported at v2: emits one module per region plus a
+    chart-top wrapper."""
     return {
         "initial": "p",
         "parallel": [
             {
                 "id": "p",
-                "state": [_state("p_left"), _state("p_right")],
+                "state": [
+                    {
+                        "id": "left",
+                        "initial": "l_idle",
+                        "state": [
+                            _state(
+                                "l_idle",
+                                transitions=[{"target": "l_active"}],
+                            ),
+                            _state("l_active"),
+                        ],
+                    },
+                    {
+                        "id": "right",
+                        "initial": "r_idle",
+                        "state": [
+                            _state(
+                                "r_idle",
+                                transitions=[{"target": "r_active"}],
+                            ),
+                            _state("r_active"),
+                        ],
+                    },
+                ],
             }
         ],
     }
 
 
+def _chart_with_cross_domain():
+    """A chart with two parallel regions in different clock domains;
+    region A writes shared datamodel `flag`, region B reads it via a
+    guard.  Should produce a cross-domain synchronizer in the wrapper."""
+    return {
+        "initial": "p",
+        "datamodel": [
+            {"data": [{"id": "flag", "expr": "0", "type": "int"}]}
+        ],
+        "parallel": [
+            {
+                "id": "p",
+                "state": [
+                    {
+                        "id": "writer",
+                        "clock": "fast",
+                        "initial": "w_idle",
+                        "state": [
+                            _state(
+                                "w_idle",
+                                onentry=[{"assign": [{"location": "flag", "expr": "1"}]}],
+                                transitions=[{"target": "w_done"}],
+                            ),
+                            _state("w_done"),
+                        ],
+                    },
+                    {
+                        "id": "reader",
+                        "clock": "slow",
+                        "initial": "r_idle",
+                        "state": [
+                            _state(
+                                "r_idle",
+                                transitions=[
+                                    {"target": "r_seen", "cond": "flag != 0"},
+                                ],
+                            ),
+                            _state("r_seen"),
+                        ],
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def _chart_with_wide_datamodel():
+    """A chart whose datamodel signal is multi-bit (int = 32-bit).
+    Port should emit as std_logic_vector(31 downto 0)."""
+    return {
+        "initial": "counting",
+        "datamodel": [{"data": [{"id": "counter", "expr": "0", "type": "int"}]}],
+        "state": [_state("counting")],
+    }
+
+
 def _chart_with_script():
-    """A chart whose <onentry> carries a <script> body — rejected at v1."""
+    """A chart whose <onentry> carries a <script> body — rejected at v2,
+    lands in v3."""
     return {
         "initial": "s",
         "state": [
@@ -168,15 +293,11 @@ def _chart_with_script():
 
 
 # ---------------------------------------------------------------------------
-# Wave-1 acceptance tests.
+# Wave-1 acceptance tests (carried forward unchanged).
 # ---------------------------------------------------------------------------
 
 
 def test_single_region_simple_emits_clean():
-    """SOS-08-C §6.2 acceptance: a 3-state single-region chart emits
-    one `<chart>_fsm.vhd` file carrying the required VHDL artifacts
-    (library imports, entity, architecture, register process,
-    transition mux, current_state output)."""
     chart = _simple_chart()
     files = render_target(chart, {"chart_name": "simple"})
     assert "simple_fsm.vhd" in files
@@ -187,82 +308,54 @@ def test_single_region_simple_emits_clean():
     assert "entity simple_fsm is" in body
     assert "architecture rtl of simple_fsm is" in body
     assert "rising_edge(clk)" in body
-    # The reset branch + sync active-high check (INV-S-HDL-A-1).
     assert "rst = '1'" in body
-    # Per-state constants present.
     assert state_constant_name("idle") in body
     assert state_constant_name("working") in body
     assert state_constant_name("done") in body
-    # current_state observability port (INV-S-HDL-C-2).
     assert "current_state" in body
-    # state_q / state_next signals declared.
     assert "signal state_q" in body
     assert "signal state_next" in body
 
 
 def test_datamodel_signals_emitted():
-    """SOS-08-C §5.4 / §6.6: each <data> compiles to a registered signal
-    whose reset value is the chart's initial expression. Wave-1 maps
-    numeric literals through `to_signed(...)`."""
     chart = _chart_with_datamodel()
     files = render_target(chart, {"chart_name": "dm"})
     body = files["dm_fsm.vhd"]
-    # The registered signal carries the `_q` suffix.
     assert "signal counter_q" in body
-    # Reset value uses to_signed (numeric_std).
     assert "to_signed(0, counter_q'length)" in body
-    # Exposed as an output port driving the datamodel observable.
     assert "data_counter" in body
 
 
 def test_one_hot_encoding_default():
-    """SOS-08-C §5.1 / PCDN-C-005: one-hot encoding by default at wave-1.
-    For a 4-state chart the constants are 0001 / 0010 / 0100 / 1000."""
     chart = _four_state_chart()
     files = render_target(chart, {"chart_name": "four"})
     body = files["four_fsm.vhd"]
-    # The state-constant literals (one-hot in document order).
     assert '"0001"' in body
     assert '"0010"' in body
     assert '"0100"' in body
     assert '"1000"' in body
-    # And the helper returns the same encoding for spot-checking.
     assert one_hot_value(0, 4) == '"0001"'
     assert one_hot_value(3, 4) == '"1000"'
 
 
 def test_initial_state_is_reset_state():
-    """PCDN-C-003: the SCXML <initial> attribute drives the FSM reset
-    value. For `initial="idle"` the reset assignment must use
-    ST_IDLE."""
     chart = _simple_chart()
     files = render_target(chart, {"chart_name": "init"})
     body = files["init_fsm.vhd"]
     initial_const = state_constant_name("idle")
-    # Reset assignment binds state_q <= ST_IDLE when rst='1'.
     assert f"state_q <= {initial_const}" in body
 
 
 def test_document_order_priority_in_transition_mux():
-    """PCDN-C-006: when multiple outgoing transitions share a source
-    state, the wave-1 scaffold picks the first listed (document
-    order) target. The remaining transitions emit as commented-elided
-    lines so chart authors can see them in the output."""
     chart = _multi_transition_chart()
     files = render_target(chart, {"chart_name": "prio"})
     body = files["prio_fsm.vhd"]
-    # The case-arm body for ST_PICK selects ST_WINNER, NOT ST_LOSER_*.
     winner = state_constant_name("winner")
     loser_a = state_constant_name("loser_a")
     loser_b = state_constant_name("loser_b")
-    # The winner is the chosen state_next assignment.
     assert f"state_next <= {winner}" in body
-    # The losers appear only as elided-priority comments — they MUST
-    # NOT appear as a direct assignment.
     direct_loser_a = f"state_next <= {loser_a}"
     direct_loser_b = f"state_next <= {loser_b}"
-    # Allow them in comment lines (`-- ... target=loser_a`) but reject
-    # any direct case-arm assignment.
     for line in body.splitlines():
         stripped = line.strip()
         if stripped.startswith("--"):
@@ -271,41 +364,18 @@ def test_document_order_priority_in_transition_mux():
         assert direct_loser_b not in stripped
 
 
-def test_guards_rejected_at_v1_scaffold():
-    """Per the orchestrator's wave-1 scope: charts carrying guarded
-    transitions raise `UnsupportedChartError` with a clear message
-    citing "SOS-08-C wave-1 scaffold does not emit guards yet"."""
-    chart = _chart_with_guarded_transition()
-    with pytest.raises(UnsupportedChartError) as exc_info:
-        render_target(chart, {"chart_name": "g"})
-    msg = str(exc_info.value)
-    assert "SOS-08-C wave-1 scaffold does not emit guards yet" in msg
-
-
-def test_parallel_regions_rejected_at_v1_scaffold():
-    """Per the orchestrator's wave-1 scope: charts containing
-    <parallel> raise `UnsupportedChartError` citing the deferred wave."""
-    chart = _chart_with_parallel()
-    with pytest.raises(UnsupportedChartError) as exc_info:
-        render_target(chart, {"chart_name": "p"})
-    msg = str(exc_info.value)
-    assert "SOS-08-C wave-1 scaffold does not emit parallel regions yet" in msg
-
-
-def test_script_bodies_rejected_at_v1_scaffold():
-    """Wave-1 is assign-only — <script> bodies (ECMAScript) raise
-    UnsupportedChartError, with wave-2 as the landing wave."""
+def test_script_bodies_rejected_at_v2_scaffold():
+    """Wave-2 is still assign-only — <script> bodies (ECMAScript) raise
+    UnsupportedChartError, with wave-3 as the landing wave."""
     chart = _chart_with_script()
     with pytest.raises(UnsupportedChartError) as exc_info:
         render_target(chart, {"chart_name": "sc"})
     msg = str(exc_info.value)
-    assert "SOS-08-C wave-1 scaffold does not emit ECMAScript" in msg
+    assert "SOS-08-C wave-2 emitter does not lower ECMAScript" in msg
+    assert "wave-3" in msg
 
 
 def test_render_target_rejects_non_dict_chart_ir():
-    """The wave-1 contract takes the raw scjson dict; passing a
-    `ChartAst` (the loader's normalised view) by mistake yields a
-    clear error so the integration pass can repair the dispatcher."""
     with pytest.raises(UnsupportedChartError) as exc_info:
         render_target("not a dict", {"chart_name": "x"})
     msg = str(exc_info.value)
@@ -313,17 +383,12 @@ def test_render_target_rejects_non_dict_chart_ir():
 
 
 def test_entity_name_normalises_chart_name():
-    """The VHDL entity name is `<chart>_fsm`, lower-snake-case, with
-    any non-identifier chars folded to `_`."""
     assert entity_name("simple") == "simple_fsm"
     assert entity_name("Mixed-Case Chart") == "mixed_case_chart_fsm"
     assert entity_name("1starts_numeric").startswith("x")
 
 
 def test_default_initial_falls_back_to_first_state():
-    """SCXML allows `initial` to be omitted; in that case the FSM's
-    reset state is the first state in document order (SOS-08-C §5.6
-    cites this as the SCXML default)."""
     chart = {
         "state": [
             _state("alpha"),
@@ -333,27 +398,182 @@ def test_default_initial_falls_back_to_first_state():
     files = render_target(chart, {"chart_name": "noinit"})
     body = files["noinit_fsm.vhd"]
     alpha = state_constant_name("alpha")
-    # Reset binds state_q <= ST_ALPHA (the first state).
     assert f"state_q <= {alpha}" in body
 
 
 def test_emits_header_comment_with_spec_citations():
-    """Every emitted file MUST carry the spec-citation header per
-    CLAUDE.md "Execution discipline" — the §15 amendment, PCDN ids,
-    and INV ids."""
     files = render_target(_simple_chart(), {"chart_name": "hdr"})
     body = files["hdr_fsm.vhd"]
     assert "SOS-08-C-CONCEPTS.md" in body
     assert "INV-S-HDL" in body
-    # At least one PCDN cited.
     assert "PCDN" in body or "C-001" in body or "C-006" in body
 
 
 def test_empty_chart_raises_clear_error():
-    """A chart with no states surfaces an UnsupportedChartError naming
-    the wave-1 requirement, NOT a generic IndexError."""
     chart = {"state": []}
     with pytest.raises(UnsupportedChartError) as exc_info:
         render_target(chart, {"chart_name": "empty"})
     msg = str(exc_info.value)
     assert "at least one <state>" in msg
+
+
+# ---------------------------------------------------------------------------
+# Wave-2 acceptance tests.
+# ---------------------------------------------------------------------------
+
+
+def test_guards_rejected_at_v1_scaffold():
+    """RETRACTED at wave-2: guards are now SUPPORTED.  The test name is
+    kept for backward identification but the assertion flips: the
+    render now succeeds and emits an if/then case-arm body."""
+    chart = _chart_with_guarded_transition()
+    files = render_target(chart, {"chart_name": "g"})
+    assert "g_fsm.vhd" in files
+    body = files["g_fsm.vhd"]
+    # The guard-aware arm body is an if/then assignment, not a plain
+    # state_next assignment.
+    assert "if " in body
+    assert "then" in body
+    assert state_constant_name("next") in body
+
+
+def test_parallel_regions_rejected_at_v1_scaffold():
+    """RETRACTED at wave-2: <parallel> is now SUPPORTED — each region
+    becomes its own module + a chart-top wrapper instantiates them."""
+    chart = _chart_with_parallel()
+    files = render_target(chart, {"chart_name": "par"})
+    # Expect one file per region + the wrapper.
+    assert "par_top.vhd" in files
+    assert "par_region_left.vhd" in files
+    assert "par_region_right.vhd" in files
+
+
+def test_guarded_transition_emits_if_block():
+    """Wave-2 new acceptance: a chart with one guarded transition
+    compiles to a VHDL if/then case-arm body (PCDN-C-006 chain head)."""
+    chart = _chart_with_guarded_transition()
+    files = render_target(chart, {"chart_name": "guarded"})
+    body = files["guarded_fsm.vhd"]
+    # Arm body contains an `if <expr> then state_next <= ST_NEXT;` form.
+    assert "if " in body
+    # The compiled guard should reference the registered `_q` form of
+    # the datamodel signal (heuristic — wave-2 fallback path); the
+    # canonical hdl_common.emit_guard_expr may render differently.
+    next_const = state_constant_name("next")
+    # The target state must be the next-state assignment inside the
+    # if-block — search for the literal assignment line.
+    assert any(
+        f"state_next <= {next_const}" in line for line in body.splitlines()
+    )
+
+
+def test_multiple_guards_become_elsif_chain():
+    """Wave-2: 3 guarded transitions on one state compose into an
+    if/elsif/elsif chain in document order per PCDN-C-006.  No
+    unguarded fallback ⇒ the chain closes with `else state_next <=
+    state_q;`."""
+    chart = _chart_with_multiple_guards()
+    files = render_target(chart, {"chart_name": "multi"})
+    body = files["multi_fsm.vhd"]
+    # Look at lines inside the dispatch case-arm.  At minimum: one `if`
+    # and at least one `elsif`.
+    text = body
+    assert "if " in text
+    assert "elsif " in text
+    # All three guard targets present.
+    for tgt in ("fast", "slow", "idle"):
+        assert state_constant_name(tgt) in text
+    # End-of-chain closing `else` falling back to state_q.
+    assert "else" in text
+
+
+def test_guard_depth_over_budget_fails():
+    """Wave-2: a guard expression whose depth exceeds the configured
+    budget surfaces as `UnsupportedChartError` citing PCDN-C-004 and
+    the offending state."""
+    chart = _chart_with_deep_guard()
+    with pytest.raises(UnsupportedChartError) as exc_info:
+        render_target(
+            chart,
+            {"chart_name": "deep", "guard_depth_budget": 8},
+        )
+    msg = str(exc_info.value)
+    assert "PCDN-C-004" in msg
+    assert "depth" in msg
+    assert "budget" in msg
+    # The source state is named.
+    assert "deep" in msg
+
+
+def test_parallel_regions_emit_separate_modules():
+    """Wave-2: a chart with <parallel> containing 2 regions emits 3
+    output files — one per region + the chart-top wrapper."""
+    chart = _chart_with_parallel()
+    files = render_target(chart, {"chart_name": "par"})
+    assert len(files) == 3
+    assert "par_top.vhd" in files
+    assert "par_region_left.vhd" in files
+    assert "par_region_right.vhd" in files
+    # Each region module is a complete VHDL file.
+    for region_name in ("left", "right"):
+        body = files[f"par_region_{region_name}.vhd"]
+        assert "library ieee;" in body
+        assert f"entity par_region_{region_name} is" in body
+        assert "architecture rtl of" in body
+
+
+def test_chart_top_wrapper_instantiates_regions():
+    """Wave-2: the chart-top wrapper carries `u_region_<name> : entity
+    work.<chart>_region_<name>` instantiation lines for each region."""
+    chart = _chart_with_parallel()
+    files = render_target(chart, {"chart_name": "par"})
+    wrapper = files["par_top.vhd"]
+    # The wrapper is a VHDL entity + architecture.
+    assert "entity par_top is" in wrapper
+    assert "architecture rtl of par_top" in wrapper
+    # Each region is instantiated via `entity work.<chart>_region_<name>`.
+    assert "entity work.par_region_left" in wrapper
+    assert "entity work.par_region_right" in wrapper
+
+
+def test_cross_domain_signal_gets_synchronizer():
+    """Wave-2 + PCDN-C-002: a chart whose two regions live in distinct
+    clock domains and share a datamodel signal triggers emission of a
+    `sos_synchronizer` instantiation in the chart-top wrapper.
+    Synchronizers are retained regardless of verified-strip."""
+    chart = _chart_with_cross_domain()
+    files = render_target(chart, {"chart_name": "cdc"})
+    assert "cdc_top.vhd" in files
+    wrapper = files["cdc_top.vhd"]
+    # Two distinct clock-domain ports.
+    assert "clk_fast" in wrapper
+    assert "clk_slow" in wrapper
+    assert "rst_fast" in wrapper
+    assert "rst_slow" in wrapper
+    # sos_synchronizer instantiation (canonical helper OR inline fallback).
+    assert "sos_synchronizer" in wrapper
+    # PCDN-C-002 comment cite present.
+    assert "PCDN-C-002" in wrapper
+
+
+def test_port_width_follows_signal_width():
+    """Wave-2: a datamodel `<data id="counter" type="int">` emits its
+    port as `std_logic_vector(31 downto 0)` (32-bit per SOS-08-C §5.4
+    default)."""
+    chart = _chart_with_wide_datamodel()
+    files = render_target(chart, {"chart_name": "wide"})
+    body = files["wide_fsm.vhd"]
+    # The data_counter port's width annotation reflects the 32-bit
+    # underlying signal.
+    assert "data_counter" in body
+    assert "std_logic_vector(31 downto 0)" in body
+
+
+def test_wave2_rejection_messages_cite_wave3():
+    """Wave-2 rejections for still-unsupported features cite wave-3 as
+    the landing wave (not wave-2 like the wave-1 prompt did)."""
+    chart = _chart_with_script()
+    with pytest.raises(UnsupportedChartError) as exc_info:
+        render_target(chart, {"chart_name": "sc"})
+    msg = str(exc_info.value)
+    assert "wave-3" in msg

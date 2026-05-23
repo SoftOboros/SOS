@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-08-C wave-2 fixture: a chart with TWO orthogonal regions in
+  different clock domains, sharing one datamodel signal that crosses
+  the domain boundary. Exercises §6.7 (cross-domain handling) +
+  INV-S-HDL-C-3 (every cross-domain transition retains its
+  `sos_synchronizer` / `sos_message_channel` instance regardless of
+  the `verified-strip` flag's reachability prunes).
+
+  Drives `TestParallelWithCrossDomain` in the wave-2 integration
+  suite. The test asserts:
+    (a) the chart-top wrapper instantiates an `sos_synchronizer` for
+        the cross-domain `shared_flag` signal.
+    (b) the wrapper exposes both clock-domain ports `clk_main` (root /
+        region_a) and `clk_fast` (region_b).
+    (c) per PCDN-SOS-08-C-002 (resolved 2026-05-23) the synchronizer
+        is retained even under `verified-strip` (the "retain
+        synchronizers" outcome).
+
+  The `<sos:region>` annotation binds the per-region clock-domain
+  attribute under the namespace ratified at SOS-01 §15 (2026-05-23):
+    xmlns:sos="http://softoboros.com/scxml-extensions/v1"
+  The attribute is `clock="<domain>"`.
+
+  Shape:
+    - root <parallel id="par">.
+    - region_a (default clock = `clk_main`): a_idle -> a_set on `arm`,
+      writes `shared_flag = true` on entry to a_set.
+    - region_b (clock = `clk_fast`): b_wait -> b_done on `tick`,
+      guarded `cond="shared_flag"`; reading shared_flag in a
+      different clock domain than region_a's writer forces a
+      synchronizer per §6.7 step 2.
+
+  Cited spec rules:
+    - SOS-08-C §6.7 (per-region clock-domain handling; chart-top
+      wrapper instantiates sos_synchronizer / sos_message_channel
+      per cross-domain transition).
+    - PCDN-SOS-08-C-001 (resolved): clock-domain inherit-from-parent;
+      explicit annotation on region_b only.
+    - PCDN-SOS-08-C-002 (resolved): retain_synchronizers — MTBF
+      claim is independent of reachability.
+    - INV-S-HDL-C-3 (cross-domain transition enforcement,
+      post-§15 amendment).
+
+  Namespace authority:
+    - SOS-01 §15 2026-05-23 amendment ratifies the
+      `http://softoboros.com/scxml-extensions/v1` namespace prefix
+      `sos:` for chart-side annotations such as
+      `<sos:discharged>`, `<sos:region>`, etc.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="http://softoboros.com/scxml-extensions/v1"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="par">
+
+  <datamodel>
+    <data id="shared_flag" type="bool" expr="false"/>
+  </datamodel>
+
+  <parallel id="par">
+
+    <!-- region_a: default clock domain (clk_main, inherited from
+         the chart root per PCDN-SOS-08-C-001). Writes shared_flag. -->
+    <state id="region_a" initial="a_idle">
+      <sos:region clock="clk_main"/>
+      <state id="a_idle">
+        <transition event="arm" target="a_set"/>
+      </state>
+      <state id="a_set">
+        <onentry>
+          <assign location="shared_flag" expr="true"/>
+        </onentry>
+      </state>
+    </state>
+
+    <!-- region_b: annotated to clk_fast. Reads shared_flag in its
+         guard, crossing the clk_main -> clk_fast boundary -> the
+         chart-top wrapper instantiates an sos_synchronizer per
+         §6.7 step 2 + INV-S-HDL-C-3. -->
+    <state id="region_b" initial="b_wait">
+      <sos:region clock="clk_fast"/>
+      <state id="b_wait">
+        <transition event="tick" cond="shared_flag" target="b_done"/>
+      </state>
+      <state id="b_done">
+        <!-- sink -->
+      </state>
+    </state>
+
+  </parallel>
+
+</scxml>
