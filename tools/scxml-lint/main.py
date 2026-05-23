@@ -34,13 +34,17 @@ Implemented rules at this commit (all 18 SOS-01 §6 rules):
 * SCXML-LINT-016 — helper-function comments          (rules/rule_016_helper_comments.py)
 * SCXML-LINT-017 — REFERENCE.md syscall coverage     (rules/reference_md_drift.py)
 * SCXML-LINT-018 — REFERENCE.md task-state mirror    (rules/reference_md_drift.py)
+* SCXML-LINT-C-1  — document-order priority warning  (rules/scxml_lint_c_1.py)
+* SCXML-LINT-C-2  — guard-condition depth budget     (rules/scxml_lint_c_2.py)
+* SCXML-LINT-H-1  — no preemption-related markup     (rules/scxml_lint_h_1.py)
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 try:
     from lxml import etree
@@ -66,6 +70,8 @@ from rules import (
     rule_011_unguarded_documented,
     rule_012_cond_pure,
     rule_016_helper_comments,
+    scxml_lint_c_1,
+    scxml_lint_c_2,
     scxml_lint_h_1,
     schema,
     script_length,
@@ -124,6 +130,8 @@ def run(scxml_path: Path, repo_root: Path) -> List[Finding]:
     findings.extend(rule_012_cond_pure.check(tree, scxml_path))
     findings.extend(event_vocabulary.check(tree, scxml_path))
     findings.extend(rule_016_helper_comments.check(tree, scxml_path))
+    findings.extend(scxml_lint_c_1.check(tree, scxml_path))
+    findings.extend(scxml_lint_c_2.check(tree, scxml_path))
     findings.extend(scxml_lint_h_1.check(tree, scxml_path))
     findings.extend(
         reference_md_drift.check(
@@ -136,13 +144,76 @@ def run(scxml_path: Path, repo_root: Path) -> List[Finding]:
     return findings
 
 
+def _parse_args(argv: List[str]) -> tuple[Optional[Path], Optional[int], Optional[str]]:
+    """Parse ``argv`` into ``(scxml_path, guard_depth_budget, error_msg)``.
+
+    Returns the path + optional budget when parsing succeeded, or
+    ``(None, None, message)`` when it didn't. Kept inline (no
+    ``argparse``) to preserve the existing tight failure-mode surface
+    documented in the module docstring.
+    """
+    scxml_path: Optional[Path] = None
+    guard_depth_budget: Optional[int] = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--guard-depth-budget":
+            if i + 1 >= len(argv):
+                return (None, None, "missing value for --guard-depth-budget")
+            try:
+                guard_depth_budget = int(argv[i + 1])
+            except ValueError:
+                return (None, None,
+                        f"--guard-depth-budget expects an integer, got '{argv[i + 1]}'")
+            if guard_depth_budget < 0:
+                return (None, None,
+                        f"--guard-depth-budget must be non-negative, got {guard_depth_budget}")
+            i += 2
+            continue
+        if arg.startswith("--guard-depth-budget="):
+            _, _, raw = arg.partition("=")
+            try:
+                guard_depth_budget = int(raw)
+            except ValueError:
+                return (None, None,
+                        f"--guard-depth-budget expects an integer, got '{raw}'")
+            if guard_depth_budget < 0:
+                return (None, None,
+                        f"--guard-depth-budget must be non-negative, got {guard_depth_budget}")
+            i += 1
+            continue
+        if arg.startswith("-"):
+            return (None, None, f"unknown flag '{arg}'")
+        if scxml_path is not None:
+            return (None, None, "expected exactly one <scxml-file> argument")
+        scxml_path = Path(arg)
+        i += 1
+
+    if scxml_path is None:
+        return (None, None, "missing <scxml-file> argument")
+    return (scxml_path, guard_depth_budget, None)
+
+
 def main(argv: List[str]) -> int:
-    """Entry point. ``argv`` is ``sys.argv[1:]``."""
-    if len(argv) != 1:
-        sys.stderr.write("usage: scxml-lint <scxml-file>\n")
+    """Entry point. ``argv`` is ``sys.argv[1:]``.
+
+    Supported flags:
+
+    * ``--guard-depth-budget N`` — set the SCXML-LINT-C-2 guard
+      combinational-depth budget (default 8 per PCDN-C-004). The flag
+      value is exported as ``SCXML_LINT_GUARD_DEPTH_BUDGET`` so the
+      rule module reads it without a direct config dependency.
+    """
+    scxml_path, guard_depth_budget, err = _parse_args(argv)
+    if err is not None:
+        sys.stderr.write(
+            f"scxml-lint: {err}\n"
+            "usage: scxml-lint [--guard-depth-budget N] <scxml-file>\n"
+        )
         return 2
 
-    scxml_path = Path(argv[0]).resolve()
+    assert scxml_path is not None  # Narrowing for the type-checker.
+    scxml_path = scxml_path.resolve()
     if not scxml_path.exists():
         sys.stderr.write(f"scxml-lint: {scxml_path} not found\n")
         return 2
@@ -150,6 +221,11 @@ def main(argv: List[str]) -> int:
     # The subrepo root is two levels above this script
     # (tools/scxml-lint/main.py → tools → repo root).
     repo_root = Path(__file__).resolve().parent.parent.parent
+
+    # Propagate the guard-depth budget through the environment so the
+    # C-2 rule module — which reads at call time — sees the CLI value.
+    if guard_depth_budget is not None:
+        os.environ["SCXML_LINT_GUARD_DEPTH_BUDGET"] = str(guard_depth_budget)
 
     findings = run(scxml_path, repo_root)
     for f in findings:

@@ -72,6 +72,10 @@ class ChartAst:
     datamodel: list[dict[str, str]] = field(default_factory=list)
     helpers_source: str = ""
     sites: list[ScriptSite] = field(default_factory=list)
+    # Raw scjson dict — preserved so SOS-08-C HDL walkers (which need a
+    # state-centric view) can consume it directly. The script-site-centric
+    # `sites` view above remains canonical for Rust/C ports.
+    raw_scjson: dict | None = None
 
 
 def _normalise_event_for_fn(event: str | None, kind: str) -> str:
@@ -215,6 +219,7 @@ def load_chart(chart_path: Path) -> ChartAst:
     ast = ChartAst(
         datamodel=_collect_datamodel(raw),
         helpers_source=_collect_helpers_source(raw),
+        raw_scjson=raw,
     )
     for state_id, st in _collect_states(raw):
         ast.sites.extend(_collect_sites_for_state(state_id, st))

@@ -61,6 +61,18 @@ from transliterate_rust import (  # noqa: E402
 )
 from verified_audit import AuditEntry, write_audit_log  # noqa: E402
 
+# SOS-08-C L2 HDL emission — the per-dialect walkers (transliterate_hdl_vhdl,
+# transliterate_hdl_sv) are sibling agents' work. We import the dialect-
+# neutral substrate here at module load time (always present once SOS-08-C
+# wave-1 lands), but defer the per-dialect walker imports to the dispatch
+# function — that way `--target rust` / `--target c` continue to work even
+# if the sibling agents' modules have not yet landed in the working tree.
+from hdl_common import (  # noqa: E402
+    DEFAULT_GUARD_DEPTH_BUDGET,
+    FsmEncoding,
+    HdlEmitConfig,
+)
+
 TOOL_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = TOOL_DIR / "templates"
 
@@ -78,9 +90,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--target",
-        choices=("rust", "c", "both"),
+        choices=("rust", "c", "both", "hdl-vhdl", "hdl-sv"),
         required=True,
-        help="Emission target.",
+        help=(
+            "Emission target. ``rust`` / ``c`` / ``both`` emit the SOS-04 / "
+            "SOS-05 M7 ports (SOS-06-A). ``hdl-vhdl`` / ``hdl-sv`` emit the "
+            "SOS-08-C Layer-2 region FSMs against the SOS-08-A / SOS-08-B "
+            "L0/L1 substrate (ratified 2026-05-23, SOS-08-C §15)."
+        ),
     )
     p.add_argument(
         "--out",
@@ -139,12 +156,59 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "elimination is emitted."
         ),
     )
+    # SOS-08-C L2 HDL emission profile flags. Per SOS-08-C §15
+    # 2026-05-23 ratification:
+    #   - PCDN-C-005: chart annotation wins; CLI flag is a hint that
+    #     applies only to unannotated regions.
+    #   - PCDN-C-004: guard-depth budget default 8; SCXML-LINT-C-2
+    #     enforces at chart-compile time.
+    #   - PCDN-C-006: document-order priority lint warning
+    #     (SCXML-LINT-C-1); on by default.
+    p.add_argument(
+        "--hdl-encoding",
+        choices=("one-hot", "binary", "gray"),
+        default="one-hot",
+        help=(
+            "Default FSM state encoding for unannotated regions "
+            "(PCDN-SOS-08-C-005). Chart-side `<region encoding=\"...\"/>` "
+            "annotations override per-region. Default `one-hot` mirrors "
+            "SOS-08 PCDN-002."
+        ),
+    )
+    p.add_argument(
+        "--guard-depth-budget",
+        type=int,
+        default=DEFAULT_GUARD_DEPTH_BUDGET,
+        metavar="N",
+        help=(
+            "Maximum chained guard-expression operator count before the "
+            "emitter rejects the guard (PCDN-SOS-08-C-004 / "
+            "SCXML-LINT-C-2). Default 8."
+        ),
+    )
+    p.add_argument(
+        "--lint-warn-doc-order",
+        dest="lint_warn_doc_order",
+        action="store_true",
+        default=True,
+        help=(
+            "Emit SCXML-LINT-C-1 warning when two transitions in the "
+            "same source state could simultaneously be true under "
+            "bounded reachability (PCDN-SOS-08-C-006). On by default."
+        ),
+    )
+    p.add_argument(
+        "--no-lint-warn-doc-order",
+        dest="lint_warn_doc_order",
+        action="store_false",
+        help="Disable SCXML-LINT-C-1 emission (see --lint-warn-doc-order).",
+    )
     return p.parse_args(argv)
 
 
 def validate_args(args: argparse.Namespace) -> None:
     """Validate --out vs --target consistency. Exits with code 3 on mismatch."""
-    if args.target in ("rust", "c"):
+    if args.target in ("rust", "c", "hdl-vhdl", "hdl-sv"):
         if args.out is None and not args.dry_run:
             sys.stderr.write(
                 f"sos-codegen: --target={args.target} requires --out=PATH "
@@ -161,6 +225,13 @@ def validate_args(args: argparse.Namespace) -> None:
                 sys.exit(3)
     if not args.chart.exists():
         sys.stderr.write(f"sos-codegen: chart not found: {args.chart}\n")
+        sys.exit(3)
+    # SOS-08-C: validate guard-depth budget is sane.
+    budget = getattr(args, "guard_depth_budget", DEFAULT_GUARD_DEPTH_BUDGET)
+    if budget < 1:
+        sys.stderr.write(
+            f"sos-codegen: --guard-depth-budget must be ≥ 1, got {budget}.\n"
+        )
         sys.exit(3)
 
 
@@ -265,6 +336,51 @@ def _decorate_sites_with_transliteration(
     return out
 
 
+def _render_hdl_target(
+    target: str,
+    ast: ChartAst,
+    hdl_config: HdlEmitConfig,
+) -> str:
+    """Dispatch HDL emission to the per-dialect walker (SOS-08-C L2).
+
+    The per-dialect walker modules (`transliterate_hdl_vhdl`,
+    `transliterate_hdl_sv`) are owned by sibling agents in the wave-1
+    fan-out. We import them lazily here so the `--target rust` /
+    `--target c` paths remain functional even before the siblings'
+    files land in the working tree.
+
+    Cites: SOS-08-C §15 ratification (2026-05-23); SOS-08-C §6
+    emission algorithm (consumed by the per-dialect walker).
+    """
+    if target == "hdl-vhdl":
+        try:
+            from transliterate_hdl_vhdl import (  # noqa: E402
+                render_target as render_vhdl,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "sos-codegen: --target=hdl-vhdl requires "
+                "`transliterate_hdl_vhdl.py` next to main.py (SOS-08-C "
+                "wave-1 sibling module). Import error: "
+                f"{exc}"
+            ) from exc
+        return render_vhdl(ast.raw_scjson, hdl_config)
+    if target == "hdl-sv":
+        try:
+            from transliterate_hdl_sv import (  # noqa: E402
+                render_target as render_sv,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "sos-codegen: --target=hdl-sv requires "
+                "`transliterate_hdl_sv.py` next to main.py (SOS-08-C "
+                "wave-1 sibling module). Import error: "
+                f"{exc}"
+            ) from exc
+        return render_sv(ast.raw_scjson, hdl_config)
+    raise ValueError(f"_render_hdl_target: unsupported target {target!r}")
+
+
 def render_target(
     target: str,
     ast: ChartAst,
@@ -272,13 +388,22 @@ def render_target(
     verified_regions: frozenset = frozenset(),
     discharges_by_state: dict | None = None,
     audit_sink: list | None = None,
+    hdl_config: HdlEmitConfig | None = None,
 ) -> str:
     """Render the target's Jinja2 template against the chart AST.
 
     Trailing kwargs wire the SOS-13 verified-strip profile through
     to the Rust transliterator; they are no-ops for `target == "c"`
     and have no effect when the profile is not engaged.
+
+    For `target in {"hdl-vhdl", "hdl-sv"}` (SOS-08-C L2 emission), the
+    per-dialect walker is invoked via :func:`_render_hdl_target` and
+    `hdl_config` is consumed; the Jinja2 path below is bypassed.
     """
+    if target in ("hdl-vhdl", "hdl-sv"):
+        if hdl_config is None:
+            hdl_config = HdlEmitConfig()
+        return _render_hdl_target(target, ast, hdl_config)
     env = _env()
     template_name = {"rust": "scripts.rs.j2", "c": "scripts.c.j2"}[target]
     tpl = env.get_template(template_name)
@@ -360,6 +485,22 @@ def main(argv: list[str]) -> int:
 
     audit_sink: list = []
 
+    # SOS-08-C: construct the HDL emission config (consumed only when
+    # target is hdl-vhdl or hdl-sv; harmless to build for other targets).
+    try:
+        hdl_encoding = FsmEncoding.parse(getattr(args, "hdl_encoding", "one-hot"))
+    except ValueError as exc:
+        sys.stderr.write(f"sos-codegen: {exc}\n")
+        return 3
+    hdl_config = HdlEmitConfig(
+        encoding=hdl_encoding,
+        guard_depth_budget=int(
+            getattr(args, "guard_depth_budget", DEFAULT_GUARD_DEPTH_BUDGET)
+        ),
+        lint_warn_doc_order=bool(getattr(args, "lint_warn_doc_order", True)),
+        verified_strip=verified_strip_enabled,
+    )
+
     targets = ("rust", "c") if args.target == "both" else (args.target,)
     rendered: dict[str, str] = {}
     for t in targets:
@@ -371,6 +512,7 @@ def main(argv: list[str]) -> int:
                 verified_regions=verified_regions,
                 discharges_by_state=discharges_by_state,
                 audit_sink=audit_sink,
+                hdl_config=hdl_config,
             )
         except Exception as exc:
             sys.stderr.write(f"sos-codegen: render({t}) failed: {exc}\n")
@@ -411,12 +553,30 @@ def main(argv: list[str]) -> int:
 
     if args.dry_run:
         for t in targets:
-            sys.stdout.write(f"=== {t} ===\n{rendered[t]}\n")
+            payload = rendered[t]
+            if isinstance(payload, dict):
+                # HDL targets emit {filename: source}; print each artifact.
+                for fname, body in payload.items():
+                    sys.stdout.write(f"=== {t}: {fname} ===\n{body}\n")
+            else:
+                sys.stdout.write(f"=== {t} ===\n{payload}\n")
         return 0
 
     if args.target == "both":
         args.out_rust.write_text(rendered["rust"], encoding="utf-8")
         args.out_c.write_text(rendered["c"], encoding="utf-8")
+    elif args.target in ("hdl-vhdl", "hdl-sv"):
+        # HDL walkers return {filename: source}; write each into args.out
+        # (treated as a directory). Create the directory if needed.
+        payload = rendered[args.target]
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"sos-codegen: --target={args.target} expected dict output; got {type(payload).__name__}"
+            )
+        out_dir = args.out
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for fname, body in payload.items():
+            (out_dir / fname).write_text(body, encoding="utf-8")
     else:
         args.out.write_text(rendered[args.target], encoding="utf-8")
     return 0

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-08-C wave-1 datamodel fixture: a single-region SCXML chart with
+  a <datamodel> block declaring two typed signals plus <assign> actions
+  that demonstrate the §5.4 / §6.6 datamodel signal compilation surface.
+
+  Used by sibling-agent VHDL / SV emit tests to assert that:
+    - <data id="counter" expr="0"/> compiles to a registered RTL signal
+      with reset value 0 (per §5.4 mutability rule: signals modified by
+      <assign> become registered).
+    - <data id="flag" expr="false"/> compiles to a 1-bit registered
+      signal with reset value '0'.
+    - <assign location="counter" expr="counter + 1"/> inside a
+      transition compiles to a registered assignment gated by the
+      transition firing strobe (§6.6 third bullet).
+    - <assign location="flag" expr="true"/> in an <onentry> compiles
+      to a registered assignment gated by `next_state == <target>`
+      (§6.6 first bullet).
+
+  Shape:
+    - one region, three states: START, COUNTING, FINAL
+    - START -> COUNTING on begin       (sets flag=true on entry to COUNTING)
+    - COUNTING -> COUNTING on tick     (counter += 1; self-transition)
+    - COUNTING -> FINAL on stop        (no assign)
+
+  Excluded (lands in wave-2 / later):
+    - <transition cond="..."/> guards
+    - <parallel>
+    - <script> ECMAScript bodies in <onentry>/<onexit>
+    - non-numeric-literal assign RHS (the wave-1 walker only honours
+      simple expressions per the orchestrator's fixture rule)
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="START">
+
+  <datamodel>
+    <data id="counter" expr="0"/>
+    <data id="flag" expr="false"/>
+  </datamodel>
+
+  <state id="START">
+    <transition event="begin" target="COUNTING"/>
+  </state>
+
+  <state id="COUNTING">
+    <onentry>
+      <assign location="flag" expr="true"/>
+    </onentry>
+    <transition event="tick" target="COUNTING">
+      <assign location="counter" expr="counter + 1"/>
+    </transition>
+    <transition event="stop" target="FINAL"/>
+  </state>
+
+  <state id="FINAL">
+    <!-- sink -->
+  </state>
+
+</scxml>

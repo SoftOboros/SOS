@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-08-C wave-1 golden fixture: a single-region SCXML chart with
+  no datamodel, no guards, no parallel regions, and no event sources.
+
+  Used by `tests/test_hdl_vhdl_emit.py` and `tests/test_hdl_sv_emit.py`
+  (sibling agents) to assert that the minimal wave-1 emit walk produces
+  a valid one-hot FSM with document-order priority transitions per
+  SOS-08-C §5.2.
+
+  Shape:
+    - one region (the chart's top-level <state>s form a single FSM)
+    - four states: IDLE, ACTIVE, DONE, ERROR
+    - three transitions, all unguarded, all event-triggered:
+        IDLE   -> ACTIVE on go
+        ACTIVE -> DONE   on finish
+        DONE   -> IDLE   on reset
+
+  Excluded (lands in wave-2 / later):
+    - <datamodel> block (see single_region_with_datamodel.scxml)
+    - <transition cond="..."/> (guards)
+    - <parallel> orthogonal regions
+    - <onentry>/<onexit> with <script> ECMAScript bodies
+    - <raise>/<send> event egress
+    - <region clock="..."/> multi-clock-domain annotation
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="IDLE">
+
+  <state id="IDLE">
+    <transition event="go" target="ACTIVE"/>
+  </state>
+
+  <state id="ACTIVE">
+    <transition event="finish" target="DONE"/>
+    <transition event="error" target="ERROR"/>
+  </state>
+
+  <state id="DONE">
+    <transition event="reset" target="IDLE"/>
+  </state>
+
+  <state id="ERROR">
+    <!-- sink: no outgoing transitions; the FSM stays here until rst -->
+  </state>
+
+</scxml>
