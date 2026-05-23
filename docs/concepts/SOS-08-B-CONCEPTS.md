@@ -608,3 +608,61 @@ All six PCDNs from §14 resolved. Five recommendations accepted; PCDN-005 resolv
 - §6.5 `sos_message_channel` interface updated: `payload` field becomes a `union packed` of per-event-name variants emitted by SOS-08-C; the `event_id` field selects the active variant. SOS-08-C ratification depends on the per-event packing emission contract.
 
 **Status**: 🟢 **ratified**. SOS-08-C ratification gate (chart→FSM emission) now has a frozen L1 service surface to emit against. SOS-09 (HW/SW membrane) gate that cited SOS-08-B as prerequisite is now unblocked.
+
+### 2026-05-23 — Impl wave-1 PCDN amendments (Ira)
+
+Wave-1 implementation of all five L1 services surfaced 17 sub-PCDNs across §6.1–§6.5 + §7 cross-service surface. Eight resolved by user walkthrough; nine ratified at agent-default per spec-before-code §3 source-of-truth doctrine (each named below with the rationale anchor). All folded into the SOS-08-B normative surface at this entry; per-section prose amendments recorded by reference below.
+
+**User-resolved sub-PCDNs:**
+
+- **PCDN-B-mailbox-sideband-width** (§6.1) — RESOLVED. Sideband width for `s_axis_tprio` / `take_prio` is `[$clog2(NUM_PRIO)-1:0]` (corrected from §6.1 prose which prints `[$clog2(NUM_PRIO):0]`). Wave-1 impl uses the corrected form. §6.1 prose stays as-is; this §15 entry is canonical.
+
+- **PCDN-B-mailbox-post_rc-collapse** (§6.1) — RESOLVED. Spec body §6.1 `post_rc[1:0]` 2-bit bus (OK / RC_FULL / RC_INVAL) is WITHDRAWN. Canonical surface is AXI-Stream backpressure: `RC_FULL` encoded via `s_axis_tready=0` on the targeted lane; `RC_INVAL` encoded via `s_axis_tready=0` when `s_axis_tprio >= NUM_PRIO` (verified by SVA `a_no_tready_when_tprio_oor`). Chart compiler maps event semantics to AXI-Stream backpressure; no separate sideband return-code bus.
+
+- **PCDN-B-mailbox-CROSS_CLK-deferred** (§6.1) — RESOLVED (deferred). `CROSS_CLK` generic + `sos_fifo_async` dual-clock variant DEFERRED to a future §15 amendment. v1 ships single-clock-only composing `sos_fifo_sync`. When a customer needs cross-domain mailbox, the variant lands (likely as `MODE = SINGLE_CLOCK | DUAL_CLOCK` mirroring the sos_dpram_arb pattern). Counts as a future named exception in INV-S-HDL-A-5 if/when added.
+
+- **PCDN-B-mailbox-lane-priority** (§6.1) — RESOLVED. Lane-index priority convention: **higher lane index = higher priority**. Matches sos_arbiter_priority's "higher-value-wins" §6.4 convention. Chart-side mapping: `HIGH_PRIORITY = lane (NUM_PRIO-1)`; `LOW_PRIORITY = lane 0`. NOTE: this diverges from FreeRTOS's "priority 0 = highest" convention; chart-side documentation MUST translate at the L1 boundary (see §5.1 amendment below).
+
+- **PCDN-B-mailbox-NUM_PRIO-1-clamp** (§6.1) — RESOLVED. `NUM_PRIO=1` degenerate case handled via `PRIO_W_EFF = max(1, $clog2(NUM_PRIO))` clamp (avoids 0-bit signals) + arbiter bypassed (sos_arbiter_priority requires N_REQS >= 2). Useful for chart authors who want one lane today with headroom for future expansion. SVA properties degenerate appropriately.
+
+- **PCDN-B-GRANT_LATENCY_CYCLES-L1-inheritance** (§7) — RESOLVED. `GRANT_LATENCY_CYCLES` default-1 exception (originally an INV-S-HDL-A-5 named exception for L0 arbiter primitives, extended to "all L0 arbiter primitives" in SOS-08-A wave-2 §15) extends NATURALLY to L1 surfaces that compose L0 arbiter primitives. `sos_mailbox` surfaces `GRANT_LATENCY_CYCLES` from its inner `sos_arbiter_priority` and keeps the default-1. No new exception clause needed in INV-S-HDL-A-5 or INV-S-HDL-B-*. Future L1 services composing arbiters inherit by the same rule (see §7 amendment below).
+
+- **PCDN-B-event-set-clear-shadow** (§6.2) — RESOLVED. Same-cycle `set_req` + `clear_req` on the same bit resolves via the underlying `sos_strobe_latch` wave-2 shadow-promote semantic (SOS-08-A PCDN-A-strobe-pending-shadow). Concrete outcomes:
+  - bit currently CLEAR + same-cycle set+clear → bit becomes SET next cycle (L0 IDLE state: strobe wins, ack is a no-op).
+  - bit currently SET + same-cycle set+clear → bit STAYS SET (L0 LATCHED + strobe + ack: ack consumes the live event, shadow captures the new strobe, shadow promotes — net stays LATCHED).
+  Both edges preserved; no event loss. SVA property `a_bit_holds_under_concurrent_set_clear` (wave-1 impl) catches regressions. This is the canonical L1 semantic; chart authors MAY rely on the no-event-loss behaviour.
+
+- **PCDN-B-pool-encoder-direction** (§6.3) — RESOLVED. `sos_resource_pool` free-slot allocator uses **lowest-id-first** priority encoder. Matches SOS-04 `TCB_POOL[0..MAX_TASKS)` + SOS-05 static-pool macro indexing convention. Chart-side reasoning stays consistent across software ports and HDL.
+
+**Agent-default ratifications** (no user input required; resolved by spec-before-code source-of-truth doctrine + INV-S-HDL-B-2 corollary):
+
+1. **sos_event_group: `pending_q` hidden at the L1 boundary.** The per-bit `pending_q` of the underlying `sos_strobe_latch` is an L0 implementation detail; surfacing it at L1 would violate INV-S-HDL-B-2 ("L1 composes L0 without modifying L0 behaviour" — corollary: L1 hides L0 implementation details from chart consumers). Internal observability is retained via auto-attached L0 SVA binds (module-type pattern), not L1 ports.
+
+2. **sos_event_group: single-consumer `wait` semantics at v1** (matches §6.2 prose). Multi-consumer wait (composing `sos_arbiter_rr` over wait-ports) is a future §15 amendment if a customer needs concurrent wait observers on the same event group.
+
+3. **sos_resource_pool §6.3 recipe substitution.** Spec §6.3 names L0 composition as `sos_fifo_sync + tracker bit-vector` (FIFO-of-free-IDs). Wave-1 impl uses `sos_credit_counter + sos_dpram_arb + free-vec + priority encoder` recipe. Net chart-visible contract identical (alloc/free/read_meta/write_meta + SVA-POOL-1..5). The recipe difference is informative; the canonical contract is unchanged. §6.3 prose stays; this §15 entry records the recipe substitution as a SOS-08-B impl convention.
+
+4. **sos_resource_pool same-cycle alloc+free** (§6.3). When `alloc_req` and `free_req` both fire on the same cycle, alloc is applied first against the pre-update `free_vec`, then free is applied. Same-id collision (`free_id == alloc_id`) → bit ends up BUSY (the simultaneous free is silently absorbed because the encoder already chose that slot). Chart compiler is expected to keep alloc/free disjoint per INV-SOS-G; same-id collision is a chart-side correctness concern, not a primitive correctness defect.
+
+5. **sos_periodic_task overrun-fault timing** (§6.4). `overrun_fault` asserts ONE CYCLE AFTER the offending `task_tick`. Both `task_enable` (registered output) and `overrun_fault` (registered output) rise on the same edge — one cycle after the `task_tick` pulse. Matches SVA-PT-2 phrasing + keeps the entire output surface synchronous off a single set of registers. Chart-side consumers reason about "overrun_fault rises one cycle after the missed deadline".
+
+6. **sos_periodic_task FSM shape** (§6.4). Wave-1 impl uses an explicit 3-state one-hot FSM (IDLE/RUNNING/OVERRUN). Observationally equivalent to a sticky-overrun register + the rate divider; the FSM form is documentation convenience. Reserved as the canonical impl shape — SOS-08-C emission tables target this FSM shape. A future amendment MAY collapse to sticky-reg-only if no use case for distinct OVERRUN state emerges.
+
+7. **sos_message_channel dual port representation** (§6.5). Wave-1 impl exposes BOTH packed `tdata = {event_id, payload}` AND decomposed sideband (`s_axis_tevent_id` + `s_axis_tpayload`) on each side. Producer-side OR-combines (chart emitter ties off the unused representation per instance); consumer-side both are wire-only derivatives of the FIFO output. SVA `m_axis_tdata == {m_axis_tevent_id, m_axis_tpayload}` asserts cross-representation consistency. This accommodates either chart-emitter style (packed-bus or sideband).
+
+8. **sos_message_channel SVA-MSGCH-4 deferred** (§6.5). Enum-membership SVA (event_id is in the chart's `ExternalEventName` enumeration) is deferred to the SOS-08-C emission layer per PCDN-B-005 "chart-event-shape-aware at chart-compile time" boundary. SOS-08-B layer asserts cross-representation consistency + AXI-Stream handshake stability only; per-event-name enum membership lands when SOS-08-C emits the per-chart `sos_message_channel_packer_<chart>.{vhd,sv}` wrapper.
+
+9. **sos_message_channel CDC variant deferred** (§6.5). Wave-1 impl composes single-clock `sos_fifo_sync`. Cross-domain message channel (composing `sos_fifo_async`) is a future §15 amendment, analogous to PCDN-B-mailbox-CROSS_CLK-deferred. INV-S-HDL-3 cited as N/A at v1; lands with the CDC variant.
+
+**§5 / §6 / §7 amendments recorded by reference** (per-section prose stays as ratified; this entry is the canonical delta record):
+
+- **§5.1** (FreeRTOS / POSIX vocabulary mirror) — FreeRTOS's "priority 0 = highest" convention is INVERTED at the HDL layer per PCDN-B-mailbox-lane-priority; chart-side documentation MUST translate at the L1 boundary. The vocabulary mirror remains intact (verb set unchanged); only the priority-direction convention diverges, and the divergence is L1-boundary-resolved.
+- **§6.1** (sos_mailbox) — sideband width corrected; post_rc surface withdrawn (AXI-Stream backpressure canonical); CROSS_CLK deferred; NUM_PRIO=1 clamp; lane-priority direction (higher index = higher priority); GRANT_LATENCY_CYCLES inherited from inner arbiter.
+- **§6.2** (sos_event_group) — same-cycle set+clear resolved via L0 shadow-promote; `pending_q` hidden at L1; single-consumer wait at v1.
+- **§6.3** (sos_resource_pool) — free-vec + credit_counter + dpram_arb recipe substituted for FIFO-of-IDs (chart-visible contract unchanged); lowest-id-first priority encoder; same-cycle alloc+free behaviour ratified.
+- **§6.4** (sos_periodic_task) — overrun-fault timing (registered, one-cycle delayed); 3-state one-hot FSM shape ratified as canonical impl.
+- **§6.5** (sos_message_channel) — dual port representation (packed + sideband); SVA-MSGCH-4 deferred to SOS-08-C; CDC variant deferred.
+- **INV-S-HDL-B-2** wording extended to recognize "L1 hides L0 implementation details from chart consumers" as the corollary of "L1 composes L0 without modifying L0 behaviour" (justifies `pending_q` hidden, justifies the `sos_resource_pool` recipe substitution being chart-invisible).
+- **§7 cross-service invariants** extended: any L1 service composing an L0 arbiter primitive inherits the `GRANT_LATENCY_CYCLES` default-1 exception (no new named exception in INV-S-HDL-A-5; the exception flows through composition).
+
+**Status**: 🟢 **ratified (continuing)** — impl wave-1 PCDN amendments fold the 5 L1 service implementation choices into the SOS-08-B normative surface. All 5 L1 services have ratified ports + generics + SVA + composition discipline. The SOS-08-A primitive surface + SOS-08-B service surface together form the complete L0+L1 layered RTL stack ready for SOS-08-C chart→FSM emission to instantiate against.
