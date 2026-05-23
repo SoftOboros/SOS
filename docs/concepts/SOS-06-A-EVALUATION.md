@@ -71,7 +71,7 @@ Each candidate is scored on the *prerequisites* an SOS-06 evaluation run would f
 - **Output language(s):** **C++ only.** Not C. Not Rust.
 - **Footprint estimate:** Targets embedded but uses STL; STL-on-Cortex-M7 is feasible (the chart-emitter could be `no_std`-equivalent via `-fno-exceptions -fno-rtti`) but is an additional configuration burden.
 - **Maintenance status (2026-05-21):** GPL v3. Active issues thread 2018–2020; master branch tagged "stable but not version-tagged". Posture: maintained, mature, not high-velocity.
-- **Licence:** **GPL v3.** This is a hard problem for [SOS-04 §12](./SOS-04-CONCEPTS.md) downstream consumers — generated GPL-v3 firmware would impose copyleft on the SOS Cortex-M7 firmware, contradicting the SOS subrepo's licensing posture (private but BSD-style downstream-friendly per chart-author intent inferred from the `scjson` BSD-1-Clause posture).
+- **Licence:** **GPL v3.** This is a hard problem for [SOS-04 §12](./SOS-04-CONCEPTS.md) downstream consumers — generated GPL-v3 firmware would impose copyleft on the SOS Cortex-M7 firmware, contradicting the SOS subrepo's licensing posture (MIT-licensed per `LICENSE.md`, downstream-friendly to match the `scjson` BSD-1-Clause posture).
 - **Strengths:**
   - Existing, working, well-known SCXML→native-code compiler.
   - Active issue tracker (signal that it would respond to a SOS adoption push if needed).
@@ -116,7 +116,7 @@ Each candidate is scored on the *prerequisites* an SOS-06 evaluation run would f
   - Plain-code-by-default → strong auditability posture.
 - **Weaknesses:**
   - **SCXML-as-import, not native.** The internal model is YAKINDU's; the chart-as-SCXML becomes a derived artifact. This inverts [SOS-00 §0 INV-S1](./SOS-00-CONCEPTS.md) (the .scxml is the spec) — chart amendments would land in YAKINDU's DSL, with SCXML as the export. Hard sell against the SOS-00 source-of-truth posture.
-  - **Proprietary.** SOS being a private subrepo and the eventual `SOS-06-A` amendment recording the toolchain identifier creates a long-term dependency on a commercial vendor's release cadence.
+  - **Proprietary.** The eventual `SOS-06-A` amendment recording a commercial-vendor toolchain identifier would create a long-term dependency on that vendor's release cadence — undesirable for an MIT-licensed subrepo whose downstream consumers expect open tooling.
   - **No Rust target.** Same split-the-evaluation problem as `uscxml-transform`.
   - **GUI-centric workflow** clashes with the SOS subrepo's text-first, git-native, spec-before-code posture.
 - **SOS-06 expectation:** named indirectly in [SOS-06 §4.1](./SOS-06-CONCEPTS.md) ("Statecharts.io" generalization); not a dependency.

@@ -67,7 +67,7 @@ Without SOS-02:
 - `rtos_kernel.scxml` exists at the subrepo root, ratified as the canonical behaviour spec by SOS-00.
 - `docs/REFERENCE.md` mirrors it informally; the two are presumed consistent by visual inspection.
 - There is no executable form of the chart anywhere. The subrepo is currently four files (`AGENTS.md`, `CLAUDE.md`, `README.md`, `rtos_kernel.scxml`) plus `docs/` content. No `Cargo.toml`, no `sim/` tree, no `cargo build` target.
-- The parent repo is `git@github.com:SoftOboros/SOS.git` (private), registered as a submodule of `softoboros.com` at `streamz/submodules/SOS/` per PCDN-SOS-00-010.
+- The repo is `https://github.com/SoftOboros/SOS.git` (public, MIT-licensed), registered as a submodule of `softoboros.com` at `streamz/submodules/SOS/` per PCDN-SOS-00-010; contributors push via the `writable` SSH remote per the parent-repo two-remote convention.
 - The sibling DAA family at `disco-analyzer/` has firmware shipping on the STM32H747I-DISCO, but its FreeRTOS-Kernel runtime is INV-S10-excluded — SOS does not borrow code from it.
 
 **The pressure that motivates SOS-02:**

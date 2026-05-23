@@ -6,7 +6,7 @@ AGENTS.md — Contributor guidance and project conventions for SOS.
 
 A minimal RTOS kernel whose **behaviour is specified as a single SCXML statechart** (`rtos_kernel.scxml`), with reference implementations on Cortex-M7 in C and Rust. The science being proved is the methodology: SCXML → multiple equivalent language ports, verified by a shared conformance-vector suite.
 
-This is a **private** repo. Intended position in the parent tree: `streamz/submodules/SOS/`.
+This is a **public** repo, MIT-licensed (see [`LICENSE.md`](./LICENSE.md)). Position in the parent tree: `streamz/submodules/SOS/`. Clone via `https://github.com/SoftOboros/SOS.git`; contributors push via the `writable` SSH remote.
 
 ## Layout discipline
 

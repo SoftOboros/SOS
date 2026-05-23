@@ -561,7 +561,7 @@ PCDN resolutions:
 
 - **PCDN-SOS-00-009 — Initiative name.** **Resolved: "Statechart-Orchestrated Scheduler".** The `SOS` prefix is what's load-bearing for cross-doc citation; the expansion is informative.
 
-- **PCDN-SOS-00-010 — Submodule registration.** **Resolved 2026-05-19:** remote URL is `git@github.com:SoftOboros/SOS.git` (private, under the `SoftOboros` GitHub org — confirmed by user message 2026-05-19, superseding the in-draft placeholder `iraabbott/SOS.git`). The user owns the create-and-push step on the remote; the parent-repo `git submodule add git@github.com:SoftOboros/SOS.git streamz/submodules/SOS` happens once the remote has its initial commit so the submodule pin has a SHA to point at.
+- **PCDN-SOS-00-010 — Submodule registration.** **Resolved 2026-05-22 (final):** the submodule clone URL is `https://github.com/SoftOboros/SOS.git` (public, MIT-licensed, under the `SoftOboros` GitHub org); contributors with push rights add a second remote `writable = git@github.com:SoftOboros/SOS.git` per the parent-repo convention (`dynatroni`, `scjson`, `scjson-swift`, `scir`, `rlvgl` all follow this two-remote shape). Initial commit landed 2026-05-22 as `3b040c9` on branch `webslinger`; parent registration commit `3ce55824` adds `streamz/submodules/SOS` to `.gitmodules`.
 
 - **PCDN-SOS-00-011 — "M7 primitives as references" interpretation.** **Resolved (already, in-draft): reading 2 (implement-against).** Chart stays target-agnostic; M7 primitives live in port code via CMSIS-Core (C) and the `cortex-m` crate (Rust). Ratified as INV-S15. §4.1 documents the port-side library surfaces. §6 bodies cite CMSIS / `cortex-m` symbols concretely.
 

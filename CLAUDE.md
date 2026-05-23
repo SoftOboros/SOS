@@ -6,7 +6,7 @@ This file is the source of truth for Codex/Claude-style agents working on SOS. R
 
 - **What it is:** a minimal preemptive priority-based RTOS kernel whose **behaviour is specified as a single SCXML statechart** at `rtos_kernel.scxml`. Reference implementations target Cortex-M7 (STM32H747I-DISCO is the bench board).
 - **Science being proved:** SCXML can specify a non-trivial deeply-embedded behaviour at sufficient precision to drive multiple language ports that are equivalent under a shared conformance-vector suite.
-- **Repo position:** `git@github.com:SoftOboros/SOS.git` (private), submodule of parent `softoboros.com` at `streamz/submodules/SOS/`.
+- **Repo position:** `https://github.com/SoftOboros/SOS.git` (public, MIT — see `LICENSE.md`), submodule of parent `softoboros.com` at `streamz/submodules/SOS/`. The `writable` SSH remote (`git@github.com:SoftOboros/SOS.git`) is for contributors with push rights; clones use HTTPS.
 - **Spec lineage:** `docs/concepts/SOS-NN-*.md`. SOS-00 is the foundational concepts doc; **draft, not yet ratified**.
 
 ## Source-of-truth boundaries (see SOS-00 §0, §4, §9 INV-S1)

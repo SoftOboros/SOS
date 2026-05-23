@@ -4,7 +4,7 @@ A minimal preemptive priority-based RTOS kernel **specified as a single SCXML st
 
 The product here is the **methodology** more than the kernel: prove that a non-trivial deeply-embedded behaviour can be specified in SCXML at a level of precision sufficient to drive multiple language ports, and that the resulting kernels remain provably equivalent under a shared conformance-vector suite.
 
-This is a **private** repo (no public distribution). It is intended to become a submodule of the parent `softoboros.com` tree at `streamz/submodules/SOS/`.
+This is a **public** repo, MIT-licensed (see [`LICENSE.md`](./LICENSE.md)). It is a submodule of the parent `softoboros.com` tree at `streamz/submodules/SOS/`. Pull via HTTPS (`https://github.com/SoftOboros/SOS.git`); the `writable` SSH remote is for contributors with push rights.
 
 ## Layout discipline
 
