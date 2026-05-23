@@ -1,6 +1,6 @@
 # SOS-10 — Multi-language orchestration (higher-level synchronizer)
 
-**Status:** 🟡 drafted 2026-05-23. Awaiting PCDN walkthrough.
+**Status:** 🟢 **ratified 2026-05-23** (see §15).
 
 ## 0. Authority policy
 
@@ -255,7 +255,7 @@ This phase does NOT:
 
 A conforming SOS-10 ratification satisfies:
 
-- (a) ⏸ PCDN-SOS-10-001 through 008 resolved.
+- (a) ✅ PCDN-SOS-10-001 through 008 resolved — see §15 2026-05-23 ratification entry.
 - (b) ⏸ The MCU + FPGA + gateway worked example (§9) instantiated as a buildable demonstration on the bench substrate (Lattice ECP5 + STM32H747I-DISCO; the gateway runs on a host Linux machine connected via LAN).
 - (c) ⏸ Each of the 4 media has at least one cross-piece event tested end-to-end via cocotb-equivalent harness.
 - (d) ⏸ Cross-piece bounded-reachability vectors emitted; INV-SOS-H rendered failures in chart vocabulary verified manually on a deliberate broken-protocol case.
@@ -304,3 +304,25 @@ This phase's ratification (after PCDN resolution) unblocks:
 - 8 PCDNs raised (gateway language, gRPC/protobuf relationship, per-piece language declaration, medium-element-vs-attribute, idempotency annotation, timeout semantics, multi-orchestrator composition, cross-piece test framework).
 
 Status: 🟡 **drafted**, awaiting PCDN walkthrough.
+
+### 2026-05-23 — Ratified after PCDN walkthrough (Ira)
+
+All eight PCDNs from §13 resolved with recommendations accepted.
+
+- **PCDN-SOS-10-001 → RESOLVED**: Gateway-piece v1 language is **Rust**. Composes with SOS-04 + SOS-13; the chart-driven gateway uses the same generator stack as the MCU side, preserving the verified-strip story across the membrane. Go and Python are deferred to future medium-by-medium additions.
+- **PCDN-SOS-10-002 → RESOLVED**: **protobuf** is the canonical wire-format IDL; gRPC services derive from protobuf; AMQP message bodies are protobuf-encoded. One IDL, two transports. INV-S-ORCH-4 ("wire format derived not authored") cites protobuf as the derivation source.
+- **PCDN-SOS-10-003 → RESOLVED**: Per-piece chart-language declared via attribute on the **orchestrator's `<state>` element** (`<state id="mcu" sos:lang="rust">...</state>`). Chart-level declaration keeps the orchestrator self-contained; the sub-chart's `<scxml>` root inherits from the orchestrator's declaration.
+- **PCDN-SOS-10-004 → RESOLVED**: `<sos:medium>` is a **sub-element**, not an attribute. Sub-elements carry nested annotations (`<sos:transport>`, `<sos:timeout>`, `<sos:idempotent>`) cleanly; attributes would require flattened serialization that is harder to extend.
+- **PCDN-SOS-10-005 → RESOLVED**: Idempotency is an **opt-in attribute** (`<transition sos:idempotent="true" ...>`), default unspecified. The orchestrator emitter **warns** when a `network`-medium transition without an explicit `sos:idempotent` annotation is the only path from a state (retry semantics are not proven without the explicit annotation).
+- **PCDN-SOS-10-006 → RESOLVED**: **Per-medium defaults in the emitter** (gRPC = 5000 ms, AMQP = 10000 ms, in-process / shared-memory / mmio = no timeout); chart-level override via `<sos:medium><sos:timeout ms="..."/></sos:medium>` sub-element. Default values may be amended by §15 entry; chart-level override is normative.
+- **PCDN-SOS-10-007 → RESOLVED**: **Strict at v1** — one orchestrator per "system" boundary. "System" is the unit that ships together with the same release cadence. Multi-orchestrator composition (orchestrators-of-orchestrators) is deferred to a future phase. INV-S-ORCH-1 frozen at strict.
+- **PCDN-SOS-10-008 → RESOLVED**: Cross-piece-vector emission framework is **`docker compose` + per-piece test scripts + a top-level Python coordinator**. Matches SOS-08-D cocotb-first priority + open-source-tooling story. Vector emission uses the SOS-03 schema extended to multi-piece via SOS-10-specific `piece_id` and `medium` fields.
+
+**§5 / §6 / §7 amendments**:
+- §5 (frozen decisions) updated: chart-language declaration attribute (PCDN-003), `<sos:medium>` sub-element shape (PCDN-004), per-medium timeout defaults (PCDN-006), strict-one-orchestrator (PCDN-007).
+- §6.4 (network medium) updated to name gRPC + AMQP as protobuf-encoded transports per PCDN-002; per-medium timeout defaults from PCDN-006; idempotency warning behaviour from PCDN-005.
+- §9 worked-example gateway-language line updated from "TBD" to "Rust" per PCDN-001.
+- INV-S-ORCH-1 wording extended: "exactly one orchestrator chart per system (strict at v1; PCDN-007)".
+- INV-S-ORCH-4 wording extended: "wire format derived from protobuf (PCDN-002); chart never authors wire-format-specific fields".
+
+**Status**: 🟢 **ratified**. Implementation of the orchestrator emit path in `tools/sos-codegen/` is now unblocked. The §9 worked example becomes a buildable demonstration target. SOS-13 verified-strip story extends naturally across all 4 media because protobuf-derived wire format is dischargeable in the same way as in-process function-pointer dispatch.

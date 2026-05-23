@@ -1,0 +1,396 @@
+# SOS-08-G — Waveform + transaction-level annotation emission (review artifact)
+
+**Status:** 🟢 **ratified 2026-05-23** (see §15).
+
+**Depends on:** [SOS-08][sos-08] (umbrella; vector emission priority §5.4), [SOS-08-D][sos-08-d] + [SOS-08-E][sos-08-e] (the generation points), [SOS-11][sos-11] (the chart-diff review surface this phase mirrors at hardware level), [SOS-07][sos-07] (INV-SOS-H load-bearing).
+
+**Blocks:** none directly; unblocks the article's "agent edits chart, developer reviews both chart diff and waveform diff in one pass" demo.
+
+> 🛑 **NO CODE.** Three-file output contract, JSON-Lines overlay schema, viewer-integration contract, generation-point integration with SOS-08-D/E, storage discipline, MCP-workflow integration. Implementation lands as a follow-up commit per spec-before-code discipline.
+
+[sos-07]: ./SOS-07-CONCEPTS.md
+[sos-08]: ./SOS-08-CONCEPTS.md
+[sos-08-d]: ./SOS-08-CONCEPTS.md#sos-08-d--cocotb--sva-bind-files-primary
+[sos-08-e]: ./SOS-08-CONCEPTS.md#sos-08-e--systemverilog-testbench--sva-bind-files
+[sos-08-f]: ./SOS-08-CONCEPTS.md#sos-08-f--uvm-sequences-only
+[sos-11]: ./SOS-11-CONCEPTS.md
+[sos-12]: ./SOS-12-CONCEPTS.md
+[sos-07-inv]: ./SOS-07-CONCEPTS.md#6-cross-phase-invariants--inv-sos-a-through-h
+[inv-sos-a]: ./SOS-07-CONCEPTS.md#inv-sos-a--chart-as-source
+[inv-sos-b]: ./SOS-07-CONCEPTS.md#inv-sos-b--vectors-as-deliverable-at-every-layer
+[inv-sos-c]: ./SOS-07-CONCEPTS.md#inv-sos-c--mcp-as-sole-modification-surface
+[inv-sos-h]: ./SOS-07-CONCEPTS.md#inv-sos-h--vector-to-chart-traceability
+[roadmap]: ./SOS-ROADMAP-07-PLUS.md
+
+## 0. Authority policy
+
+This phase doc is the **per-sub-phase contract** for SOS-08-G under the [SOS-08][sos-08] umbrella (ratified 2026-05-23). The umbrella §5.4 freezes vector emission priority placing SOS-08-G fourth as the *review artifact* path (after SOS-08-D cocotb+SVA, SOS-08-E SV testbench+SVA, SOS-08-F UVM sequences). The umbrella §6 SOS-08-G row + EOQ-011-ROADMAP resolution name the three-file output contract: `.fst` + `.vcd` + JSON-Lines overlay (`{cycle, signal, chart_state, transition_id}`). This doc takes those decisions as load-bearing input and produces the per-phase contract: overlay schema, viewer integration, generation-point integration, storage discipline, MCP-workflow integration with [SOS-11][sos-11].
+
+Per the parent CLAUDE.md "Spec-Before-Code Planning Discipline / Phase document shape":
+
+- **Normative** sections: §3 glossary, §4 source-of-truth map, §5 frozen decisions (three-file output contract, overlay schema), §6 viewer integration contract, §7 cross-sub-phase invariants (INV-S-HDL-G-*), §8 standards integration matrix additions, §9 reconciliation vs adjacent sub-phases, §10 non-goals (informative — see below), §12 acceptance checklist.
+- **Informative** sections: §1 purpose, §2 problem statement, §11 (not used), §14 non-goals overlap is here for convention, §15 change log.
+- All keywords MUST, MUST NOT, SHALL, SHOULD, SHOULD NOT, MAY are interpreted per RFC 2119 / RFC 8174 when capitalised.
+
+This doc cites [SOS-07 §6][sos-07-inv] for cross-phase invariants `INV-SOS-A` through `INV-SOS-H`, and [SOS-08 §7][sos-08] for cross-sub-phase invariants `INV-S-HDL-1` through `INV-S-HDL-5`. Neither set is re-derived. [INV-SOS-H][inv-sos-h] (vector-to-chart traceability) is the load-bearing cross-phase invariant; SOS-08-G is the operational realisation of INV-SOS-H at the *review surface* on the hardware side, as [SOS-11][sos-11] is its operational realisation at the *modification surface* on the chart side.
+
+## 1. Purpose
+
+To freeze the contract by which SOS-08-D's cocotb test runs and SOS-08-E's SystemVerilog testbench runs (and optionally SOS-08-F's UVM-sequence-driven runs) emit a **review artifact** comprising three coordinated files per test run:
+
+1. A compact open-format waveform (`.fst`) consumed natively by GTKWave + Surfer.
+2. A universally-compatible waveform (`.vcd`) consumed by every commercial simulator's waveform viewer.
+3. A chart-vocabulary JSON-Lines overlay (`<test>.annotations.jsonl`) recording one row per chart-state transition observed during the test run, with chart-hierarchy path, region (within parallel blocks), invariant-fire IDs (when SVA-derived), and vector index citations.
+
+The unlock SOS-08-G provides: when an agent modifies a chart via [SOS-11][sos-11] tools, the iState graphical viewer renders the **chart-level diff**; the developer can pull up the before/after **waveform diff** with chart-state badges overlaid on the timeline to verify the hardware behaviour matches the chart intent at the level the chart specifies. The chart diff + the waveform diff together are the review surface for one change. Without SOS-08-G, the chart-level diff is legible but the hardware-level diff is "30 lines of signal toggles" — the review loop is half-open.
+
+## 2. Problem statement
+
+Five observations from the SOS-08 umbrella + the SOS-11 MCP-workflow ratification converge on this sub-phase:
+
+1. **Waveform viewers speak signals; charts speak states.** Every existing waveform viewer (GTKWave, Surfer, Riviera, Questa, VCS DVE) renders signal values vs time. None of them render chart-state names. A developer reviewing "does the synth match the spec" pattern-matches signal traces against the chart in their head — the cognitive cost is the dominant review tax in the article's "kernel-on-FPGA" demo if SOS-08-G does not land.
+
+2. **The chart-diff review surface stops at the chart boundary.** [SOS-11 §9][sos-11] specifies the iState-side graphical viewer rendering the chart-level diff (states added/removed, transitions retargeted, invariants attached). That diff IS the review surface for an agent-mediated chart edit — at the spec layer. The hardware layer needs its own diff surface, in the same vocabulary, or the methodology's "spec-to-silicon" claim regresses to "spec-to-RTL-and-then-trust-it".
+
+3. **Three viewer ecosystems share the same data model.** GTKWave (open, longstanding), Surfer (open, modern), and the commercial-tool family (Riviera, Questa, VCS, Xcelium) all consume waveform files. `.fst` is small + GTKWave/Surfer-native; `.vcd` is universal + ubiquitous; an external annotation overlay file lets viewer extensions render chart-state badges without modifying the waveform format itself. The three-file split is what makes the same `.annotations.jsonl` consumable by every viewer that the user opts in to extending.
+
+4. **The annotation file is the chart-vocabulary bridge.** Per [INV-SOS-H][inv-sos-h] every artifact downstream of the chart MUST carry chart-vocabulary metadata. The `.annotations.jsonl` carries `(cycle, signal, chart_state, transition_id)` per row — every cycle's signal motion can be traced back to a chart state or transition. Failure to enforce this regresses the review surface to "RTL signal-level only" + breaks the cross-domain "spec is the source" claim.
+
+5. **The annotation file naturally subsumes the SVA-fire log.** SOS-08-D + SOS-08-E emit SVA bind files that assert chart-derived invariants concurrently with the cocotb/SV testbench. Each SVA fire is a chart-vocabulary event (`INV-S-CHART-N fires at cycle K on signal P with chart-state Q`). The `.annotations.jsonl` row format extends naturally to carry invariant-fire records alongside chart-state-transition records, so the developer's single review file covers both observed transitions and assertion fires.
+
+## 3. Canonical glossary
+
+Reserved SOS-08-G vocabulary. Capitalised use in SOS-08-G+ docs MUST refer to the defined meaning. Cross-doc terms cite their owner per the parent CLAUDE.md "Definitions — reference vs. restatement" convention.
+
+| Term | Definition |
+|---|---|
+| **review artifact** | The three coordinated files emitted per test run: `<test>.fst`, `<test>.vcd`, `<test>.annotations.jsonl`. Together they constitute the hardware-side review surface mirroring [SOS-11 §9][sos-11]'s chart-side review surface. As named in [SOS-08 §3][sos-08]; used without modification. |
+| **`.fst` waveform** | Fastsignaltrace format; GTKWave + Surfer native; typically ~10% the size of equivalent `.vcd`. As defined by the GTKWave project (external upstream); SOS-08-G consumes the format, does not own it. |
+| **`.vcd` waveform** | Value-change-dump format per IEEE 1364-2005 §18.3 (Verilog); universally-supported by every waveform viewer. As defined by IEEE 1364-2005 (external upstream); SOS-08-G emits conformant text, does not own the format. |
+| **annotation overlay** | The `<test>.annotations.jsonl` file; one JSON object per line; one line per chart-vocabulary event observed during the test run. Schema frozen at §5.2. |
+| **annotation record** | One line in the annotation overlay. Carries six normative fields per §5.2: `cycle`, `signal`, `chart_state`, `transition_id`, `chart_path`, `region`. Carries two optional fields: `invariant_id`, `vector_index`. |
+| **chart-state transition** | A transition that fires within the chart during the test run, observed by the testbench (either via a chart-state probe signal exposed by the SOS-08-C emitter, or via direct testbench tracking). Each transition produces one annotation record. |
+| **chart-path** | The chart-hierarchy path string for a state, of shape `/parent/child/grandchild` per [SOS-12][sos-12] recursive-dispatch vocabulary. Path separator: `/`. Sub-chart boundaries are crossed transparently (the path is rooted at the top-level chart). Max depth: PCDN-SOS-08-G-002. |
+| **region** | The orthogonal-region identifier within an SCXML `<parallel>` block; per [SOS-12 §3][sos-12] independence-axis vocabulary. Null for transitions in non-parallel scope. |
+| **invariant-fire record** | An annotation record where `invariant_id` is non-null; produced when an SVA assertion bound by SOS-08-D / SOS-08-E fires during the test run. The `invariant_id` is the chart-derived invariant ID (`INV-S-CHART-N`) per [INV-SOS-H][inv-sos-h]. |
+| **vector index** | The integer position of the source vector in the chart's bounded-reachability vector set (per [INV-SOS-B][inv-sos-b]). Cited so the developer reviewing the waveform can navigate from "this transition fired at cycle 1234" to "vector #42 in the chart's vector set drove this transition". |
+| **viewer extension** | A user-installed plugin or script (GTKWave plugin, Surfer extension, viewer-side TCL/Python script) that reads the annotation overlay and renders chart-state badges as a track on the waveform timeline. Distribution per PCDN-SOS-08-G-004. |
+| **generation point** | The location in the SOS-08-D / SOS-08-E / SOS-08-F test run where the three review-artifact files are emitted. Per §5.4; SOS-08-G is *not* a separate phase that runs after the testbench — it is instrumentation *inside* the testbench. |
+
+## 4. Source-of-truth map
+
+For every concept this sub-phase touches, **exactly one** location is the canonical authority.
+
+| Concept | Authority |
+|---|---|
+| Three-file review-artifact output contract | [SOS-08 §6][sos-08] SOS-08-G row (umbrella, **mirror** here) |
+| Annotation overlay schema | **this doc** (§5.2) |
+| `.fst` format | GTKWave project (external upstream; **derive**) |
+| `.vcd` format | IEEE 1364-2005 §18.3 (external upstream; **derive**) |
+| JSON-Lines line-delimited shape | ndjson.org / `application/x-ndjson` convention (external upstream; **mirror**) |
+| Chart-path string format | [SOS-12][sos-12] (recursive-dispatch vocabulary; cited, **mirror** here) |
+| Region identifier format | [SOS-12 §3][sos-12] (independence-axis vocabulary; cited, **mirror** here) |
+| Invariant ID format `INV-S-CHART-N` | per-chart invariant vocabulary (chart author owns; SOS-08-G cites without modification) |
+| Vector index format | [SOS-03][sos-03] vector framework (cited, **derive** here for the per-test subset) |
+| Viewer extension distribution location | **this doc** (§5.5) once PCDN-SOS-08-G-004 resolved |
+| Per-test vs consolidated-per-chart-region annotation file scope | **this doc** (§5.6) once PCDN-SOS-08-G-003 resolved |
+| Per-cycle vs per-event annotation granularity | **this doc** (§5.7) once PCDN-SOS-08-G-005 resolved |
+| Overlay schema version field | **this doc** (§5.2) once PCDN-SOS-08-G-001 resolved |
+| MCP-workflow integration with [SOS-11][sos-11] | **this doc** (§9), composing [SOS-11 §9][sos-11] |
+| Storage discipline (build output, not tracked source) | **this doc** (§5.8), per [INV-SOS-A][inv-sos-a] + [INV-SOS-C][inv-sos-c] |
+| Cross-phase invariants INV-SOS-A through H | [SOS-07 §6][sos-07-inv] (cited, not redefined) |
+| Cross-sub-phase invariants INV-S-HDL-1 through 5 | [SOS-08 §7][sos-08] (cited, not redefined) |
+| Per-sub-phase cross-cutting invariants INV-S-HDL-G-* | **this doc** (§7) |
+
+[sos-03]: ./SOS-03-CONCEPTS.md
+
+## 5. Frozen decisions
+
+### 5.1 Three-file output contract per test run
+
+Per EOQ-011-ROADMAP resolution (carried forward via [SOS-08 §6 SOS-08-G][sos-08]), every test run that opts into review-artifact emission MUST produce exactly three coordinated files:
+
+1. **`<test>.fst`** — fastsignaltrace format. Compact, GTKWave + Surfer native. Recommended for everyday developer use.
+2. **`<test>.vcd`** — value-change-dump per IEEE 1364-2005 §18.3. Universal compatibility. Required for commercial-viewer interop.
+3. **`<test>.annotations.jsonl`** — annotation overlay file. The chart-vocabulary bridge.
+
+Filename prefix `<test>` is the testbench identifier (cocotb test name; SV testbench module name; UVM test class name). All three files share the prefix so the viewer integration can locate the overlay from the waveform's path.
+
+Frozen-enumeration registration policy for the file-set: **Standards Action** (modifying the three-file contract requires §15 amendment + cross-sub-phase review with SOS-08-D + SOS-08-E).
+
+### 5.2 Annotation overlay schema
+
+The `<test>.annotations.jsonl` file is line-delimited JSON (one JSON object per line; no enclosing array; no trailing comma; UTF-8). The first line of every file MUST be a schema-version header record:
+
+```
+{"schema": "sos-08-g/annotations", "version": "1.0"}
+```
+
+Every subsequent line is an **annotation record**. Six normative fields, two optional:
+
+| Field | Type | Normative | Description |
+|---|---|---|---|
+| `cycle` | integer | normative | Cycle count on the testbench's master clock at which the event occurred. Per [INV-SOS-H][inv-sos-h] traceable to the chart-state transition the cycle corresponds to. |
+| `signal` | string | normative | Fully-qualified HDL signal name (e.g. `dut.region_orchestrator.fsm_state`) whose change at `cycle` drove the chart-vocabulary event. Locates the event on the `.fst` / `.vcd` timeline. |
+| `chart_state` | string | normative | The chart-state ID entered (or, for transitions, the destination state ID). Identifies *what* the hardware did at chart vocabulary level. |
+| `transition_id` | string \| null | normative | The chart transition ID that fired. Null when the record is a state-enter that did not transit (e.g. initial-state entry, or a parallel-region simultaneous-enter). |
+| `chart_path` | string | normative | The chart-hierarchy path per [SOS-12][sos-12], rooted at the top-level chart, separator `/`. Sub-chart boundaries are transparent. Example: `/orchestrator/syscalls/sem.take`. Max depth per PCDN-SOS-08-G-002. |
+| `region` | string \| null | normative | The orthogonal-region identifier when the transition is inside an SCXML `<parallel>` block. Null for transitions in compound (non-parallel) scope. |
+| `invariant_id` | string \| null | optional | The chart-derived invariant ID (`INV-S-CHART-N`) when this record corresponds to an SVA assertion fire. Null for chart-state transitions that did not fire an assertion. |
+| `vector_index` | integer \| null | optional | The source vector index in the test's bounded-reachability vector set. Cites which vector drove this transition. Null when the test is not driven by a vector set (e.g. constrained-random testbench using SOS-08-E without an SOS-03 vector source). |
+
+The two optional fields MAY be omitted from the JSON object (their absence is equivalent to `null`).
+
+Frozen-enumeration registration policy for the field set: **Standards Action** (modifying the field set is a cross-sub-phase contract change; requires §15 amendment + viewer-extension contract review).
+
+The schema version `1.0` is the v1 frozen value. Bumping the version is a §15 amendment.
+
+### 5.3 Generation point: inside SOS-08-D / SOS-08-E / SOS-08-F test runs
+
+SOS-08-G is NOT a separate phase that runs after the testbench. It is **instrumentation inside the testbench** that the SOS-08-D / SOS-08-E / (optionally) SOS-08-F emitters wire into their generated artifacts:
+
+- The cocotb test (per [SOS-08-D][sos-08-d]) opens the `.fst` + `.vcd` simulator-side dump (Icarus `$dumpfile` / Verilator equivalent) and emits the `.annotations.jsonl` as the test coroutines observe chart-state changes.
+- The SystemVerilog testbench (per [SOS-08-E][sos-08-e]) uses `$dumpfile` + `$dumpvars` for the waveforms and emits the overlay via SV file-I/O.
+- The UVM sequence customer wrapper (per [SOS-08-F][sos-08-f]) optionally hooks into the customer's existing waveform-dump infrastructure; the overlay emission is the same.
+
+The annotation overlay's chart-state observation source is the chart-state probe signal exposed by the SOS-08-C chart→FSM emitter (one probe per chart region, encoded so the testbench can decode the FSM's current state in chart vocabulary). The probe signal is part of SOS-08-C's emission contract; SOS-08-G consumes it.
+
+Generation-point integration registration policy: **Specification Required** (adding a fourth generation source requires SOS-08-G phase-owner walkthrough; modifying the probe-signal protocol requires §15 amendment to SOS-08-C *and* this doc).
+
+### 5.4 Viewer integration model
+
+Three viewer integration paths are supported:
+
+1. **GTKWave + Surfer extensions** — SOS publishes thin extensions or wrapper scripts that read `<test>.annotations.jsonl` and render chart-state badges as an overlay track on the waveform timeline. Distribution location per PCDN-SOS-08-G-004.
+2. **Commercial viewers (Riviera, Questa, VCS DVE, Xcelium SimVision)** — SOS does NOT ship native plugins. The customer wraps the annotation overlay via the vendor's TCL/Python user-script extension API. The annotation overlay format is documented (§5.2) so customers can author their own hookup; SOS-08-G does not own the vendor hookup.
+3. **Headless / CI artifact** — the annotation overlay is human-readable as JSON-Lines; CI may render a static HTML or text report directly from the file without any viewer at all.
+
+The contract SOS-08-G owns is the **data**; the per-tool **rendering** is per the viewer's extension model.
+
+### 5.5 Viewer-extension distribution
+
+PCDN-SOS-08-G-004: where do the GTKWave / Surfer extensions live? Options:
+
+- (a) Inside the SOS subrepo at `tools/sos-codegen/viewers/{gtkwave,surfer}/`.
+- (b) As a separate downstream project (`sos-viewers` repo) released independently.
+- (c) Both — sources upstream in the SOS subrepo; releases mirrored as a separate package.
+
+Default recommendation: **(a) in-subrepo at `tools/sos-codegen/viewers/`**. The viewer extensions are tightly coupled to the §5.2 schema — when the schema bumps version they bump in lockstep. A separate repo introduces version-skew failure modes the methodology does not benefit from.
+
+### 5.6 Per-test vs consolidated annotation file scope
+
+PCDN-SOS-08-G-003: when a chart family (parent + sub-charts per [SOS-12][sos-12]) runs a coordinated test that exercises multiple charts in sequence, does the overlay produce one file per chart, one file per test run (covering all charts touched), or both? Options:
+
+- (a) One `.annotations.jsonl` per test run, regardless of chart-family scope — the `chart_path` field disambiguates which chart each record came from.
+- (b) One `.annotations.jsonl` per (test × chart) pair — multiple files per test run if multiple charts touched.
+- (c) Both — per-test file as the default surface; per-chart split available via a post-process tool.
+
+Default recommendation: **(a) one file per test run**. The `chart_path` field already carries per-chart provenance; splitting introduces filename coordination cost without buying review-surface legibility (the viewer extension can filter by `chart_path` cheaply).
+
+### 5.7 Per-cycle vs per-event annotation granularity
+
+PCDN-SOS-08-G-005: does the overlay emit a record every cycle (recording the current chart-state for every clock tick) or only on transition / invariant-fire events? Options:
+
+- (a) Per-event — only transitions and invariant fires. Smallest file size; viewer extension interpolates "currently in state X" between transitions.
+- (b) Per-cycle — every cycle's chart-state recorded. Largest file size; no interpolation needed.
+- (c) Per-event default + per-cycle opt-in via `--annotation-density=cycle` flag.
+
+Default recommendation: **(a) per-event** at v1. The cycle column is already present on every record; a viewer extension renders chart-state-vs-time by step-interpolating between consecutive event cycles. File size for a typical test run is in the low-MB range vs the tens-of-MB-to-GB range per-cycle would produce.
+
+### 5.8 Storage discipline
+
+Per [INV-SOS-A][inv-sos-a] (chart-as-source) + [INV-SOS-C][inv-sos-c] (MCP as sole modification surface): waveform files (`.fst`, `.vcd`) and the annotation overlay (`.annotations.jsonl`) are **build outputs**, NOT tracked source. They MUST NOT be committed to the chart's git repo. CI MAY upload them to artifact storage (S3, GitHub Actions artifacts, GitLab CI artifacts) for review; per-PR comment bots MAY surface links to them as part of the [SOS-11][sos-11] chart-diff review surface.
+
+Mandatory `.gitignore` entries in the chart's repo: `*.fst`, `*.vcd`, `*.annotations.jsonl`, plus the conventional `build/` and `coverage/` directories the chart's codegen tool produces.
+
+Frozen registration policy: **Standards Action** (any change to storage discipline touches every cross-phase invariant cited; requires §15 amendment + cross-phase review).
+
+## 6. Viewer integration contract
+
+A conforming viewer integration (GTKWave plugin, Surfer extension, commercial-viewer user script, or headless CI renderer) MUST satisfy:
+
+- (a) **Co-locate** — given a waveform file path `<test>.fst` or `<test>.vcd`, locate `<test>.annotations.jsonl` in the same directory. If absent, the integration MAY render the waveform alone (no overlay) without error.
+- (b) **Schema-version-aware** — read the first line, verify `schema == "sos-08-g/annotations"` and `version == "1.0"` (or a version the integration declares support for). Reject with a clear error if the schema is unknown.
+- (c) **Per-record render** — for each annotation record, render a badge at `(cycle, signal)` on the waveform timeline carrying `chart_state` (and, when present, `transition_id` / `invariant_id` as secondary detail). Badges MUST be visually distinguishable from raw signal traces.
+- (d) **Chart-path navigation** — when the chart-family has sub-charts ([SOS-12][sos-12]), the integration SHOULD provide a UI affordance to filter or scope by `chart_path` so the developer can focus on one sub-chart's transitions at a time.
+- (e) **Invariant-fire highlighting** — records with `invariant_id` non-null SHOULD render with a distinct visual treatment (color, icon) so SVA fires stand out from ordinary chart-state transitions.
+- (f) **Vector-citation drill-down** — when `vector_index` is non-null, the integration SHOULD provide a click-through that opens the corresponding vector definition (the SOS-03 vector framework owns the vector source-of-truth).
+
+(d) through (f) are SHOULD not MUST because each viewer's extension API constrains what's feasible; (a) through (c) are MUST because they are the minimum to claim conformance.
+
+## 7. Cross-sub-phase invariants — INV-S-HDL-G-*
+
+In addition to the cross-phase invariants [INV-SOS-A through H][sos-07-inv] (from SOS-07) and cross-sub-phase invariants INV-S-HDL-1 through 5 (from SOS-08 §7), the following invariants are normative within SOS-08-G:
+
+- **INV-S-HDL-G-1 — Three-file output coupling.** Every conforming test run that emits a review artifact MUST emit all three files (`.fst`, `.vcd`, `.annotations.jsonl`) coordinated by shared filename prefix. Emitting one or two of the three breaks the viewer-integration contract and is non-conformant.
+
+- **INV-S-HDL-G-2 — Chart-vocabulary mandatory in overlay.** Every annotation record MUST carry the six normative fields per §5.2; `chart_state`, `transition_id`, `chart_path`, `region` together implement [INV-SOS-H][inv-sos-h]'s vector-to-chart-traceability claim at the review-surface layer. Emitting an overlay record without these fields regresses to RTL-signal-level review and is rejected by a conforming generation point.
+
+- **INV-S-HDL-G-3 — Schema-version header required.** The overlay's first line MUST be the schema-version header record per §5.2. Files without the header are non-conformant. The version field is the mechanism by which viewer extensions detect schema evolution and refuse incompatible reads (per PCDN-SOS-08-G-001 resolution).
+
+- **INV-S-HDL-G-4 — Build-output discipline.** Waveform files and annotation overlays are build outputs per §5.8. They MUST NOT appear in the chart's tracked git history. A pre-commit hook on the chart repo SHOULD enforce this; CI SHOULD reject commits that introduce tracked `.fst` / `.vcd` / `.annotations.jsonl` files.
+
+- **INV-S-HDL-G-5 — Generation co-location with SOS-08-D / E / F.** The review artifact emission is instrumentation inside the testbench (per §5.3), not a separate post-process step. Decoupling the emission from the testbench breaks the chart-state probe-signal contract that SOS-08-C provides and is non-conformant.
+
+- **INV-S-HDL-G-6 — Chart-diff + waveform-diff parity for MCP-workflow review.** Per §9, when [SOS-11][sos-11] surfaces a chart-level diff for an agent-mediated chart edit, the SOS-08-G review artifact generated from that edit's regenerated RTL test run MUST be available alongside the chart-level diff at the same review surface. The hardware-side review surface mirrors the chart-side review surface; absence of either regresses the methodology's end-to-end review-loop claim.
+
+Frozen-enumeration registration policy for the INV-S-HDL-G-* set: **Standards Action**.
+
+## 8. Standards integration matrix additions
+
+The following rows EXTEND the [SOS-08 §8][sos-08] matrix:
+
+| Concept | Upstream authority | Local relationship | Phase that declares it | Mutation rights |
+|---|---|---|---|---|
+| FST waveform format | GTKWave project (open) | **derive** (consume format; emit conformant text) | SOS-08-G | none |
+| VCD waveform format | IEEE 1364-2005 §18.3 | **derive** | SOS-08-G | none — emit conformant text |
+| JSON-Lines (`application/x-ndjson`) | ndjson.org convention (open) | **mirror** (line-delimited JSON, UTF-8) | SOS-08-G | none |
+| Surfer waveform viewer | open project | **represent** | SOS-08-G | none |
+| GTKWave waveform viewer | open project | **represent** | SOS-08-G | none |
+| Riviera-PRO viewer extension API | Aldec (vendor) | **represent** (user-authored hookup) | SOS-08-G | none — customer owns hookup |
+| Questa SimVision extension API | Siemens EDA (vendor) | **represent** | SOS-08-G | none |
+| VCS DVE extension API | Synopsys (vendor) | **represent** | SOS-08-G | none |
+| Xcelium SimVision extension API | Cadence (vendor) | **represent** | SOS-08-G | none |
+| SOS-08-G annotation overlay schema | **own** | **own** (SOS-08-G authors; §5.2) | SOS-08-G | full; §15 amendment to bump version |
+
+## 9. Reconciliation decisions vs adjacent sub-phases
+
+### vs. [SOS-08-D][sos-08-d] (cocotb + SVA bind files, primary)
+
+SOS-08-G's generation point lives inside the SOS-08-D cocotb test. The cocotb framework's `$dumpfile` / `$dumpvars` equivalents drive the waveform emission; cocotb coroutines observe chart-state probe signal changes and emit `.annotations.jsonl` rows via Python file-I/O. SVA bind-file fires (also emitted by SOS-08-D) produce `invariant_id`-carrying annotation records that share the file with chart-state-transition records — one overlay covers both observation channels. SOS-08-D owns the test scaffolding; SOS-08-G owns the overlay schema; the two compose at the cocotb test boundary.
+
+### vs. [SOS-08-E][sos-08-e] (SystemVerilog testbench + SVA bind files)
+
+Same shape as SOS-08-D but the host language is SystemVerilog. `$dumpfile` + `$dumpvars` drive the waveform; SV file-I/O (`$fopen` / `$fwrite`) drives the overlay. SVA fire records carry `invariant_id` in the same field shape. The SV testbench MAY include a tiny SV utility module (`sos_annotation_emitter`) the codegen tool generates as part of SOS-08-E; the module wraps the file-I/O so test authors do not re-derive the JSON-Lines formatting boilerplate.
+
+### vs. [SOS-08-F][sos-08-f] (UVM sequences only)
+
+SOS-08-F emits UVM-compatible sequences that plug into the customer's existing UVM environment. SOS-08-G's review-artifact emission from a UVM-driven run is optional — if the customer's environment already has its own waveform-dump and report infrastructure, the annotation overlay MAY be the only thing SOS-08-G adds. The overlay's chart-vocabulary records still carry [INV-SOS-H][inv-sos-h] traceability; the waveform emission is whatever the customer already runs.
+
+### vs. [SOS-11][sos-11] (MCP-mediated chart editing)
+
+This is the load-bearing reconciliation that motivates the sub-phase. SOS-11 specifies the chart-diff review surface for agent-mediated chart edits (per [SOS-11 §9][sos-11]): graphical viewer renders states added/removed, transitions retargeted, validation status, vector delta summary. SOS-08-G is the **hardware analog** of that surface: when the chart edit causes RTL regeneration and a re-run of the SOS-08-D / SOS-08-E tests, SOS-08-G's three-file review artifact lets the developer see the waveform-level diff in the same chart vocabulary.
+
+The end-to-end review loop:
+
+1. Agent invokes a [SOS-11][sos-11] tool (e.g. `add_state` in subchart `auth.connecting`).
+2. SOS-11 commits the chart change with `scxml_diff`, `vector_delta`, `summary`, `validation`.
+3. iState graphical viewer renders the chart-level diff (per [SOS-11 §9][sos-11]).
+4. Downstream codegen regenerates RTL (per SOS-08-C) + testbench (per SOS-08-D + SOS-08-E).
+5. CI re-runs the regenerated tests; each test emits a SOS-08-G review artifact (`.fst` + `.vcd` + `.annotations.jsonl`).
+6. The developer reviews **both** surfaces at the same review pass: chart-level diff in the iState viewer + waveform-level diff in GTKWave/Surfer with chart-state badges.
+
+This is INV-S-HDL-G-6 in operational form. Neither half of the review loop is complete without the other.
+
+### vs. [SOS-12][sos-12] (recursive chart dispatch)
+
+The `chart_path` field in §5.2 uses [SOS-12][sos-12]'s recursive-dispatch vocabulary directly: paths are rooted at the top-level chart and cross sub-chart boundaries transparently. PCDN-SOS-08-G-002 resolves the max-depth bound (proposed: mirror SOS-12's max dispatch-tree depth = 8). The `region` field uses [SOS-12 §3][sos-12]'s independence-axis vocabulary.
+
+### vs. [SOS-03][sos-03] (conformance vectors)
+
+The `vector_index` field cites the source vector's position in the SOS-03-emitted bounded-reachability vector set. SOS-08-G does NOT own vector emission; SOS-08-G only carries the integer index that drove a transition the testbench observed.
+
+### vs. parent CLAUDE.md "Spec-Before-Code Planning Discipline"
+
+SOS-08-G is spec-before-code applied to the hardware-side review surface: the annotation overlay schema is the spec; the viewer extensions consume the spec; viewer extensions cannot ship until the schema ratifies. The relationship is `compose` — SOS-08-G composes the parent discipline at the review-artifact layer.
+
+## 10. Non-goals
+
+This sub-phase does NOT:
+
+- Author the GTKWave or Surfer viewers themselves. SOS-08-G specifies the overlay; the viewer projects own their renderers. SOS publishes thin extensions per §5.4 / §5.5 but does not fork the viewers.
+- Author commercial-viewer plugins (Riviera, Questa, VCS DVE, Xcelium SimVision). Vendor-specific hookup is per-tool and customer-owned; SOS-08-G publishes the overlay format so customers can author hookup.
+- Define the chart-state probe signal protocol. That is [SOS-08-C][sos-08]'s territory; SOS-08-G consumes the protocol.
+- Define the SVA bind-file shape. That is [SOS-08-D][sos-08-d] and [SOS-08-E][sos-08-e]'s territory; SOS-08-G consumes the fires.
+- Replace the SOS-11 chart-level review surface. The two surfaces are complementary, not alternatives.
+- Define a versioned binary annotation format. JSON-Lines is the v1 form; a future amendment MAY add a binary form if file-size pressure materialises.
+
+## 11. Pending Concept Decision Notices (PCDNs)
+
+These are the open questions whose resolution moves this doc from 🟡 drafted to 🟢 ratified.
+
+- **PCDN-SOS-08-G-001 — Overlay schema version detection mechanism.** §5.2 specifies the first line carries the schema-version header. Should the header live as the first record OR as a separate sidecar file (`<test>.annotations.schema.json`)? **Recommendation**: first-line header; single-file simplicity outweighs the schema-discovery flexibility a sidecar would offer. Viewer extensions read the first line cheaply.
+
+- **PCDN-SOS-08-G-002 — Chart-path max depth.** §3 + §5.2 leave the max depth for `chart_path` unresolved. [SOS-12][sos-12] bounds dispatch-tree depth at 8. **Recommendation**: mirror SOS-12's max depth = 8 by reference; if SOS-12 amends, SOS-08-G picks up the change automatically. Explicit-vs-implicit-vs-configurable: implicit-by-reference to SOS-12.
+
+- **PCDN-SOS-08-G-003 — Per-test vs consolidated annotation file scope.** §5.6. **Recommendation**: one `.annotations.jsonl` per test run; `chart_path` field disambiguates per-chart provenance.
+
+- **PCDN-SOS-08-G-004 — Viewer-extension distribution location.** §5.5. **Recommendation**: in-subrepo at `tools/sos-codegen/viewers/{gtkwave,surfer}/`. Tight schema-coupling argues against a separate downstream project.
+
+- **PCDN-SOS-08-G-005 — Per-cycle vs per-event annotation granularity.** §5.7. **Recommendation**: per-event default at v1; per-cycle opt-in via `--annotation-density=cycle` flag for high-bandwidth debug sessions.
+
+- **PCDN-SOS-08-G-006 — Annotation-emit performance budget.** Should the testbench MUST flush `.annotations.jsonl` after every record, or buffer up to N records before flush? Per-record flush makes mid-run review possible but slows the testbench; buffered flush is faster but loses the tail on crash. **Recommendation**: buffered (line-buffered, flush at every newline) at v1; `--annotation-flush=record` opt-in for crash-debug scenarios.
+
+- **PCDN-SOS-08-G-007 — Annotation-overlay sub-chart cross-reference shape.** When a transition fires in a sub-chart, does the annotation record cite the sub-chart's own vector-set's vector_index (sub-chart-local) or the parent-chart's vector_index that drove the dispatch boundary? **Recommendation**: cite the sub-chart-local index; rely on `chart_path` to disambiguate which sub-chart's vector set the index belongs to. Mirrors [INV-SOS-F][inv-sos-f]'s per-layer composition discipline.
+
+## 12. Acceptance checklist
+
+A conforming SOS-08-G ratification satisfies:
+
+- (a) ⏸ PCDN-SOS-08-G-001 through 007 resolved.
+- (b) ⏸ Annotation overlay schema in §5.2 frozen (Standards Action registration); schema version `1.0` ratified.
+- (c) ⏸ Three-file output contract in §5.1 frozen (Standards Action registration); filename-prefix convention specified.
+- (d) ⏸ Generation-point integration with [SOS-08-D][sos-08-d] + [SOS-08-E][sos-08-e] specified (§5.3); chart-state probe signal protocol cited.
+- (e) ⏸ Viewer-integration contract in §6 specified; (a)-(c) MUST + (d)-(f) SHOULD requirements enumerated.
+- (f) ⏸ Cross-sub-phase invariants INV-S-HDL-G-1 through 6 in §7 frozen.
+- (g) ⏸ Standards integration matrix additions in §8 enumerated.
+- (h) ⏸ Reconciliation §9 covers SOS-08-D, SOS-08-E, SOS-08-F, [SOS-11][sos-11], [SOS-12][sos-12], [SOS-03][sos-03].
+- (i) ⏸ Storage discipline in §5.8 frozen; mandatory `.gitignore` entries listed; INV-S-HDL-G-4 cited.
+- (j) ⏸ Worked example: at least one SOS-08-D-driven test emits a conforming three-file review artifact reviewed via a GTKWave extension shipped at `tools/sos-codegen/viewers/gtkwave/`. (Implementation gate; ratifies when SOS-08-D's first worked-example test lands.)
+
+## 13. Files cited
+
+| Path | Role |
+|---|---|
+| [`docs/concepts/SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md) | Cross-phase invariants (INV-SOS-A through H), AuthorityRelationship matrix. INV-SOS-H is load-bearing. |
+| [`docs/concepts/SOS-08-CONCEPTS.md`](./SOS-08-CONCEPTS.md) | Umbrella; §5.4 vector emission priority + §6 SOS-08-G row; EOQ-011 resolution; INV-S-HDL-1 through 5. |
+| [`docs/concepts/SOS-08-D-CONCEPTS.md`](./SOS-08-D-CONCEPTS.md) | cocotb + SVA bind file emitter; generation point (§5.3). *Forthcoming sub-phase doc; cited per [SOS-08 §6][sos-08].* |
+| [`docs/concepts/SOS-08-E-CONCEPTS.md`](./SOS-08-E-CONCEPTS.md) | SystemVerilog testbench + SVA bind file emitter; generation point (§5.3). *Forthcoming sub-phase doc; cited per [SOS-08 §6][sos-08].* |
+| [`docs/concepts/SOS-11-CONCEPTS.md`](./SOS-11-CONCEPTS.md) | MCP-mediated chart editing; chart-level review surface this phase mirrors at hardware level (§9). |
+| [`docs/concepts/SOS-12-CONCEPTS.md`](./SOS-12-CONCEPTS.md) | Recursive chart dispatch; `chart_path` + `region` vocabulary (§5.2 + §3). |
+| [`docs/concepts/SOS-03-CONCEPTS.md`](./SOS-03-CONCEPTS.md) | Vector framework; `vector_index` source-of-truth. |
+| [`docs/concepts/SOS-ROADMAP-07-PLUS.md`](./SOS-ROADMAP-07-PLUS.md) | EOQ-011-ROADMAP resolution (informative). |
+| Parent `CLAUDE.md` | Spec-Before-Code Planning Discipline; standards integration matrix conventions. |
+
+## 14. Unblocks
+
+This sub-phase's ratification (after PCDN resolution) unblocks:
+
+- **The first GTKWave + Surfer viewer-extension implementation** at `tools/sos-codegen/viewers/`.
+- **The end-to-end MCP-workflow review demo** ([SOS-11][sos-11] + SOS-08-G together): agent edits chart, both chart-diff and waveform-diff surface to the developer for one-pass review.
+- **The article's "kernel-on-FPGA" demo's review-surface story**: napkin-to-silicon stays legible at every review.
+- **SOS-08-D and SOS-08-E concept-doc ratifications** (the generation points need a stable annotation overlay schema to author against; they MAY ratify in parallel with this doc but their acceptance checklists cite §5.2 here).
+
+## 15. Change log
+
+### 2026-05-23 — Initial draft (Ira)
+
+- Authored `SOS-08-G-CONCEPTS.md` as the per-sub-phase contract under the SOS-08 umbrella (ratified 2026-05-23).
+- Frozen decisions §5: three-file output contract (`.fst` + `.vcd` + `.annotations.jsonl`) per EOQ-011-ROADMAP; annotation overlay schema v1.0 with six normative fields + two optional; generation-point integration inside [SOS-08-D][sos-08-d] / [SOS-08-E][sos-08-e] / [SOS-08-F][sos-08-f]; viewer-integration model (in-tree GTKWave/Surfer extensions; commercial viewers via user scripts; headless CI); storage discipline as build outputs per [INV-SOS-A][inv-sos-a] + [INV-SOS-C][inv-sos-c].
+- Viewer integration contract §6: (a)-(c) MUST + (d)-(f) SHOULD; conformance level for extensions.
+- Cross-sub-phase invariants §7: INV-S-HDL-G-1 through 6.
+- Standards integration matrix §8: 10 rows added (FST, VCD, JSON-Lines, GTKWave, Surfer, four vendor viewer APIs, the SOS-08-G schema itself as `own`).
+- Reconciliation §9: load-bearing reconciliation with [SOS-11][sos-11] (hardware-side mirror of chart-side review surface; INV-S-HDL-G-6 in operational form).
+- 7 PCDNs raised: schema-version detection mechanism, chart-path max depth, per-test vs consolidated file scope, viewer-extension distribution, per-cycle vs per-event granularity, annotation-emit performance budget, sub-chart cross-reference shape.
+
+Status: 🟡 **drafted**, awaiting PCDN walkthrough. Ratifies to 🟢 once each PCDN above has a chosen value and the corresponding section is updated.
+
+### 2026-05-23 — Ratified after PCDN walkthrough (Ira)
+
+All seven PCDNs from §11 resolved with recommendations accepted.
+
+- **PCDN-SOS-08-G-001 → RESOLVED**: schema-version detection via **first-line header** record in the `.annotations.jsonl` file. Single-file simplicity beats sidecar-discovery flexibility. Viewer extensions read the first line cheaply.
+- **PCDN-SOS-08-G-002 → RESOLVED**: `chart_path` max depth **mirrors SOS-12's depth-cap of 8** by reference; if SOS-12 amends, SOS-08-G picks up the change automatically. Implicit-by-reference.
+- **PCDN-SOS-08-G-003 → RESOLVED**: annotation file scope is **one `.annotations.jsonl` per test run**; `chart_path` field disambiguates per-chart provenance within a single file.
+- **PCDN-SOS-08-G-004 → RESOLVED**: viewer-extension distribution location is **in-subrepo** at `tools/sos-codegen/viewers/{gtkwave,surfer}/`. Tight schema-coupling argues against a separate downstream project.
+- **PCDN-SOS-08-G-005 → RESOLVED**: annotation granularity is **per-event default** at v1; `--annotation-density=cycle` opt-in flag for high-bandwidth debug sessions.
+- **PCDN-SOS-08-G-006 → RESOLVED**: emit performance policy is **line-buffered** (flush at every newline) at v1; `--annotation-flush=record` opt-in for crash-debug scenarios.
+- **PCDN-SOS-08-G-007 → RESOLVED**: sub-chart cross-reference shape — cite the **sub-chart-local** `vector_index`; rely on `chart_path` to disambiguate which sub-chart's vector set the index belongs to. Mirrors INV-SOS-F per-layer composition discipline.
+
+**§5 / INV amendments**:
+- §5 frozen-decisions extended with the seven resolutions above by reference.
+- Schema version 1.0 ratified per §12 (b); first-line header carries `{"_meta": {"schema": "sos-annotations", "version": "1.0", "chart_path_max_depth": 8}}` per PCDN-G-001 + PCDN-G-002 resolutions.
+- INV-S-HDL-G-3 (schema-version header required) wording extended: "the header lives at line 0 of `.annotations.jsonl`; viewer extensions MUST validate the header before consuming records".
+- INV-S-HDL-G-4 (build-output discipline) confirmed: `.annotations.jsonl`, `.fst`/`.vcd`, and `.transactions.jsonl` are build outputs (gitignored); `.gitignore` entries published per §5.8 + §12 (i).
+
+**Status**: 🟢 **ratified**. Implementation of the waveform-annotation emit path in `tools/sos-codegen/` (and the GTKWave / Surfer viewer extensions) is now unblocked. SOS-08-D + SOS-08-E generation-point integration with chart-state probe signals is the load-bearing co-landing dependency (§12 (d)); the chart-state probe signal protocol is frozen at SOS-08-D / SOS-08-E ratification (also today).

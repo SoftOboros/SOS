@@ -1,6 +1,6 @@
 # SOS-08-A — L0 primitive library (per-primitive contracts)
 
-**Status:** 🟡 **drafted 2026-05-23**. Awaiting PCDN walkthrough.
+**Status:** 🟢 **ratified 2026-05-23** (see §15).
 
 ## 0. Authority policy
 
@@ -413,7 +413,7 @@ These open questions move this doc from 🟡 drafted to 🟢 ratified. The PCDN-
 
 A conforming SOS-08-A ratification satisfies:
 
-- (a) ⏸ PCDN-SOS-08-A-001 through 007 resolved (§11).
+- (a) ✅ PCDN-SOS-08-A-001 through 007 resolved (§11) — see §15 2026-05-23 ratification entry.
 - (b) ⏸ Each of the eleven primitives (§6.1 through §6.11) has its portable-RTL source authored in both VHDL-2008 (`rtl/<primitive>/<primitive>.vhd`) and SystemVerilog-2017 (`rtl/<primitive>/<primitive>.sv`).
 - (c) ⏸ Each primitive's vendor-IP shim sources (`rtl/<primitive>/vendor_<vendor>.sv`) authored for the vendors named in its §6 entry (none for portable-only primitives; xilinx/intel/lattice for FIFOs and DPRAM; xilinx/intel/lattice for the synchronizer).
 - (d) ⏸ Each primitive's cocotb testbench (`tb/<primitive>/test_<primitive>.py`) authored and passing against the portable-RTL path on at least Icarus Verilog + Verilator simulators.
@@ -470,3 +470,22 @@ This sub-phase's ratification (after PCDN walkthrough) unblocks:
 - §12 acceptance checklist: gates (a)-(k); reduced conformance level for single-clock-only `sos_dpram_arb`.
 
 Status: 🟡 **drafted**, awaiting PCDN walkthrough.
+
+### 2026-05-23 — Ratified after PCDN walkthrough (Ira)
+
+PCDN walkthrough resolved all seven PCDNs from §11. Recommendations accepted except where noted; user-chosen alternatives recorded with rationale.
+
+- **PCDN-SOS-08-A-001 → RESOLVED (recommendation accepted)**: `UPPER_CASE` parameter naming across both VHDL and SystemVerilog dialects. Cross-dialect consistency at the chart-emitter level.
+- **PCDN-SOS-08-A-002 → RESOLVED (user-chosen variant)**: AXI-Stream-compatible prefixes (`m_axis_*` / `s_axis_*`) on **data-bearing** primitives directly; bare `req` / `ack` on control-only primitives (`sos_mutex`, `sos_credit_counter`, `sos_strobe_latch`). Diverges from doc-recommendation "bare names with optional AXI wrapper" — the user-chosen variant eliminates the wrapper layer at the cost of stronger AXI ecosystem coupling on data primitives. INV-S-HDL-A-1 amended accordingly: data primitives' ports use `m_axis_t{data,valid,ready,last}` / `s_axis_t{data,valid,ready}`; control primitives use bare `req`/`ack`.
+- **PCDN-SOS-08-A-003 → RESOLVED (recommendation accepted)**: synchronous active-high reset with synchronous release. INV-S-HDL-A-1 frozen at this choice. Yosys-friendly + matches FreeRTOS-side convention.
+- **PCDN-SOS-08-A-004 → RESOLVED (recommendation accepted)**: mandatory parameters, no defaults. Per INV-S-HDL-A-5. Silent default → re-route is a higher cost than typing the parameter explicitly.
+- **PCDN-SOS-08-A-005 → RESOLVED (recommendation accepted)**: `STATE_ENCODING` parameter exists per primitive, defaults to `ONE_HOT` per §5.2 / INV-S-HDL-A-4; `BINARY` and `GRAY` overrides available for ASIC-flow opt-in. Matches SOS-08 PCDN-002 resolution.
+- **PCDN-SOS-08-A-006 → RESOLVED (recommendation accepted)**: external sign-off in `rtl/<primitive>/MTBF.md` with build-wrapper structural validation (required fields: formula, target frequency, target-FF τ value, computed MTBF, sign-off date). No SVA assert/cover for MTBF — keeps prove/cover semantics clean.
+- **PCDN-SOS-08-A-007 → RESOLVED (recommendation accepted)**: one cocotb file per primitive (`tb/<primitive>/test_<primitive>.py`). Per-primitive isolation + unambiguous CI failure attribution. SOS-08-D MAY revisit at ratification if codegen reuse becomes a pain point.
+
+**§5 / INV amendments**:
+- §5.1 (interface-shape conventions) updated to record the AXI-Stream-on-data-primitives decision from PCDN-A-002.
+- INV-S-HDL-A-1 wording extended: "uniform sync active-high reset (PCDN-A-003) and AXI-Stream-compatible port naming on data-bearing primitives (PCDN-A-002)".
+- §6.1 (`sos_fifo_async`), §6.2 (`sos_fifo_sync`), §6.7 (`sos_dpram_arb`) port lists updated to use `m_axis_t*` / `s_axis_t*` naming on follow-up implementation; portable-RTL emission honours this naming.
+
+**Status**: 🟢 **ratified**. SOS-08-B, SOS-08-C, SOS-08-D, SOS-08-E, SOS-08-F, SOS-09 ratification gates that cited SOS-08-A as a prerequisite are now unblocked.
