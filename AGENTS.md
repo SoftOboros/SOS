@@ -2,9 +2,9 @@
 AGENTS.md — Contributor guidance and project conventions for SOS.
 -->
 
-# SOS (Statechart-Orchestrated Scheduler)
+# SOS (Statechart Orchestration System)
 
-A minimal RTOS kernel whose **behaviour is specified as a single SCXML statechart** (`rtos_kernel.scxml`), with reference implementations on Cortex-M7 in C and Rust. The science being proved is the methodology: SCXML → multiple equivalent language ports, verified by a shared conformance-vector suite.
+A spec-before-code methodology + tooling stack whose canonical form is SCXML, whose authoring surface is iState, and whose targets include any language or hardware backend that can host a generated FSM. The v1 demonstration is a minimal RTOS kernel whose **behaviour is specified as a single SCXML statechart** (`rtos_kernel.scxml`), with bench-validated reference implementations on Cortex-M7 in C and Rust. The science being proved is the methodology: SCXML → multiple equivalent language ports → bench-validated firmware → exhaustive vectors derived from bounded reachability — generalised forward to HDL backends (SOS-08), hardware/software membranes (SOS-09), and multi-language orchestrators (SOS-10). See [`docs/concepts/SOS-07-CONCEPTS.md`](./docs/concepts/SOS-07-CONCEPTS.md) for the cross-phase invariants.
 
 This is a **public** repo, MIT-licensed (see [`LICENSE.md`](./LICENSE.md)). Position in the parent tree: `streamz/submodules/SOS/`. Clone via `https://github.com/SoftOboros/SOS.git`; contributors push via the `writable` SSH remote.
 

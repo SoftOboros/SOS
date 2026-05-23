@@ -915,3 +915,13 @@ Wave-5 implementation of the 9 remaining lint rules (Amendment 003) revealed tha
 - LINT-010 grace-period waiver: add the 7 missing `_event.data: —` headers OR relax the detector to treat payload-less events as exempt. Pick at first follow-up; the detector relaxation is the lower-friction option.
 
 This amendment does NOT itself edit the chart. The chart and the detector both stand; only §10.1's promise updates to match observed reality.
+
+### 2026-05-23 — SOS-07 rename ratification (Ira)
+
+The initiative rename from *Statechart-Orchestrated Scheduler* to **Statechart Orchestration System** is ratified through [`SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md). The acronym `SOS` is unchanged across this phase doc family; all in-text references continue to read as `SOS` for cross-doc citation stability.
+
+Cross-phase invariants INV-SOS-A through H + the AuthorityRelationship matrix promote from informative roadmap text (`SOS-ROADMAP-07-PLUS.md`) to normative phase content in SOS-07. They cite by ID into SOS-01's normative sections without modifying any of SOS-01's frozen content.
+
+Bootstrap-vs-general framing (SOS-07 §8): the kernel chart `rtos_kernel.scxml` is reframed as the v1 demonstration the methodology generalises from, not "the chart". The bench-validated state recorded across SOS-01's prior amendments carries forward unchanged.
+
+No frozen-enum value modified. No PCDN re-ratified. No port-spec impact.

@@ -828,3 +828,13 @@ Rationale: the port-binary contract is a minimal "execute this kernel input sequ
 The wave-8 fix at `sim/sos-conformance/src/port.rs` introduces a dedicated `#[derive(Serialize)] struct PortBinaryInput<'a> { config: &'a Config, input: &'a [Event] }` that serialises ONLY the two fields the contract names. The existing `VectorFile` deserialiser remains untouched — `name`/`description`/etc. continue to populate from JSON for harness-side diff-reporting.
 
 §7.6 unchanged (it was already correct); this amendment ratifies that the harness implementation NOW MATCHES §7.6's text. Future port-binary contract expansions ratify via §15 amendment naming the additional fields.
+
+### 2026-05-23 — SOS-07 rename ratification (Ira)
+
+The initiative rename from *Statechart-Orchestrated Scheduler* to **Statechart Orchestration System** is ratified through [`SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md). The acronym `SOS` is unchanged across this phase doc family; all in-text references continue to read as `SOS` for cross-doc citation stability.
+
+Cross-phase invariants INV-SOS-A through H + the AuthorityRelationship matrix promote from informative roadmap text (`SOS-ROADMAP-07-PLUS.md`) to normative phase content in SOS-07. They cite by ID into SOS-03's normative sections without modifying any of SOS-03's frozen content.
+
+Bootstrap-vs-general framing (SOS-07 §8): the kernel chart `rtos_kernel.scxml` is reframed as the v1 demonstration the methodology generalises from, not "the chart". The bench-validated state recorded across SOS-03's prior amendments carries forward unchanged.
+
+No frozen-enum value modified. No PCDN re-ratified. No port-spec impact.

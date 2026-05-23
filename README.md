@@ -1,8 +1,8 @@
-# SOS — Statechart-Orchestrated Scheduler
+# SOS — Statechart Orchestration System
 
-A minimal preemptive priority-based RTOS kernel **specified as a single SCXML statechart**, with reference implementations on Cortex-M7 hardware in both C and Rust.
+A spec-before-code methodology + tooling stack whose canonical form is SCXML, whose authoring surface is iState (Infinity State), and whose targets include any language or hardware backend that can host a generated FSM. The v1 demonstration is a minimal preemptive priority-based RTOS kernel **specified as a single SCXML statechart**, with bench-validated reference implementations on Cortex-M7 in both C and Rust.
 
-The product here is the **methodology** more than the kernel: prove that a non-trivial deeply-embedded behaviour can be specified in SCXML at a level of precision sufficient to drive multiple language ports, and that the resulting kernels remain provably equivalent under a shared conformance-vector suite.
+The product here is the **methodology** more than the kernel. The kernel is the v1 proving ground; the methodology generalises across language and hardware domains (forthcoming SOS-08 HDL backend, SOS-09 hardware/software membrane, SOS-10 multi-language orchestrator). See [`docs/concepts/SOS-07-CONCEPTS.md`](./docs/concepts/SOS-07-CONCEPTS.md) for the cross-phase invariants (INV-SOS-A through H) and the AuthorityRelationship matrix.
 
 This is a **public** repo, MIT-licensed (see [`LICENSE.md`](./LICENSE.md)). It is a submodule of the parent `softoboros.com` tree at `streamz/submodules/SOS/`. Pull via HTTPS (`https://github.com/SoftOboros/SOS.git`); the `writable` SSH remote is for contributors with push rights.
 

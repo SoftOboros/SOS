@@ -596,3 +596,25 @@ SOS-02 implementation skeleton surfaced a contradiction between SOS-00 §5.6 (wh
 §5.6 amended: the wire-form sub-section now declares `Null` → `null`, `Int(N)` → bare integer, `ReturnCode(rc)` → `{"rc": <i8>}`. SOS-02 §7.2 is the authoritative wire-format owner; this amendment brings SOS-00 §5.6 into alignment with it. The SOS-02 skeleton implementation (landed 2026-05-19) is already correct under the new form — no implementation rework needed.
 
 Trade-off accepted: trace records carry a few extra bytes per blocked-syscall unblock. Per the SOS-03 PCDN-001 default (structural diff for `expected_trace`), this is a cleaner-and-cheaper-to-diff format despite the byte cost.
+
+### 2026-05-23 — Amendment 005: rename initiative to *Statechart Orchestration System*; cross-phase invariants promoted (Ira)
+
+The initiative is renamed from *Statechart-Orchestrated Scheduler* to **Statechart Orchestration System**. Acronym `SOS` is unchanged across the existing phase-doc family (SOS-00 through SOS-06+) and remains load-bearing for cross-doc citation. The expansion changes only.
+
+The rename + cross-phase invariants are ratified through a dedicated phase doc [`SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md). That doc is the authoritative artifact; this §15 amendment cites it.
+
+What the rename brings:
+
+- The methodology generalises beyond the kernel-bootstrap workload. The kernel chart `rtos_kernel.scxml` is **the v1 demonstration**, not "the chart" — one chart among future many under the same methodology. SOS-07 §8 records this bootstrap-vs-general framing normatively.
+- Eight cross-phase invariants ratify (INV-SOS-A through H — chart-as-source, vectors-as-deliverable at every layer, MCP as sole modification surface, iState authoring with SCXML canonical, explicit AuthorityRelationship per integrated standard, bound composition per-layer × independence axes, verified-codegen position, vector-to-chart traceability). These are normative across every SOS-NN phase and cited by ID.
+- An AuthorityRelationship matrix records the relationship (mirror / adapt / extend / compose / own / derive / represent per parent CLAUDE.md) for every external standard the SOS-07+ phase family integrates. Per INV-SOS-E, undeclared relationships read as `mirror` with no mutation rights — the matrix is the defence against silent ownership creep.
+
+What does NOT change with this amendment:
+
+- INV-S1 ("the .scxml IS the spec") stays intact. INV-SOS-A (chart-as-source) extends INV-S1's territorial reach to all SOS targets without modifying the canonical-artifact claim — SOS-07 §10 records the reconciliation explicitly.
+- All previously-ratified content in §1 through §14 stays valid. The rename is a prose amendment; no PCDN re-ratification needed.
+- The bench-validated state from SOS-06 §15 Amendment 005 (both Rust + C ports at `CanonicalReplacement`, 6/6 PASS, `MacrostepCycleCount` measured) carries forward unchanged. The kernel chart continues to bench-validate against the SOS-03 conformance suite on every toolchain release per the EOQ-009-ROADMAP resolution.
+
+Cross-references: [`SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md) (this amendment's authoritative artifact); [`SOS-ROADMAP-07-PLUS.md`](./SOS-ROADMAP-07-PLUS.md) (informative roadmap the EOQ batch resolution lived in); parent `CLAUDE.md` ("Spec-Before-Code Planning Discipline"; "Standards integration: authority boundary declarations").
+
+Status: rename ratified through SOS-07; SOS-00's foundational role unchanged.

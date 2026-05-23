@@ -268,7 +268,7 @@ These are the user-decisions whose resolution unblocks the named phases. They fo
 
 - **EOQ-010-ROADMAP — Article-as-amendment.** ✅ **RESOLVED 2026-05-22 (Ira) — stand-alone artifact.** The November 2026 article publishes independently; cites the per-phase docs as references; the docs don't cite the article. Prose-of-record stays in the concept docs.
 
-- **EOQ-011-ROADMAP — Waveform-annotation review-artifact specifics.** *(Raised 2026-05-22 by EOQ-003 reframe.)* SOS-08-G emits waveform + transaction-annotation files as a review artifact (the hardware analog of the chart diff in the MCP workflow). Open question: which waveform format and annotation schema? Candidates: (a) `.fst` (fastsignaltrace, GTKWave-native, open + small); (b) `.vcd` (universal but bulky); (c) Riviera/Questa's proprietary native format (best annotation tooling); (d) all three with a single annotation schema overlaid. Recommendation: (d) — emit `.fst` + `.vcd` with a separate annotation-overlay file (likely JSON-Lines with `{cycle, signal, chart_state, transition_id}` tuples) that GTKWave + Surfer + commercial viewers can consume. Final disposition resolves at SOS-08-G concepts-doc-authoring time.
+- **EOQ-011-ROADMAP — Waveform-annotation review-artifact specifics.** ✅ **RESOLVED 2026-05-23 (Ira) — recommendation (d) accepted.** SOS-08-G emits **both** `.fst` (GTKWave-native, open + small) and `.vcd` (universal) waveform formats, alongside a separate **annotation-overlay file** in JSON-Lines format with `{cycle, signal, chart_state, transition_id}` tuples. Consumers: GTKWave + Surfer + commercial viewers (Riviera, Questa) each render the waveform format they prefer; the overlay file is the chart-vocabulary bridge that satisfies INV-SOS-H at the review surface. Final overlay-schema details (field shapes, transition-ID format, sub-chart references) ratify at SOS-08-G concepts-doc-authoring time within this resolution's frame.
 
 ## 9. The article framing — protagonist and conceptual driver
 
@@ -360,3 +360,12 @@ User walked all 10 roadmap EOQs and ratified the resolutions captured in §8 abo
 **Unblocks**: the SOS-07 ratification cycle (rename + charter expansion + INV adds + SOS-00 §15 amendment). The 10 resolved EOQs are sufficient to write a SOS-07-CONCEPTS.md draft; EOQ-011 lives downstream in SOS-08-G.
 
 Status: 🟢 **EOQ-resolved; SOS-07 cycle unblocked**. Per-phase concept docs (SOS-07, SOS-08-*, SOS-09, SOS-10, SOS-11, SOS-12, SOS-13) follow per their own ratification cycles.
+
+### 2026-05-23 — EOQ-011 resolved + SOS-07 RATIFIED (Ira)
+
+- **EOQ-011-ROADMAP** ✅ resolved: waveform-annotation review artifact = `.fst` + `.vcd` + JSON-Lines overlay (`{cycle, signal, chart_state, transition_id}`). Recommendation (d) accepted. Detail in §8.
+- **SOS-07 RATIFIED**. The normative phase doc lands as `docs/concepts/SOS-07-CONCEPTS.md` in this drop, with the rename + cross-phase invariants (INV-SOS-A through H) + AuthorityRelationship matrix promoted from informative roadmap text to normative phase content. SOS-00 §15 receives a dated amendment citing SOS-07 as the rename's authoritative artifact. Top-level README / AGENTS / CLAUDE updated to "Statechart Orchestration System" wording. SOS-01 through SOS-06 each receive small §15 amendments per roadmap §7 recording the rename + bootstrap-reframe context.
+
+With SOS-07 ratified, the SOS-08, SOS-09, SOS-10, SOS-11, SOS-12, SOS-13 cycles are unblocked individually. Each is still its own multi-week-to-multi-month effort; SOS-07's job was to clear the ratification-layer prerequisites so each subsequent phase can be authored without re-arguing the rename or the cross-phase invariants.
+
+Status: 🟢 **SOS-07 RATIFIED**. Roadmap closes out as "informative reference"; subsequent ratifications live in their own per-phase concept docs.

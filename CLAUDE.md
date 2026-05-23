@@ -4,7 +4,7 @@ This file is the source of truth for Codex/Claude-style agents working on SOS. R
 
 ## Project shape (one-screen summary)
 
-- **What it is:** a minimal preemptive priority-based RTOS kernel whose **behaviour is specified as a single SCXML statechart** at `rtos_kernel.scxml`. Reference implementations target Cortex-M7 (STM32H747I-DISCO is the bench board).
+- **What it is:** the **Statechart Orchestration System** (SOS), a spec-before-code methodology + tooling stack whose canonical form is SCXML, whose authoring surface is iState, and whose targets include any language or hardware backend that can host a generated FSM. The v1 demonstration is a minimal preemptive priority-based RTOS kernel whose **behaviour is specified as a single SCXML statechart** at `rtos_kernel.scxml`, with bench-validated reference implementations on Cortex-M7 (STM32H747I-DISCO is the bench board). Cross-phase invariants (INV-SOS-A through H) and AuthorityRelationship matrix live in `docs/concepts/SOS-07-CONCEPTS.md`.
 - **Science being proved:** SCXML can specify a non-trivial deeply-embedded behaviour at sufficient precision to drive multiple language ports that are equivalent under a shared conformance-vector suite.
 - **Repo position:** `https://github.com/SoftOboros/SOS.git` (public, MIT — see `LICENSE.md`), submodule of parent `softoboros.com` at `streamz/submodules/SOS/`. The `writable` SSH remote (`git@github.com:SoftOboros/SOS.git`) is for contributors with push rights; clones use HTTPS.
 - **Spec lineage:** `docs/concepts/SOS-NN-*.md`. SOS-00 is the foundational concepts doc; **draft, not yet ratified**.

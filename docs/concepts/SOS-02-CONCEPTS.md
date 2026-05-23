@@ -753,3 +753,13 @@ However: **the same anti-pattern** that caused the Msg bug applies here. Any fut
 No code change is required by this amendment — `SemSnapshot` and `QueueSnapshot` continue to work correctly under the current variant set. The note is forward-looking guidance for future amendments touching these enums.
 
 Cross-reference: SOS-00 §15 Amendment 003 (Msg wire form ratification) + Amendment 004 (Msg on-wire discriminator clarification); SOS-02 wave-6.5 Msg fix at `sim/sos-sim/src/datamodel.rs`.
+
+### 2026-05-23 — SOS-07 rename ratification (Ira)
+
+The initiative rename from *Statechart-Orchestrated Scheduler* to **Statechart Orchestration System** is ratified through [`SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md). The acronym `SOS` is unchanged across this phase doc family; all in-text references continue to read as `SOS` for cross-doc citation stability.
+
+Cross-phase invariants INV-SOS-A through H + the AuthorityRelationship matrix promote from informative roadmap text (`SOS-ROADMAP-07-PLUS.md`) to normative phase content in SOS-07. They cite by ID into SOS-02's normative sections without modifying any of SOS-02's frozen content.
+
+Bootstrap-vs-general framing (SOS-07 §8): the kernel chart `rtos_kernel.scxml` is reframed as the v1 demonstration the methodology generalises from, not "the chart". The bench-validated state recorded across SOS-02's prior amendments carries forward unchanged.
+
+No frozen-enum value modified. No PCDN re-ratified. No port-spec impact.

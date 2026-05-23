@@ -1270,3 +1270,13 @@ Status of SOS-06: 🟢 **SOS-06-A v1 closure complete on both targets**.
 - Future bench-stable `BAUD=921600` ratification per SOS-04 §15 Amendment 013's deferred-followups.
 
 These are outside the SOS-06-A closure surface and do not block any SOS-06 verdict.
+
+### 2026-05-23 — SOS-07 rename ratification (Ira)
+
+The initiative rename from *Statechart-Orchestrated Scheduler* to **Statechart Orchestration System** is ratified through [`SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md). The acronym `SOS` is unchanged across this phase doc family; all in-text references continue to read as `SOS` for cross-doc citation stability.
+
+Cross-phase invariants INV-SOS-A through H + the AuthorityRelationship matrix promote from informative roadmap text (`SOS-ROADMAP-07-PLUS.md`) to normative phase content in SOS-07. They cite by ID into SOS-06's normative sections without modifying any of SOS-06's frozen content.
+
+Bootstrap-vs-general framing (SOS-07 §8): the kernel chart `rtos_kernel.scxml` is reframed as the v1 demonstration the methodology generalises from, not "the chart". The bench-validated state recorded across SOS-06's prior amendments carries forward unchanged.
+
+No frozen-enum value modified. No PCDN re-ratified. No port-spec impact.

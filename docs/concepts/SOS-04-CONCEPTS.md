@@ -1257,3 +1257,13 @@ This amendment does not pick among (a)/(b)/(c) — that's the user's call. The t
 **Open question (carried forward, parent CLAUDE.md ERRATA EOQ convention):**
 
 - **EOQ-001-AMENDMENT-014**: ratify the forward path for PCDN-SOS-04-013's prose — option (a) `/1` normalisation (both ports → APBx = 200 MHz, BRR = 1736), option (b) `/2` normalisation (both ports → APBx = 100 MHz, BRR = 868), or option (c) per-port both-conforming (PCDN-013 prose rewritten to make the per-port pairing of APBx ↔ `USART1_PCLK_HZ` ↔ BRR explicit). Resolution lands a follow-up §15 amendment that (i) rewrites PCDN-SOS-04-013's text in the 2026-05-19 ratification block above, and (ii) for options (a)/(b), schedules the migrating port's `disco_bsp` change to align with the chosen prescaler.
+
+### 2026-05-23 — SOS-07 rename ratification (Ira)
+
+The initiative rename from *Statechart-Orchestrated Scheduler* to **Statechart Orchestration System** is ratified through [`SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md). The acronym `SOS` is unchanged across this phase doc family; all in-text references continue to read as `SOS` for cross-doc citation stability.
+
+Cross-phase invariants INV-SOS-A through H + the AuthorityRelationship matrix promote from informative roadmap text (`SOS-ROADMAP-07-PLUS.md`) to normative phase content in SOS-07. They cite by ID into SOS-04's normative sections without modifying any of SOS-04's frozen content.
+
+Bootstrap-vs-general framing (SOS-07 §8): the kernel chart `rtos_kernel.scxml` is reframed as the v1 demonstration the methodology generalises from, not "the chart". The bench-validated state recorded across SOS-04's prior amendments carries forward unchanged.
+
+No frozen-enum value modified. No PCDN re-ratified. No port-spec impact.
