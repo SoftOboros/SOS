@@ -20,6 +20,12 @@ fully except event ingress/egress wiring via `sos_message_channel`
 @spec  PCDN-C-004 (guard depth budget = 8 chained operators)
 @spec  PCDN-C-005 (chart annotation wins for encoding)
 @spec  PCDN-C-006 (document-order priority lint rule)
+@spec  PCDN-SOS-08-C-wave2-wrapper-shape (2026-05-23 walkthrough resolution):
+       canonical region_modules shape for emit_chart_top_wrapper —
+       {name, module, clock_domain, datamodel_signals, state_width}.
+@spec  PCDN-SOS-08-C-wave2-region-naming (2026-05-23 walkthrough Q1):
+       region modules carry `_fsm` suffix on BOTH dialects (VHDL aligns
+       with SV's existing convention).
 
 # Wave-2 scope (per the orchestrator's wave-2 prompt)
 
@@ -757,11 +763,18 @@ def _safe_ident(raw: str) -> str:
 
 def _entity_name(chart_name: str, region_name: Optional[str] = None) -> str:
     """VHDL identifier rule.  For single-region charts: `<chart>_fsm`.
-    For a region inside a <parallel> chart: `<chart>_region_<region>`."""
+    For a region inside a <parallel> chart: `<chart>_region_<region>_fsm`.
+
+    Per the 2026-05-23 SOS-08-C wave-2 PCDN walkthrough Q1 resolution
+    (`PCDN-SOS-08-C-wave2-region-naming`), region modules carry the
+    `_fsm` suffix on BOTH dialects so the chart-top wrapper instantiates
+    matching identifiers across VHDL and SV. The pre-walkthrough VHDL
+    walker omitted the suffix; the walkthrough pinned it to align with
+    the SV walker's existing convention."""
     base = _safe_ident(chart_name)
     if region_name is None or region_name == chart_name:
         return f"{base}_fsm"
-    return f"{base}_region_{_safe_ident(region_name)}"
+    return f"{base}_region_{_safe_ident(region_name)}_fsm"
 
 
 def _state_constant_name(state_id: str) -> str:
@@ -1116,33 +1129,66 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
 
     if _hdl_emit_chart_top_wrapper is not None:
         try:
-            region_modules = [
-                {
-                    "name": _entity_name(chart.name, r.name),
-                    "region_name": r.name,
-                    "clock_domain": r.clock_domain,
-                    "datamodel": [
-                        {"name": d.name, "scxml_type": d.scxml_type}
-                        for d in r.datamodel
-                    ],
-                    "n_states": len(r.states),
-                }
-                for r in chart.regions
-            ]
+            # Wave-2 canonical region_modules shape per the 2026-05-23
+            # SOS-08-C PCDN walkthrough resolution
+            # (`PCDN-SOS-08-C-wave2-wrapper-shape`,
+            # `PCDN-SOS-08-C-wave2-region-naming`). Each entry carries
+            # `name` (unqualified region id), `module` (full HDL module
+            # name w/ `_fsm` suffix), `clock_domain`, `datamodel_signals`
+            # (per-signal direction inferred from region.writes/reads),
+            # and `state_width`.
+            region_modules = []
+            for r in chart.regions:
+                writes_set = set(r.writes)
+                reads_set = set(r.reads)
+                signals: list[dict[str, Any]] = []
+                # Include this region's locally-declared datamodel plus
+                # any chart-shared datamodel signal the region touches.
+                local_names = {d.name for d in r.datamodel}
+                dm_seen: set[str] = set()
+                # Iterate region-local + chart-shared datamodel; deduplicate
+                # by chart-side signal name. Direction: 'out' if the region
+                # writes the signal, else 'in'.
+                candidates: list[HdlDatamodelSignal] = list(r.datamodel)
+                for d_shared in chart.shared_datamodel:
+                    if d_shared.name in local_names:
+                        continue
+                    if d_shared.name in writes_set or d_shared.name in reads_set:
+                        candidates.append(d_shared)
+                for d in candidates:
+                    if d.name in dm_seen:
+                        continue
+                    dm_seen.add(d.name)
+                    width = _resolve_port_width(d.scxml_type, d.name)
+                    direction = "out" if d.name in writes_set else "in"
+                    signals.append(
+                        {
+                            "name": f"data_{d.name}",
+                            "width": width,
+                            "direction": direction,
+                        }
+                    )
+                region_modules.append(
+                    {
+                        "name": _safe_ident(r.name),
+                        "module": _entity_name(chart.name, r.name),
+                        "clock_domain": r.clock_domain or "main",
+                        "datamodel_signals": signals,
+                        "state_width": len(r.states),
+                    }
+                )
             cross_domain_signals = [
                 {
-                    "name": sig,
-                    "writer": writer,
-                    "reader": reader,
-                    "src_clock": src_clk,
-                    "dst_clock": dst_clk,
+                    "name": f"data_{sig}",
+                    "src_region": _safe_ident(writer),
+                    "dst_region": _safe_ident(reader),
                     "width": width,
                 }
                 for (sig, writer, reader, src_clk, dst_clk, width)
                 in chart.cross_domain_signals
             ]
             return _hdl_emit_chart_top_wrapper(
-                chart_name=chart.name,
+                chart_name=_safe_ident(chart.name),
                 region_modules=region_modules,
                 cross_domain_signals=cross_domain_signals,
                 dialect=Dialect.VHDL,

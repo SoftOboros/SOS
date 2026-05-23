@@ -1539,47 +1539,62 @@ def emit_chart_top_wrapper(
 ) -> str:
     """Emit the chart-top wrapper per SOS-08-C §6.10.
 
-    The wrapper instantiates one ``sos_region_<id>`` per region in the
-    chart's region tree, deduplicates clock + reset ports across
-    regions sharing a domain (PCDN-C-001 / inherit-from-parent), and
-    instantiates one :func:`emit_sync_inst` per cross-domain edge
-    (PCDN-C-002 / retain_synchronizers — synchronizers stay regardless
-    of ``--verified-strip`` reachability).
+    Wave-2 canonical region-module shape (per the 2026-05-23 SOS-08-C
+    PCDN walkthrough resolution `PCDN-SOS-08-C-wave2-wrapper-shape` and
+    `PCDN-SOS-08-C-wave2-region-naming`):
 
-    Parameters
-    ----------
-    chart_name : str
-        The chart's name; used to derive the wrapper module name
-        (``<chart_name>_top``).
-    region_modules : list[dict]
-        One entry per region in the region tree. Each entry MUST carry
-        at least ``"name"`` (the region id, used for the instance name
-        + the module name ``sos_region_<name>``), ``"clock"`` (the
-        clock-domain name), ``"reset"`` (the reset signal name), and
-        ``"ports"`` (a list of :class:`HdlPort` objects that the region
-        FSM module exposes; the wrapper hoists these to its boundary).
-    cross_domain_signals : list[dict]
-        One entry per cross-domain edge in the chart's ``cdc-audit.json``
-        artifact. Each entry MUST carry ``"name"`` (the chart-side
-        signal name), ``"src_region"`` (the source region's id; this
-        wrapper consults the matching ``region_modules`` entry for its
-        clock + reset), ``"dst_region"`` (the destination region's id),
-        and ``"width"`` (the bit-width). Optional ``"stages"`` overrides
-        the default of 2 (SOS-08-A §6.9 / §15 wave-2 default).
-    dialect : Dialect
-        Output HDL dialect.
+    Each entry in ``region_modules`` is a dict with the following keys:
 
-    Returns
-    -------
-    str
-        Multi-line wrapper module declaration. The wrapper exposes the
-        union of all region-FSM ports at its top boundary; clock /
-        reset signals are deduplicated (one input per distinct domain).
+      * ``name`` (str) — the region's unqualified id (e.g. ``region_a``),
+        used to derive the instance name (``u_region_<name>``) and the
+        per-region observability output ``current_state_<name>``.
+      * ``module`` (str) — the full HDL module/entity name to instantiate
+        (e.g. ``<chart>_region_<name>_fsm``). Per the 2026-05-23 PCDN Q1
+        resolution, region modules carry the ``_fsm`` suffix on BOTH
+        dialects.
+      * ``clock_domain`` (str) — the clock-domain identifier (e.g.
+        ``main`` / ``clk_fast``). Wrapper emits one ``clk_<dom>`` +
+        ``rst_<dom>`` port per distinct domain (PCDN-C-001
+        inherit-from-parent).
+      * ``datamodel_signals`` (list[dict]) — per-signal records of shape
+        ``{"name": <str>, "width": <int>, "direction": "in"|"out"}``.
+        ``direction`` is from the region's perspective: ``"out"``
+        signals become wrapper outputs (named ``<region>_<signal>``
+        when colliding across regions, else ``<signal>``); ``"in"``
+        signals become wrapper inputs.
+      * ``state_width`` (int) — width of the region's one-hot state
+        vector (= number of states in that region); drives the
+        ``current_state_<region>`` output port width.
+
+    The wrapper:
+      * Deduplicates ``clock_domain`` values; emits ``clk_<dom>`` +
+        ``rst_<dom>`` once per distinct domain (PCDN-C-001).
+      * Hoists each region's ``datamodel_signals`` to the wrapper
+        boundary; collisions disambiguate via ``<region>_<signal>``.
+      * Instantiates each region's module (``<module> u_region_<name>``).
+      * For each cross-domain signal in ``cross_domain_signals``,
+        instantiates :func:`emit_sync_inst` (PCDN-C-002 retain
+        regardless of ``--verified-strip`` reachability).
+      * Adds one ``current_state_<region>`` observability output per
+        region (INV-S-HDL-C-2).
+
+    ``cross_domain_signals`` retains the existing wave-2 shape:
+    ``{"name", "src_region", "dst_region", "width", "stages"?}`` where
+    ``stages`` defaults to 2 (SOS-08-A §15 wave-2 default).
+
+    Backward compatibility (wave-1 / wave-2 in-flight callers):
+    the older region-module shape ``{name, clock, reset, ports}`` is
+    still accepted; calls passing that shape route through the legacy
+    rendering path and emit a :class:`DeprecationWarning`. Detection
+    keys on ``"module"`` (new shape) vs ``"clock"`` (old shape).
 
     Cites: SOS-08-C §6.10 (chart-top wrapper emission); §6.7 (per-
-    region clock annotation); PCDN-SOS-08-C-001 (inherit-from-parent
-    default); PCDN-SOS-08-C-002 (retain_synchronizers); INV-S-HDL-C-3
-    (cross-domain transition enforcement).
+    region clock annotation); §15 wave-2 ratification
+    (`PCDN-SOS-08-C-wave2-wrapper-shape`,
+    `PCDN-SOS-08-C-wave2-region-naming`); PCDN-SOS-08-C-001
+    (inherit-from-parent default); PCDN-SOS-08-C-002
+    (retain_synchronizers); INV-S-HDL-C-3 (cross-domain transition
+    enforcement); INV-S-HDL-C-2 (per-region observability).
     """
     if dialect not in (Dialect.VHDL, Dialect.SV):
         raise ValueError(f"emit_chart_top_wrapper: unsupported dialect {dialect!r}")
@@ -1590,8 +1605,161 @@ def emit_chart_top_wrapper(
             "emit_chart_top_wrapper: region_modules must be a non-empty list"
         )
 
-    # ---- Deduplicate clock + reset domains across regions. ----
+    # ---- Shape detection: new wave-2 PCDN walkthrough shape vs legacy. ----
+    # New shape carries `module` per entry. Legacy carries `clock`.
+    new_shape_entries = [bool("module" in rm) for rm in region_modules]
+    if all(new_shape_entries):
+        return _emit_chart_top_wrapper_new(
+            chart_name, region_modules, cross_domain_signals, dialect
+        )
+    if not any(new_shape_entries):
+        warnings.warn(
+            "emit_chart_top_wrapper: the {name,clock,reset,ports} region_modules "
+            "shape is deprecated; migrate to "
+            "{name, module, clock_domain, datamodel_signals, state_width} per "
+            "PCDN-SOS-08-C-wave2-wrapper-shape (2026-05-23). Legacy shape will "
+            "be removed in wave-3.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _emit_chart_top_wrapper_legacy(
+            chart_name, region_modules, cross_domain_signals, dialect
+        )
+    raise ValueError(
+        "emit_chart_top_wrapper: region_modules entries mix the new "
+        "(`module` key) and legacy (`clock` key) shapes; all entries must "
+        "follow the same shape within a single call."
+    )
+
+
+def _emit_chart_top_wrapper_new(
+    chart_name: str,
+    region_modules: list[dict],
+    cross_domain_signals: list[dict],
+    dialect: Dialect,
+) -> str:
+    """New wave-2 canonical shape realisation
+    (`PCDN-SOS-08-C-wave2-wrapper-shape`).
+    """
+    # ---- Validate entries + index by region name. ----
+    region_index: dict[str, dict] = {}
+    for rm in region_modules:
+        for required in ("name", "module", "clock_domain", "datamodel_signals",
+                         "state_width"):
+            if required not in rm:
+                raise ValueError(
+                    f"emit_chart_top_wrapper: region_modules entry missing "
+                    f"required key {required!r}: {rm!r}"
+                )
+        if not isinstance(rm["datamodel_signals"], list):
+            raise TypeError(
+                f"emit_chart_top_wrapper: region {rm['name']!r} "
+                f"datamodel_signals must be list[dict]; got "
+                f"{type(rm['datamodel_signals']).__name__}"
+            )
+        if not isinstance(rm["state_width"], int) or rm["state_width"] < 1:
+            raise ValueError(
+                f"emit_chart_top_wrapper: region {rm['name']!r} state_width "
+                f"must be a positive int; got {rm['state_width']!r}"
+            )
+        region_index[rm["name"]] = rm
+
+    # ---- Deduplicate clock domains; emit clk_<dom>/rst_<dom> per domain. ----
     # Determinism per INV-S-HDL-C-1: preserve first-seen order.
+    clock_order: list[str] = []
+    for rm in region_modules:
+        dom = rm["clock_domain"]
+        if dom not in clock_order:
+            clock_order.append(dom)
+
+    top_name = f"{chart_name}_top"
+
+    # ---- Resolve datamodel-signal collisions across regions. ----
+    # If two regions expose a signal with the same name, the wrapper
+    # disambiguates by prefixing the region name. Per-region records
+    # carry the resolved wrapper-side port name.
+    signal_owners: dict[str, list[str]] = {}
+    for rm in region_modules:
+        for sig in rm["datamodel_signals"]:
+            if "name" not in sig or "width" not in sig or "direction" not in sig:
+                raise ValueError(
+                    f"emit_chart_top_wrapper: region {rm['name']!r} "
+                    f"datamodel_signals entry missing name/width/direction: "
+                    f"{sig!r}"
+                )
+            if sig["direction"] not in ("in", "out"):
+                raise ValueError(
+                    f"emit_chart_top_wrapper: region {rm['name']!r} signal "
+                    f"{sig['name']!r} direction must be 'in' or 'out'; got "
+                    f"{sig['direction']!r}"
+                )
+            signal_owners.setdefault(sig["name"], []).append(rm["name"])
+
+    def _wrapper_port_name(region_name: str, sig_name: str) -> str:
+        # Single owner per signal name → use bare signal name.
+        # Multiple owners → prefix with region name to disambiguate.
+        owners = signal_owners.get(sig_name, [])
+        if len(owners) <= 1:
+            return sig_name
+        return f"{region_name}_{sig_name}"
+
+    # ---- Build the top-boundary port list. ----
+    # Order (deterministic per INV-S-HDL-C-1):
+    #   1. clk_<dom> per distinct domain.
+    #   2. rst_<dom> per distinct domain.
+    #   3. Per-region datamodel signals (in region iteration order).
+    #   4. Per-region current_state_<name> observability outputs.
+    boundary_ports: list[HdlPort] = []
+    for dom in clock_order:
+        boundary_ports.append(HdlPort(name=f"clk_{dom}", direction="in", width=1))
+    for dom in clock_order:
+        boundary_ports.append(HdlPort(name=f"rst_{dom}", direction="in", width=1))
+    seen_port_names: set[str] = {p.name for p in boundary_ports}
+    for rm in region_modules:
+        for sig in rm["datamodel_signals"]:
+            port_name = _wrapper_port_name(rm["name"], sig["name"])
+            if port_name in seen_port_names:
+                continue
+            seen_port_names.add(port_name)
+            boundary_ports.append(
+                HdlPort(
+                    name=port_name,
+                    direction=sig["direction"],
+                    width=int(sig["width"]),
+                )
+            )
+    for rm in region_modules:
+        boundary_ports.append(
+            HdlPort(
+                name=f"current_state_{rm['name']}",
+                direction="out",
+                width=int(rm["state_width"]),
+            )
+        )
+
+    # ---- Emit per dialect. ----
+    if dialect is Dialect.VHDL:
+        return _emit_chart_top_wrapper_vhdl_new(
+            top_name, boundary_ports, region_modules,
+            cross_domain_signals, region_index, clock_order,
+            _wrapper_port_name,
+        )
+    return _emit_chart_top_wrapper_sv_new(
+        top_name, boundary_ports, region_modules,
+        cross_domain_signals, region_index, clock_order,
+        _wrapper_port_name,
+    )
+
+
+def _emit_chart_top_wrapper_legacy(
+    chart_name: str,
+    region_modules: list[dict],
+    cross_domain_signals: list[dict],
+    dialect: Dialect,
+) -> str:
+    """Legacy {name,clock,reset,ports} realisation. Retained for
+    backward compat with wave-1 / in-flight wave-2 callers; will be
+    removed in wave-3 per the 2026-05-23 PCDN walkthrough."""
     clock_order: list[str] = []
     reset_order: list[str] = []
     region_index: dict[str, dict] = {}
@@ -1609,10 +1777,6 @@ def emit_chart_top_wrapper(
 
     top_name = f"{chart_name}_top"
 
-    # ---- Build the top-boundary port list. ----
-    # Order: clocks, resets, then the union of each region's non-clock/
-    # non-reset ports preserving region order. Deduplicate by name so a
-    # cross-region shared signal (e.g. a shared `tick`) appears once.
     seen_port_names: set[str] = set(clock_order) | set(reset_order)
     boundary_ports: list[HdlPort] = []
     for ck in clock_order:
@@ -1632,7 +1796,6 @@ def emit_chart_top_wrapper(
             seen_port_names.add(p.name)
             boundary_ports.append(p)
 
-    # ---- Emit. ----
     if dialect is Dialect.VHDL:
         return _emit_chart_top_wrapper_vhdl(
             top_name, boundary_ports, region_modules,
@@ -1642,6 +1805,186 @@ def emit_chart_top_wrapper(
         top_name, boundary_ports, region_modules,
         cross_domain_signals, region_index,
     )
+
+
+def _emit_chart_top_wrapper_vhdl_new(
+    top_name: str,
+    boundary_ports: list[HdlPort],
+    region_modules: list[dict],
+    cross_domain_signals: list[dict],
+    region_index: dict[str, dict],
+    clock_order: list[str],
+    wrapper_port_name,
+) -> str:
+    """VHDL realisation of the new wave-2 wrapper shape
+    (`PCDN-SOS-08-C-wave2-wrapper-shape`)."""
+    lines: list[str] = []
+    # Header comment per SOS-08-C §6.10 + §15 wave-2 ratification.
+    lines.append(
+        "-- SOS-08-C §6.10 chart-top wrapper "
+        "(PCDN-SOS-08-C-wave2-wrapper-shape, 2026-05-23)."
+    )
+    lines.append(
+        "-- PCDN-C-001: clock-domain inherit-from-parent (one clk_<dom>/"
+        "rst_<dom> per domain)."
+    )
+    lines.append(
+        "-- PCDN-C-002: synchronizers retained regardless of "
+        "--verified-strip."
+    )
+    lines.append("library ieee;")
+    lines.append("use ieee.std_logic_1164.all;")
+    lines.append("")
+    lines.append(f"entity {top_name} is")
+    lines.append("    port (")
+    rendered = [emit_port_decl(p, Dialect.VHDL) for p in boundary_ports]
+    for i, pl in enumerate(rendered):
+        suffix = ";" if i < len(rendered) - 1 else ""
+        lines.append(f"        {pl}{suffix}")
+    lines.append("    );")
+    lines.append(f"end entity {top_name};")
+    lines.append("")
+    lines.append(f"architecture rtl of {top_name} is")
+    # Declare cross-domain wires (one wire per CDC edge, in dst domain).
+    for cd in cross_domain_signals:
+        w = int(cd.get("width", 1))
+        name = cd["name"]
+        if w == 1:
+            lines.append(f"    signal {name}_sync : std_logic;")
+        else:
+            lines.append(
+                f"    signal {name}_sync : std_logic_vector({w - 1} downto 0);"
+            )
+    lines.append("begin")
+    # Synchronizer instances per PCDN-C-002.
+    for i, cd in enumerate(cross_domain_signals):
+        src_id = cd["src_region"]
+        dst_id = cd["dst_region"]
+        src_rm = region_index.get(src_id)
+        dst_rm = region_index.get(dst_id)
+        if src_rm is None or dst_rm is None:
+            raise ValueError(
+                f"emit_chart_top_wrapper: cross_domain_signals[{i}] references "
+                f"unknown region(s): src={src_id!r} dst={dst_id!r}"
+            )
+        lines.append(
+            emit_sync_inst(
+                inst_name=f"u_sync_{cd['name']}",
+                src_signal=cd["name"],
+                dst_signal=f"{cd['name']}_sync",
+                src_clk=f"clk_{src_rm['clock_domain']}",
+                dst_clk=f"clk_{dst_rm['clock_domain']}",
+                dst_rst=f"rst_{dst_rm['clock_domain']}",
+                width=int(cd.get("width", 1)),
+                stages=int(cd.get("stages", 2)),
+                dialect=Dialect.VHDL,
+            )
+        )
+    # Region instances.
+    for rm in region_modules:
+        inst = f"u_region_{rm['name']}"
+        dom = rm["clock_domain"]
+        lines.append(f"    {inst} : entity work.{rm['module']}")
+        lines.append("        port map (")
+        port_lines: list[str] = []
+        port_lines.append(f"clk => clk_{dom}")
+        port_lines.append(f"rst => rst_{dom}")
+        for sig in rm["datamodel_signals"]:
+            wrapper_side = wrapper_port_name(rm["name"], sig["name"])
+            port_lines.append(f"{sig['name']} => {wrapper_side}")
+        port_lines.append(
+            f"current_state => current_state_{rm['name']}"
+        )
+        for j, pl in enumerate(port_lines):
+            suffix = "," if j < len(port_lines) - 1 else ""
+            lines.append(f"            {pl}{suffix}")
+        lines.append("        );")
+    lines.append("end architecture rtl;")
+    return "\n".join(lines)
+
+
+def _emit_chart_top_wrapper_sv_new(
+    top_name: str,
+    boundary_ports: list[HdlPort],
+    region_modules: list[dict],
+    cross_domain_signals: list[dict],
+    region_index: dict[str, dict],
+    clock_order: list[str],
+    wrapper_port_name,
+) -> str:
+    """SystemVerilog realisation of the new wave-2 wrapper shape
+    (`PCDN-SOS-08-C-wave2-wrapper-shape`)."""
+    lines: list[str] = []
+    lines.append(
+        "// SOS-08-C §6.10 chart-top wrapper "
+        "(PCDN-SOS-08-C-wave2-wrapper-shape, 2026-05-23)."
+    )
+    lines.append(
+        "// PCDN-C-001: clock-domain inherit-from-parent (one clk_<dom>/"
+        "rst_<dom> per domain)."
+    )
+    lines.append(
+        "// PCDN-C-002: synchronizers retained regardless of "
+        "--verified-strip."
+    )
+    lines.append(f"module {top_name} (")
+    rendered = [emit_port_decl(p, Dialect.SV) for p in boundary_ports]
+    for i, pl in enumerate(rendered):
+        suffix = "," if i < len(rendered) - 1 else ""
+        lines.append(f"    {pl}{suffix}")
+    lines.append(");")
+    # Cross-domain wires.
+    for cd in cross_domain_signals:
+        w = int(cd.get("width", 1))
+        name = cd["name"]
+        if w == 1:
+            lines.append(f"    logic {name}_sync;")
+        else:
+            lines.append(f"    logic [{w - 1}:0] {name}_sync;")
+    # Synchronizer instances per PCDN-C-002.
+    for i, cd in enumerate(cross_domain_signals):
+        src_id = cd["src_region"]
+        dst_id = cd["dst_region"]
+        src_rm = region_index.get(src_id)
+        dst_rm = region_index.get(dst_id)
+        if src_rm is None or dst_rm is None:
+            raise ValueError(
+                f"emit_chart_top_wrapper: cross_domain_signals[{i}] references "
+                f"unknown region(s): src={src_id!r} dst={dst_id!r}"
+            )
+        lines.append(
+            emit_sync_inst(
+                inst_name=f"u_sync_{cd['name']}",
+                src_signal=cd["name"],
+                dst_signal=f"{cd['name']}_sync",
+                src_clk=f"clk_{src_rm['clock_domain']}",
+                dst_clk=f"clk_{dst_rm['clock_domain']}",
+                dst_rst=f"rst_{dst_rm['clock_domain']}",
+                width=int(cd.get("width", 1)),
+                stages=int(cd.get("stages", 2)),
+                dialect=Dialect.SV,
+            )
+        )
+    # Region instances.
+    for rm in region_modules:
+        inst = f"u_region_{rm['name']}"
+        dom = rm["clock_domain"]
+        lines.append(f"    {rm['module']} {inst} (")
+        port_lines: list[str] = []
+        port_lines.append(f".clk(clk_{dom})")
+        port_lines.append(f".rst(rst_{dom})")
+        for sig in rm["datamodel_signals"]:
+            wrapper_side = wrapper_port_name(rm["name"], sig["name"])
+            port_lines.append(f".{sig['name']}({wrapper_side})")
+        port_lines.append(
+            f".current_state(current_state_{rm['name']})"
+        )
+        for j, pl in enumerate(port_lines):
+            suffix = "," if j < len(port_lines) - 1 else ""
+            lines.append(f"        {pl}{suffix}")
+        lines.append("    );")
+    lines.append("endmodule")
+    return "\n".join(lines)
 
 
 def _emit_chart_top_wrapper_vhdl(

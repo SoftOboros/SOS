@@ -444,8 +444,8 @@ def test_parallel_regions_rejected_at_v1_scaffold():
     files = render_target(chart, {"chart_name": "par"})
     # Expect one file per region + the wrapper.
     assert "par_top.vhd" in files
-    assert "par_region_left.vhd" in files
-    assert "par_region_right.vhd" in files
+    assert "par_region_left_fsm.vhd" in files
+    assert "par_region_right_fsm.vhd" in files
 
 
 def test_guarded_transition_emits_if_block():
@@ -512,13 +512,13 @@ def test_parallel_regions_emit_separate_modules():
     files = render_target(chart, {"chart_name": "par"})
     assert len(files) == 3
     assert "par_top.vhd" in files
-    assert "par_region_left.vhd" in files
-    assert "par_region_right.vhd" in files
+    assert "par_region_left_fsm.vhd" in files
+    assert "par_region_right_fsm.vhd" in files
     # Each region module is a complete VHDL file.
     for region_name in ("left", "right"):
-        body = files[f"par_region_{region_name}.vhd"]
+        body = files[f"par_region_{region_name}_fsm.vhd"]
         assert "library ieee;" in body
-        assert f"entity par_region_{region_name} is" in body
+        assert f"entity par_region_{region_name}_fsm is" in body
         assert "architecture rtl of" in body
 
 
@@ -531,9 +531,10 @@ def test_chart_top_wrapper_instantiates_regions():
     # The wrapper is a VHDL entity + architecture.
     assert "entity par_top is" in wrapper
     assert "architecture rtl of par_top" in wrapper
-    # Each region is instantiated via `entity work.<chart>_region_<name>`.
-    assert "entity work.par_region_left" in wrapper
-    assert "entity work.par_region_right" in wrapper
+    # Each region is instantiated via `entity work.<chart>_region_<name>_fsm`
+    # (PCDN-SOS-08-C-wave2-region-naming, 2026-05-23 walkthrough Q1).
+    assert "entity work.par_region_left_fsm" in wrapper
+    assert "entity work.par_region_right_fsm" in wrapper
 
 
 def test_cross_domain_signal_gets_synchronizer():
