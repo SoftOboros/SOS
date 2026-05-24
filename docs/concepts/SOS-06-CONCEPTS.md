@@ -1280,3 +1280,62 @@ Cross-phase invariants INV-SOS-A through H + the AuthorityRelationship matrix pr
 Bootstrap-vs-general framing (SOS-07 §8): the kernel chart `rtos_kernel.scxml` is reframed as the v1 demonstration the methodology generalises from, not "the chart". The bench-validated state recorded across SOS-06's prior amendments carries forward unchanged.
 
 No frozen-enum value modified. No PCDN re-ratified. No port-spec impact.
+
+### 2026-05-23 — Amendment 006: HDL-target metric extension (Ira)
+
+This amendment satisfies [SOS-08][sos-08] umbrella §10 ("A SOS-06 §15 amendment co-lands when SOS-08-A ratifies, recording the HDL-target metric extension") and the [SOS-08 umbrella §12 acceptance gate (g)][sos-08-gates] at the paper level. SOS-08-A ratified 2026-05-23; this amendment closes the co-landing commitment retroactively. Numerical readings against the extended metric set wait for the gate (e) Lattice ECP5 bench session per [`SOS-08-WAVE1-CONFORMANCE.md`][sos-08-conformance] §3.
+
+[sos-08]: ./SOS-08-CONCEPTS.md
+[sos-08-gates]: ./SOS-08-CONCEPTS.md#12-acceptance-checklist
+[sos-08-conformance]: ./SOS-08-WAVE1-CONFORMANCE.md
+[sos-08-a]: ./SOS-08-A-CONCEPTS.md
+
+#### Scope
+
+The seven SOS-06 metrics from §6.2 (`FunctionalConformance`, `BinarySize`, `RamFootprint`, `MacrostepCycleCount`, `BuildTime`, `SourceLineCount`, `Auditability`) translate to HDL targets via the per-metric mappings below. The `EvaluationMetric` enum's frozen values are unchanged — the HDL extension layers naming + measurement procedure changes on top of the existing enum, NOT a re-enumeration.
+
+This amendment is **paper-only**. No code changes; no measurement infrastructure added at this commit. The translations frozen here become operational when the first SOS-08 HDL-target evaluation amendment runs against bench-flashed RTL.
+
+#### Per-metric HDL translation
+
+| SOS-06 metric (software target) | HDL-target translation | Severity | Threshold rule |
+|---|---|---|---|
+| `FunctionalConformance` (§6.2.1) | **Unchanged.** The conformance oracle is the chart-derived bounded-reachability vector set per [SOS-03][sos-03]; the same vectors drive both software ports and HDL targets via [SOS-08-D / SOS-08-E / SOS-08-F][sos-08-d] emitter chains. Pass/fail is the JUnit XML verdict from cocotb + SVA bind file evaluation. | `Blocker` | Any non-pass ⇒ verdict is `NotYetSuitable`. |
+| `BinarySize` (§6.2.2) | **`AreaFootprint`.** Replace flash-image byte count with synthesised area footprint at the target part. Three sub-numbers reported (LUTs, FFs, BRAM blocks) — the verdict procedure uses LUT count as the primary axis; FFs + BRAM are reported informatively per chosen part's resource ceiling. Vendor-tool report parsing (Yosys + nextpnr for Lattice ECP5 + iCE40; Vivado utilisation report for AMD/Xilinx; Quartus fit_summary for Intel/Altera; Diamond log for Lattice MachXO once supported per PCDN-SOS-08-006). | `Concern` | `(generated_LUTs / baseline_LUTs) ≤ 1.5x` ⇒ no constraint. `(1.5x, 2x]` ⇒ at most `Coexist`. `> 2x` ⇒ `NotYetSuitable`. Matches software-target's 1.5x/2x thresholds. |
+| `RamFootprint` (§6.2.3) | **`StaticAllocationFootprint`.** Replace `.bss + .data + stack` byte count with register count + BRAM-block count at synthesis. Per [INV-S-HDL-2][inv-s-hdl-2] (no dynamic allocation in any SOS-08 emission) the count is exhaustive — there is no equivalent of "heap" to exclude. The two sub-numbers are reported separately (registers vs BRAM blocks); the verdict uses the BRAM-block axis as primary (BRAM is the binding resource on small parts; register pressure usually clears before BRAM does on the L1/L2 scale [SOS-08-A][sos-08-a]/[SOS-08-B][sos-08-b] target). | `Concern` | Same 1.5x / 2x thresholds as `AreaFootprint`. |
+| `MacrostepCycleCount` (§6.2.4) | **`MacrostepClockCount`.** Replace DWT ARM cycle counts with simulator clock cycles between event entry and chart quiescence. Measured via cocotb test harness (per [SOS-08-D][sos-08-d]) — read the simulator's `$time` (or cocotb `RisingEdge` counter) before the event injection and at the quiescence cycle; record the difference. Same 100-run median methodology as the software target — ISR interleaving has no analog in HDL but simulator noise (e.g. randomised initial-state seeds when `SOS_TEST_SEED=random` for stress mode) justifies the same robustness. The representative macrostep is the same chart vector per [PCDN-SOS-06-003][pcdn-sos-06-003] resolution (`task.yield` 8-task round-robin). | `Concern` | Same 1.5x / 2x thresholds. |
+| `BuildTime` (§6.2.5) | **Unchanged metric name** with a substantially different measurement procedure. From a clean state, measure wall-clock seconds for the full **synth + place + route** flow against the target part (`yosys` + `nextpnr-ecp5` / `nextpnr-ice40` for the open-source path per [PCDN-SOS-08-006][pcdn-sos-08-006] ECP5-first resolution; vendor `vivado` / `quartus` / `diamond` for the commercial parts when present). Include codegen time IF the chart-compile invocation is part of the build script; do NOT include it if codegen is a manual pre-step (in which case it lands as a separate `CodegenTime` sub-metric, informatively — same convention as the software-target's amendment 001 onwards). | `Informative` | None. Build time is host-hardware-dependent + scales with toolchain maturity, same rationale as the software-target case. |
+| `SourceLineCount` (§6.2.6) | **Unchanged metric name** with a per-dialect count: VHDL-2008 (`.vhd` files) + SystemVerilog-2017 (`.sv` files) counted separately via `tokei` or equivalent. Include the chart-emitted FSM modules + the SVA bind file + the SOS-08-A L0 / SOS-08-B L1 RTL primitives the chart instantiates. Exclude generated waveform overlays (`.fst`, `.vcd`, `.annotations.jsonl`), simulator output, and build artefacts — same exclusion discipline as the software-target case. | `Informative` | None. |
+| `Auditability` (§6.2.7) | **Unchanged metric name** with a chart-vocabulary-shaped checklist mirroring the software-target shape. The reviewer questions become: (a) Is the chart-FSM module's state encoding declared (per [SOS-08-C §5.1][sos-08-c-encoding] PCDN-SOS-08-002 one-hot default)? (b) Are SVA `assert property` clauses per chart-derived invariant present in the bind file (per [INV-S-HDL-D-4][inv-s-hdl-d-4])? (c) Do `$fatal` failure messages render in chart vocabulary (per [INV-S-HDL-D-5][inv-s-hdl-d-5] + INV-S-HDL-E-4 + INV-S-HDL-F-3)? (d) Is the chart-top wrapper's per-region observability documented (per SOS-08-C §6.10)? Same yes/no scoring as the software case; PCDN-SOS-06-004's structured-checklist default applies. | `Concern` | Same per-yes-question scoring + threshold rules as the software case. |
+
+[sos-03]: ./SOS-03-CONCEPTS.md
+[sos-08-c-encoding]: ./SOS-08-C-CONCEPTS.md
+[sos-08-b]: ./SOS-08-B-CONCEPTS.md
+[sos-08-d]: ./SOS-08-D-CONCEPTS.md
+[inv-s-hdl-2]: ./SOS-08-CONCEPTS.md
+[inv-s-hdl-d-4]: ./SOS-08-D-CONCEPTS.md
+[inv-s-hdl-d-5]: ./SOS-08-D-CONCEPTS.md
+[pcdn-sos-06-003]: #623-ramfootprint
+[pcdn-sos-08-006]: ./SOS-08-CONCEPTS.md
+
+#### What does NOT change
+
+- The `EvaluationMetric` frozen enum values (§5.1) are unchanged. The HDL extension renames two metrics in measurement procedure (`BinarySize` → `AreaFootprint`; `RamFootprint` → `StaticAllocationFootprint`) and rebinds one (`MacrostepCycleCount` → `MacrostepClockCount`) at the per-target level — the enum continues to carry the canonical names for spec citation; per-target amendments record which canonical name they're measuring against and which translation rule applies.
+- The `SuitabilityVerdict` frozen enum (§5.2: `Blocker` / `Concern` / `Coexist` / `CanonicalReplacement` / `NotYetSuitable`) is unchanged.
+- The `Pathway` frozen enum (§5.3) is unchanged. HDL targets layer onto the same pathway shape; the per-HDL pathway populates VHDL or SystemVerilog source roots under the same `Coexist` / `CanonicalReplacement` discipline.
+- The threshold ratios (1.5x / 2x) are unchanged across the three `Concern`-severity metrics that gate the verdict.
+
+#### Conformance gate
+
+This amendment satisfies:
+
+- [SOS-08 §10][sos-08] reconciliation commitment ("A SOS-06 §15 amendment co-lands when SOS-08-A ratifies") at the paper level.
+- [SOS-08 §12 acceptance gate (g)][sos-08-gates] at the paper level — see [`SOS-08-WAVE1-CONFORMANCE.md`][sos-08-conformance] for the gate-(g) status flip.
+
+The numerical first-data-point gate (e) bench session (per the conformance review's §3) is unblocked at the paper level by this amendment — the bench session can now report against the extended metric set rather than authoring it inline.
+
+#### Frozen-enum registration policy
+
+The HDL translation table above is **Specification Required** registration — adding a sixth HDL-side metric (e.g. a `Routability` metric capturing post-route timing slack) requires a phase-owner walkthrough; modifying a translation rule for an existing metric requires a §15 amendment to this doc + cross-phase review with the SOS-08 sub-phase the change touches.
+
+Status: 🟢 **paper-only ratification complete.** Gate (g) flips from ⏸ to ✅ at the paper level in the wave-1 conformance review (separate commit). Numerical readings remain ⏸ pending gate (e) bench session.

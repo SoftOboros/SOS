@@ -28,9 +28,9 @@
 | **(d)** Codegen tool HDL-emit path tested on ≥1 chart | ✅ | 45 chart→HDL tests pass (`tools/sos-codegen/tests/test_transliterate_hdl_{vhdl,sv}.py`) |
 | **(e)** Bench validation on Lattice ECP5 dev board | ⏸ | No FPGA-bench landing yet; deferred to a dedicated bench session — see §3 |
 | **(f)** INV-SOS-A..H cited in each sub-phase doc | ✅ | All eight sub-phase docs cite the invariants 4–18 times each |
-| **(g)** SOS-06 §15 amendment extending 7 metrics to HDL | ⏸ | No such amendment; [SOS-08][sos-08] §10 promised it would co-land at SOS-08-A ratification — see §3 |
+| **(g)** SOS-06 §15 amendment extending 7 metrics to HDL | ✅ paper / ⏸ numbers | [SOS-06][sos-06] §15 Amendment 006 lands the paper translation (2026-05-23); numerical readings wait for gate (e) bench session per §3 |
 
-**Conformance position:** SOS-08 umbrella satisfies first-tier conformance for everything that can be verified from the wave-1 source tree. Gates (e) and (f) are hardware-and-co-doc landing gates that ratify when the corresponding work happens; nothing in the wave-1 surface itself is non-conforming.
+**Conformance position:** SOS-08 umbrella satisfies first-tier conformance for everything that can be verified from the wave-1 source tree. Gate (e) is the remaining hardware-landing gate (Lattice ECP5 bench session); gate (g) is now half-flipped (✅ paper translation; ⏸ numerical readings from gate (e) session). Nothing in the wave-1 surface itself is non-conforming.
 
 ## 2. Sub-phase wave-1 surface (one-line status per sub-phase)
 
@@ -59,19 +59,17 @@ The umbrella's (e) gate requires running the worked-example chart through Yosys 
 
 ### Gate (g) — SOS-06 §15 amendment extending 7 metrics to HDL
 
-The umbrella's §10 reconciliation says:
+**Paper landing: ✅ as of 2026-05-23.** [SOS-06][sos-06] §15 **Amendment 006** authored — the seven-metric translation table is frozen:
 
-> A SOS-06 §15 amendment co-lands when SOS-08-A ratifies, recording the HDL-target metric extension.
+- `BinarySize.text` → **`AreaFootprint`** (LUTs + FFs + BRAM blocks; LUT count is the primary verdict axis; vendor-tool report parsing per chosen target part).
+- `RamFootprint.bss` → **`StaticAllocationFootprint`** (register + BRAM-block count; exhaustive per INV-S-HDL-2 — no heap analog).
+- `MacrostepCycleCount` → **`MacrostepClockCount`** (simulator clock cycles between event entry and chart quiescence; same 100-run median methodology).
+- `BuildTime` → **unchanged metric name**; measurement procedure becomes synth + place + route wall-clock against the target part (Yosys+nextpnr open-source path or vendor tool).
+- `FunctionalConformance`, `SourceLineCount`, `Auditability` → unchanged metric names; per-target-shaped measurement procedures.
 
-The amendment was not authored alongside [SOS-08-A][sos-08-a]'s ratification. The seven SOS-06 metrics ([SOS-06][sos-06] §6.2: `FunctionalConformance`, `BinarySize`, `RamFootprint`, `BuildTime`, `SourceLineCount`, `MacrostepCycleCount`, `Auditability`) need their HDL-target translations frozen:
+**`EvaluationMetric` enum frozen values are unchanged.** Same 1.5x / 2x verdict thresholds across the three `Concern`-severity metrics. Specification-Required registration policy applies to adding a sixth HDL-side metric.
 
-- `BinarySize.text` → `AreaFootprint` (LUTs + FFs + BRAM blocks at synthesis; per-cell counts at a chosen target part)
-- `RamFootprint.bss` → static-allocation accounting (registers + BRAM-block counts, vs unbounded)
-- `MacrostepCycleCount` → `MacrostepClockCount` (clock cycles between event entry and chart quiescence)
-- `BuildTime` → synth + place + route wall-clock at a representative target board
-- The other three metrics carry over unchanged.
-
-**Wave-2 landing plan:** Author the SOS-06 §15 amendment alongside the gate (e) bench session — the bench session produces the first numerical readings against the extended metric set, so the amendment ratifies with a concrete data point rather than as paper-only. The amendment also cites [SOS-08-A][sos-08-a]'s ratification as the trigger event (per the umbrella §10 wording, retroactively satisfied).
+**Numerical readings: ⏸ wave-2 bench session.** The paper translation unblocks the gate (e) Lattice ECP5 bench session — that session reports the first numbers against the extended metric set; this amendment defines what's being measured. Gate (g) is now half-flipped: ✅ paper, ⏸ first data point.
 
 ## 4. Cross-sub-phase invariant audit — INV-S-HDL-1..5
 
@@ -193,3 +191,11 @@ The article's "spec-to-silicon" narrative spans SOS-07 (cross-phase invariants),
 - Wave-2 candidate list consolidated across all sub-phases.
 
 Status: 🟢 **wave-1 conformance review complete**. Wave-2 work proceeds against an unambiguous spec / impl baseline.
+
+### 2026-05-23 — Gate (g) paper flip via SOS-06 §15 Amendment 006 (Ira)
+
+- [SOS-06][sos-06] §15 Amendment 006 lands the HDL-target metric extension: `AreaFootprint` (was `BinarySize`); `StaticAllocationFootprint` (was `RamFootprint`); `MacrostepClockCount` (was `MacrostepCycleCount`); `BuildTime` (synth+P&R wall-clock); `FunctionalConformance` / `SourceLineCount` / `Auditability` per-target-shaped procedures.
+- `EvaluationMetric` frozen enum values unchanged; 1.5x / 2x verdict thresholds unchanged; HDL extension is Specification-Required registration.
+- Executive-summary gate matrix: gate (g) row updated to `✅ paper / ⏸ numbers` — the paper translation is ratified; the first numerical readings land at the gate (e) bench session.
+- §3 deferred-gates entry for gate (g) rewritten to record the paper landing + the per-metric translation choices; deferral text reduced to "wave-2 bench session for first data point".
+- Conformance position updated: 5 of 7 gates fully ✅; gate (g) half-flipped; gate (e) remains ⏸.
