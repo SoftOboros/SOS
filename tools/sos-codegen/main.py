@@ -90,13 +90,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--target",
-        choices=("rust", "c", "both", "hdl-vhdl", "hdl-sv"),
+        choices=("rust", "c", "both", "hdl-vhdl", "hdl-sv", "cocotb", "sva"),
         required=True,
         help=(
             "Emission target. ``rust`` / ``c`` / ``both`` emit the SOS-04 / "
             "SOS-05 M7 ports (SOS-06-A). ``hdl-vhdl`` / ``hdl-sv`` emit the "
             "SOS-08-C Layer-2 region FSMs against the SOS-08-A / SOS-08-B "
-            "L0/L1 substrate (ratified 2026-05-23, SOS-08-C §15)."
+            "L0/L1 substrate (ratified 2026-05-23, SOS-08-C §15). "
+            "``cocotb`` / ``sva`` emit the SOS-08-D primary vector path "
+            "(cocotb testbench + SVA bind file) — ratified 2026-05-23, "
+            "SOS-08-D §15. See SOS-08-D §6.1 for the emitted directory "
+            "layout."
         ),
     )
     p.add_argument(
@@ -208,7 +212,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def validate_args(args: argparse.Namespace) -> None:
     """Validate --out vs --target consistency. Exits with code 3 on mismatch."""
-    if args.target in ("rust", "c", "hdl-vhdl", "hdl-sv"):
+    if args.target in ("rust", "c", "hdl-vhdl", "hdl-sv", "cocotb", "sva"):
         if args.out is None and not args.dry_run:
             sys.stderr.write(
                 f"sos-codegen: --target={args.target} requires --out=PATH "
@@ -381,6 +385,77 @@ def _render_hdl_target(
     raise ValueError(f"_render_hdl_target: unsupported target {target!r}")
 
 
+def _render_cocotb_target(
+    ast: ChartAst,
+    config: dict,
+) -> dict[str, str]:
+    """Dispatch SOS-08-D cocotb vector-path emission to the sibling walker.
+
+    The sibling module (`transliterate_cocotb`) is owned by a parallel
+    fan-out agent. Lazy-import it here so the other ``--target`` paths
+    remain functional before the sibling lands.
+
+    Per SOS-08-D §6.1 (emit directory layout, ratified 2026-05-23 — §15)
+    the walker returns ``{filename: source}`` with paths rooted at
+    ``tests/<chart_name>/`` covering the cocotb testbench
+    (``test_<chart_name>_fsm.py``), shared helpers
+    (``_cocotb_helpers.py``), the cocotb-classic ``Makefile``, a
+    ``pytest.ini`` driving the ``cocotb-test`` runner (PCDN-D-007), a
+    ``README.md`` recording chart-side traceability metadata + the
+    Python 3.10 minimum (PCDN-D-005), and a ``vectors/`` directory
+    seeded with at least one JSONL example (PCDN-D-003).
+
+    Cites: SOS-08-D §15 ratification (2026-05-23); SOS-08-D §6.1
+    (emit directory layout); SOS-08-D §6.2 (per-vector test function
+    shape); SOS-08-D §6.4 (simulator-invocation conventions).
+    """
+    try:
+        from transliterate_cocotb import (  # noqa: E402
+            render_target as render_cocotb,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "sos-codegen: --target=cocotb requires "
+            "`transliterate_cocotb.py` next to main.py (SOS-08-D wave-1 "
+            f"sibling module). Import error: {exc}"
+        ) from exc
+    return render_cocotb(ast.raw_scjson, config)
+
+
+def _render_sva_target(
+    ast: ChartAst,
+    config: dict,
+) -> dict[str, str]:
+    """Dispatch SOS-08-D SVA bind file emission to the sibling walker.
+
+    The sibling module (`transliterate_sva_bind`) is owned by a parallel
+    fan-out agent. Lazy-import it here so the other ``--target`` paths
+    remain functional before the sibling lands.
+
+    Per SOS-08-D §6.3 + PCDN-D-004 (resolved 2026-05-23 — §15) the
+    walker returns ``{filename: source}`` for at least the assertion
+    module (``<chart_name>_fsm_sva.sv``) and the bind directive
+    (``<chart_name>_fsm_bind.sv``). Per INV-S-HDL-D-4 the same SVA
+    artifact pair feeds both the cocotb vector path and the formal-flow
+    consumers (SymbiYosys, JasperGold) without re-emission.
+
+    Cites: SOS-08-D §15 ratification (2026-05-23); SOS-08-D §6.3
+    (per-DUT SVA bind file shape); PCDN-D-004 (per-DUT bind file
+    co-located with the cocotb test directory).
+    """
+    try:
+        from transliterate_sva_bind import (  # noqa: E402
+            render_target as render_sva,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "sos-codegen: --target=sva requires "
+            "`transliterate_sva_bind.py` next to main.py (SOS-08-D "
+            f"wave-1 sibling module). Import error: {exc}"
+        ) from exc
+    return render_sva(ast.raw_scjson, config)
+
+
 def render_target(
     target: str,
     ast: ChartAst,
@@ -389,6 +464,7 @@ def render_target(
     discharges_by_state: dict | None = None,
     audit_sink: list | None = None,
     hdl_config: HdlEmitConfig | None = None,
+    cocotb_sva_config: dict | None = None,
 ) -> str:
     """Render the target's Jinja2 template against the chart AST.
 
@@ -399,11 +475,21 @@ def render_target(
     For `target in {"hdl-vhdl", "hdl-sv"}` (SOS-08-C L2 emission), the
     per-dialect walker is invoked via :func:`_render_hdl_target` and
     `hdl_config` is consumed; the Jinja2 path below is bypassed.
+
+    For `target in {"cocotb", "sva"}` (SOS-08-D primary vector path),
+    the cocotb / SVA bind sibling walkers are invoked via
+    :func:`_render_cocotb_target` / :func:`_render_sva_target` and
+    `cocotb_sva_config` is forwarded as the walker's ``config`` arg;
+    the Jinja2 path below is bypassed. See SOS-08-D §6.1 / §6.3.
     """
     if target in ("hdl-vhdl", "hdl-sv"):
         if hdl_config is None:
             hdl_config = HdlEmitConfig()
         return _render_hdl_target(target, ast, hdl_config)
+    if target == "cocotb":
+        return _render_cocotb_target(ast, cocotb_sva_config or {})
+    if target == "sva":
+        return _render_sva_target(ast, cocotb_sva_config or {})
     env = _env()
     template_name = {"rust": "scripts.rs.j2", "c": "scripts.c.j2"}[target]
     tpl = env.get_template(template_name)
@@ -501,6 +587,14 @@ def main(argv: list[str]) -> int:
         verified_strip=verified_strip_enabled,
     )
 
+    # SOS-08-D primary vector path config — derives the chart_name from
+    # the chart filename's stem (so `rtos_kernel.scxml` → `rtos_kernel`).
+    # The sibling walkers consume `chart_name` to name the emitted
+    # directory + module/file basenames per §6.1 layout.
+    cocotb_sva_config: dict = {
+        "chart_name": args.chart.stem,
+    }
+
     targets = ("rust", "c") if args.target == "both" else (args.target,)
     rendered: dict[str, str] = {}
     for t in targets:
@@ -513,6 +607,7 @@ def main(argv: list[str]) -> int:
                 discharges_by_state=discharges_by_state,
                 audit_sink=audit_sink,
                 hdl_config=hdl_config,
+                cocotb_sva_config=cocotb_sva_config,
             )
         except Exception as exc:
             sys.stderr.write(f"sos-codegen: render({t}) failed: {exc}\n")
@@ -565,9 +660,12 @@ def main(argv: list[str]) -> int:
     if args.target == "both":
         args.out_rust.write_text(rendered["rust"], encoding="utf-8")
         args.out_c.write_text(rendered["c"], encoding="utf-8")
-    elif args.target in ("hdl-vhdl", "hdl-sv"):
-        # HDL walkers return {filename: source}; write each into args.out
-        # (treated as a directory). Create the directory if needed.
+    elif args.target in ("hdl-vhdl", "hdl-sv", "cocotb", "sva"):
+        # HDL + SOS-08-D walkers return {filename: source}; write each
+        # into args.out (treated as a directory). For cocotb / sva the
+        # emitted filenames are relative paths (e.g.
+        # `tests/<chart_name>/test_<chart_name>_fsm.py`) per SOS-08-D
+        # §6.1 — create intermediate parent dirs as needed.
         payload = rendered[args.target]
         if not isinstance(payload, dict):
             raise RuntimeError(
@@ -576,7 +674,9 @@ def main(argv: list[str]) -> int:
         out_dir = args.out
         out_dir.mkdir(parents=True, exist_ok=True)
         for fname, body in payload.items():
-            (out_dir / fname).write_text(body, encoding="utf-8")
+            dest = out_dir / fname
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
     else:
         args.out.write_text(rendered[args.target], encoding="utf-8")
     return 0

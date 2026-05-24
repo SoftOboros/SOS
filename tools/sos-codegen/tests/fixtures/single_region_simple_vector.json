@@ -1,0 +1,64 @@
+{
+  "_comment": [
+    "SOS-08-D primary vector path fixture — a minimal bounded-reachability",
+    "vector trace for `single_region_simple.scxml` (four states IDLE,",
+    "ACTIVE, DONE, ERROR; three unguarded transitions go/finish/reset).",
+    "Schema per SOS-03 §7.1 extended to HDL targets per the SOS-08-D §10",
+    "reconciliation co-landing §15 amendment to SOS-03. One JSONL line",
+    "per event in the SOS-08-D-emitted artifact; this companion JSON",
+    "fixture aggregates one full trace into a single object for use by",
+    "the codegen tool's integration tests (see test_sos_08_d_integration.py).",
+    "",
+    "Per SOS-08-D §6.1 / PCDN-D-003 the emitted cocotb test directory",
+    "carries `vectors/000-reset.json` as a seed example; this fixture",
+    "stands in for that example at codegen-test time."
+  ],
+  "id": "000-reset",
+  "chart_file": "single_region_simple.scxml",
+  "chart_region": "default",
+  "origin": "Seed",
+  "invariants_in_scope": [
+    "INV-S-HDL-C-1",
+    "INV-S-HDL-C-5"
+  ],
+  "initial_state": "IDLE",
+  "expected_terminal_state": "IDLE",
+  "steps": [
+    {
+      "cycle": 0,
+      "name": "reset",
+      "kind": "stimulus",
+      "dut_port": "rst_p",
+      "signal_width": 1,
+      "chart_state": "IDLE",
+      "expected_chart_state": "IDLE"
+    },
+    {
+      "cycle": 4,
+      "name": "go",
+      "kind": "event",
+      "dut_port": "event_in",
+      "signal_width": 1,
+      "chart_state": "IDLE",
+      "expected_chart_state": "ACTIVE"
+    },
+    {
+      "cycle": 8,
+      "name": "finish",
+      "kind": "event",
+      "dut_port": "event_in",
+      "signal_width": 1,
+      "chart_state": "ACTIVE",
+      "expected_chart_state": "DONE"
+    },
+    {
+      "cycle": 12,
+      "name": "reset",
+      "kind": "event",
+      "dut_port": "event_in",
+      "signal_width": 1,
+      "chart_state": "DONE",
+      "expected_chart_state": "IDLE"
+    }
+  ]
+}
