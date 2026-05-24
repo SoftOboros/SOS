@@ -87,6 +87,7 @@ fallback for ...") so the wave-2 reconcile pass can replace it later.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -200,9 +201,10 @@ class UnsupportedChartError(Exception):
 
 @dataclass
 class HdlTransition:
-    """One outgoing transition from a state.  Wave-2 carries the
-    fields the emit walk consumes; richer fields (raise payloads,
-    explicit event tokens) land in wave-3."""
+    """One outgoing transition from a state. Wave-3 adds ``raise_events``
+    for SOS-08-C §6.5 event egress emission; richer fields (per-event
+    payload data) land in wave-3-b alongside the chart-top wrapper
+    `sos_message_channel` instantiation."""
 
     source: str
     target: str
@@ -211,6 +213,10 @@ class HdlTransition:
     # Document-order index within the source state's transition list.
     # Drives the priority mux per PCDN-C-006.
     doc_order: int = 0
+    # SOS-08-C wave-3 events (2026-05-23 §15): event names this
+    # transition raises via ``<raise event="..."/>``. Wave-1/2 rejected
+    # charts containing <raise>; wave-3 emits per-event egress ports.
+    raise_events: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -329,16 +335,11 @@ def _reject_unsupported(chart: dict[str, Any]) -> None:
                     f"<onexit> of state '{sid}'."
                 )
 
-        # <raise> egress — event-routing — wave-2 has no L1 channels yet.
-        for tr in st.get("transition", []) or []:
-            if tr.get("raise_value"):
-                raise UnsupportedChartError(
-                    "SOS-08-C wave-2 emitter does not lower chart event "
-                    "egress yet; <raise>/<send> wiring via L1 "
-                    "sos_message_channel lands in wave-3 "
-                    "(SOS-08-C §6.4 / §6.5). Found <raise> on transition "
-                    f"out of state '{sid}'."
-                )
+        # SOS-08-C wave-3 events (2026-05-23 §15): <raise> accepted.
+        # Per-event egress ports + firing-strobe wiring emitted by
+        # the entity-port + concurrent-assignment passes. Chart-top
+        # wrapper `sos_message_channel` instantiation lands in
+        # wave-3-b (per the §15 wave-3 events entry).
 
 
 def _walk_all_states(node: dict[str, Any]):
@@ -511,6 +512,13 @@ def _normalise_region(
             cond = tr.get("cond")
             if cond:
                 reads.update(_read_idents_in_expr(cond))
+            # SOS-08-C wave-3 events: extract <raise event="..."/>
+            # names per SCXML §3.13. Empty list when no <raise> child.
+            raise_events: list[str] = []
+            for r in tr.get("raise_value", []) or []:
+                ev = r.get("event")
+                if isinstance(ev, str) and ev:
+                    raise_events.append(ev)
             hs.transitions.append(
                 HdlTransition(
                     source=sid,
@@ -518,6 +526,7 @@ def _normalise_region(
                     event=tr.get("event"),
                     cond=cond,
                     doc_order=idx,
+                    raise_events=raise_events,
                 )
             )
         states.append(hs)
@@ -912,13 +921,53 @@ def _datamodel_signal_lines(
     return decls, resets, ports, widths
 
 
+def _collect_region_raise_events(region: HdlRegion) -> list[str]:
+    """Sorted, de-duplicated event names this region raises via <raise>.
+
+    SOS-08-C wave-3 events (2026-05-23 §15 / §6.5). One unique event
+    name → one `event_<name>_send_valid` output port. Chart-top
+    wrapper (wave-3-b) collects per-region pulses into the global
+    `sos_message_channel` send face.
+    """
+    seen: set[str] = set()
+    for state in region.states:
+        for tr in state.transitions:
+            for ev in tr.raise_events:
+                if ev:
+                    seen.add(ev)
+    return sorted(seen)
+
+
+def _safe_event_ident_vhdl(name: str) -> str:
+    """Sanitise an SCXML event name to a legal VHDL identifier.
+
+    VHDL identifiers permit letters / digits / underscore, must start
+    with a letter, and are case-insensitive. We lowercase + substitute
+    non-alphanumerics with `_`. The original event name is preserved
+    in a port-list trailing comment for chart-vocabulary traceability.
+    """
+    out = re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_").lower()
+    if not out:
+        return "ev"
+    if out[0].isdigit():
+        out = "ev_" + out
+    return out
+
+
 def _emit_entity(
     region: HdlRegion,
     chart_name: str,
     datamodel_ports: list[str],
     n_states: int,
+    raise_events: list[str] | None = None,
 ) -> str:
-    """Emit the VHDL entity port list for a region FSM module."""
+    """Emit the VHDL entity port list for a region FSM module.
+
+    SOS-08-C wave-3 events (2026-05-23 §15): when ``raise_events`` is
+    non-empty, emits one ``event_<name>_send_valid : out std_logic``
+    per unique raise-event name per §6.5.
+    """
+    raise_events = raise_events or []
     entity_id = _entity_name(chart_name, region.name)
     lines: list[str] = []
     lines.append(f"entity {entity_id} is")
@@ -950,9 +999,31 @@ def _emit_entity(
             dialect=Dialect.VHDL,
         )
     )
+    # Wave-3 events: per-event egress ports — one `event_<name>_send_valid`
+    # output per unique raise-event name in the region.
+    egress_annotations: list[str] = []
+    for ev in raise_events:
+        ev_ident = _safe_event_ident_vhdl(ev)
+        port_lines.append(
+            emit_port_decl(
+                HdlPort(
+                    name=f"event_{ev_ident}_send_valid",
+                    direction="out",
+                    width=1,
+                    width_expr="std_logic",
+                ),
+                dialect=Dialect.VHDL,
+            )
+        )
+        egress_annotations.append(f"        -- chart event `{ev}`")
+    n_pre_egress = len(port_lines) - len(raise_events)
+    egress_idx = 0
     for i, pl in enumerate(port_lines):
         suffix = ";" if i < len(port_lines) - 1 else ""
         lines.append(f"        {pl}{suffix}")
+        if i >= n_pre_egress:
+            lines.append(egress_annotations[egress_idx])
+            egress_idx += 1
     lines.append("    );")
     lines.append(f"end entity {entity_id};")
     return "\n".join(lines)
@@ -1460,6 +1531,79 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _emit_event_egress_drives_vhdl(
+    region: HdlRegion,
+    raise_events: list[str],
+    depth_budget: int,
+) -> str:
+    """Concurrent VHDL assigns for `event_<name>_send_valid` egress.
+
+    SOS-08-C wave-3 events (2026-05-23 §15 / §6.5): for each unique
+    raise-event name, assert the corresponding `_send_valid` output
+    for one clock cycle when ANY transition with the matching
+    `<raise event="<name>"/>` fires. Firing rule (per PCDN-C-006
+    document-order priority): the current state register matches the
+    transition's source AND the transition's guard (if any) holds AND
+    no preceding higher-priority transition out of the same source
+    has fired.
+
+    VHDL syntax mirrors the SV walker's logic — concurrent boolean
+    expression collapsed into a `when … else '0'` form per std_logic
+    convention.
+
+    Wave-3-a emits the per-region drive only; the chart-top wrapper
+    (wave-3-b) collects the per-region pulses into the global
+    `sos_message_channel` send face for each named event.
+    """
+    if not raise_events:
+        return ""
+    lines: list[str] = []
+    for ev in raise_events:
+        ev_ident = _safe_event_ident_vhdl(ev)
+        terms: list[str] = []
+        for state in region.states:
+            cname = _state_constant_name(state.state_id)
+            seen_unguarded = False
+            for tr in state.transitions:
+                if seen_unguarded:
+                    break
+                if ev not in tr.raise_events:
+                    if not tr.cond:
+                        seen_unguarded = True
+                    continue
+                preds: list[str] = [f"(state_q = {cname})"]
+                for higher in state.transitions:
+                    if higher is tr:
+                        break
+                    if higher.cond:
+                        higher_guard = _compile_guard(
+                            higher.cond, depth_budget, state.state_id
+                        )
+                        preds.append(f"not ({higher_guard})")
+                if tr.cond:
+                    own_guard = _compile_guard(
+                        tr.cond, depth_budget, state.state_id
+                    )
+                    preds.append(f"({own_guard})")
+                terms.append("(" + " and ".join(preds) + ")")
+                if not tr.cond:
+                    seen_unguarded = True
+        if terms:
+            rhs_bool = " or ".join(terms)
+            line = (
+                f"    event_{ev_ident}_send_valid <= '1' when "
+                f"{rhs_bool} else '0';"
+                f"  -- chart event `{ev}`"
+            )
+        else:
+            line = (
+                f"    event_{ev_ident}_send_valid <= '0';"
+                f"  -- chart event `{ev}` (no firing transition reachable)"
+            )
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _render_region(
     region: HdlRegion,
     chart_name: str,
@@ -1470,7 +1614,10 @@ def _render_region(
 
     dm_decls, dm_resets, dm_ports, _widths = _datamodel_signal_lines(region.datamodel)
     n_states = len(region.states)
-    entity_block = _emit_entity(region, chart_name, dm_ports, n_states)
+    raise_events = _collect_region_raise_events(region)
+    entity_block = _emit_entity(
+        region, chart_name, dm_ports, n_states, raise_events
+    )
     state_constants = _emit_state_constants(region)
     register_process = _emit_register_process(region, dm_resets)
     transition_block = _emit_combinational_block(region, depth_budget)
@@ -1519,6 +1666,9 @@ def _render_region(
     dm_output_drives = "\n".join(dm_output_drives_lines)
 
     entity_id = _entity_name(chart_name, region.name)
+    egress_block = _emit_event_egress_drives_vhdl(
+        region, raise_events, depth_budget
+    )
     architecture = (
         f"architecture rtl of {entity_id} is\n"
         f"{arch_decls_block}\n"
@@ -1527,6 +1677,12 @@ def _render_region(
         f"{transition_block}\n\n"
         f"    current_state <= state_q;\n"
         + (f"{dm_output_drives}\n" if dm_output_drives else "")
+        + (
+            f"\n    -- ----- event egress (SOS-08-C §6.5 wave-3) -----\n"
+            f"{egress_block}\n"
+            if egress_block
+            else ""
+        )
         + f"end architecture rtl;\n"
     )
 

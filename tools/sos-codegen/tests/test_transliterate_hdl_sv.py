@@ -615,17 +615,21 @@ def test_script_bodies_rejected_at_wave_2():
     assert "wave-3" in msg
 
 
-def test_raise_rejected_at_wave_2():
-    """Wave-2 still rejects <raise>; message cites wave-3 + §6.4/§6.5."""
+def test_raise_accepted_at_wave_3():
+    """SOS-08-C wave-3 events (2026-05-23 §15 / §6.5): <raise>
+    accepted. The emitted FSM module exposes per-event egress ports
+    (`event_<name>_send_valid`) and drives them combinationally for
+    one cycle when a matching transition fires. Chart-top wrapper
+    sos_message_channel instantiation lands in wave-3-b."""
     chart = _chart_with_raise()
-    with pytest.raises(
-        transliterate_hdl_sv.EventIngressNotSupportedError
-    ) as excinfo:
-        transliterate_hdl_sv.render_target(chart, {"chart_name": "r"})
-    msg = str(excinfo.value)
-    assert "SOS-08-C" in msg
-    assert "§6.4" in msg or "§6.5" in msg
-    assert "wave-3" in msg.lower()
+    files = transliterate_hdl_sv.render_target(chart, {"chart_name": "r"})
+    src = files["r_fsm.sv"]
+    # Per-event egress port emitted.
+    assert "event_go_send_valid" in src
+    # Combinational drive present (chart event `go` raised when A
+    # transitions to B; the only transition out of A is unguarded so
+    # the drive predicate is just the state-match).
+    assert "assign event_go_send_valid" in src
 
 
 def test_render_target_rejects_non_dict_chart_ir():
@@ -700,3 +704,103 @@ def test_sv_and_vhdl_have_equivalent_state_constants():
         "state-constant ORDER differs between SV and VHDL — "
         "one-hot bit positions will not align"
     )
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-C wave-3 events: event egress emission (§6.5).
+# ---------------------------------------------------------------------------
+
+
+def _chart_with_raise_and_guard():
+    """A chart where two raises share a state, gated by a guard."""
+    return {
+        "initial": "idle",
+        "datamodel": [{"data": [{"id": "ready", "expr": "0"}]}],
+        "state": [
+            {
+                "id": "idle",
+                "transition": [
+                    {"event": "go", "cond": "ready == 1", "target": "active",
+                     "raise_value": [{"event": "ack"}]},
+                    {"target": "wait_state",
+                     "raise_value": [{"event": "ack"}, {"event": "trace"}]},
+                ],
+            },
+            {"id": "active"},
+            {"id": "wait_state"},
+        ],
+    }
+
+
+class TestWave3Events:
+    """SOS-08-C wave-3 events: per-region `<raise>` egress emission."""
+
+    def test_simple_raise_emits_egress_port(self):
+        files = transliterate_hdl_sv.render_target(
+            _chart_with_raise(), {"chart_name": "r"}
+        )
+        src = files["r_fsm.sv"]
+        assert "output wire event_go_send_valid" in src
+
+    def test_simple_raise_emits_drive(self):
+        files = transliterate_hdl_sv.render_target(
+            _chart_with_raise(), {"chart_name": "r"}
+        )
+        src = files["r_fsm.sv"]
+        # The unguarded raise from state A produces a simple state-
+        # match predicate.
+        assert "assign event_go_send_valid = (state_q == ST_A)" in src
+
+    def test_multiple_raises_aggregated(self):
+        files = transliterate_hdl_sv.render_target(
+            _chart_with_raise_and_guard(), {"chart_name": "m"}
+        )
+        src = files["m_fsm.sv"]
+        # Both event names get their own egress ports (sorted alpha).
+        assert "event_ack_send_valid" in src
+        assert "event_trace_send_valid" in src
+
+    def test_guard_lowered_into_drive(self):
+        files = transliterate_hdl_sv.render_target(
+            _chart_with_raise_and_guard(), {"chart_name": "m"}
+        )
+        src = files["m_fsm.sv"]
+        # `ack` fires from the guarded transition (ready==1) OR from
+        # the unguarded fallback (when ready != 1). The drive expression
+        # includes both terms.
+        ack_line = [l for l in src.splitlines() if "event_ack_send_valid" in l and "assign" in l]
+        assert ack_line, f"missing event_ack_send_valid drive"
+        # The guarded term references the data signal.
+        assert "data_ready_q" in ack_line[0]
+
+    def test_safe_event_identifier_sanitises_dots(self):
+        """SCXML event names with dots (sem.give) → underscore form."""
+        chart_ir = {
+            "initial": "a",
+            "state": [
+                {"id": "a", "transition": [
+                    {"target": "b", "raise_value": [{"event": "sem.give"}]},
+                ]},
+                {"id": "b"},
+            ],
+        }
+        files = transliterate_hdl_sv.render_target(
+            chart_ir, {"chart_name": "sem"}
+        )
+        src = files["sem_fsm.sv"]
+        # `sem.give` → `sem_give` for the port name; original preserved
+        # in trailing comment.
+        assert "event_sem_give_send_valid" in src
+        assert "`sem.give`" in src
+
+    def test_single_region_chart_without_raise_unchanged(self):
+        """Wave-3 MUST NOT change emit for charts without <raise>."""
+        files_a = transliterate_hdl_sv.render_target(
+            _simple_chart(), {"chart_name": "x"}
+        )
+        # No event_* ports emitted; existing tests in this file all
+        # still pass without modification (regression-guarded by the
+        # full-suite green at this commit).
+        src = files_a["x_fsm.sv"]
+        assert "event_" not in src
+        assert "send_valid" not in src

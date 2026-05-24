@@ -304,6 +304,12 @@ class HdlTransition:
     # Document-order index within the source state's transition list.
     # Drives the priority chain per PCDN-C-006.
     doc_order: int = 0
+    # SOS-08-C wave-3 events (2026-05-23 §15): list of event names this
+    # transition raises (<raise event="..."/>) per §6.5. Wave-1/2
+    # rejected charts with <raise>; wave-3 emits per-event egress
+    # ports + drives `event_<name>_send_valid` for one cycle when the
+    # transition fires. Empty for transitions with no <raise>.
+    raise_events: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -406,15 +412,11 @@ def _reject_unsupported(chart: dict[str, Any]) -> None:
                     f"of state '{sid}'."
                 )
 
-        # <raise> egress is event-routing — wave-3 has the L1 channels.
-        for tr in st.get("transition", []) or []:
-            if tr.get("raise_value"):
-                raise EventIngressNotSupportedError(
-                    "SOS-08-C §6.4 / §6.5 — wave-2 SV emit does not yet "
-                    "wire chart event egress via L1 sos_message_channel. "
-                    f"Found <raise> on transition out of state '{sid}'. "
-                    "Wave-3 lands the wiring."
-                )
+        # SOS-08-C wave-3 events (2026-05-23 §15): <raise> accepted.
+        # Per-event egress ports + firing-strobe wiring emitted by
+        # `_emit_module_header` + `_emit_transition_case_arm`. Chart-
+        # top wrapper `sos_message_channel` instantiation lands in
+        # wave-3-b (per the §15 wave-3 events entry).
 
 
 def _walk_all_states(node: dict[str, Any]):
@@ -497,6 +499,14 @@ def _states_from_container(container: dict[str, Any]) -> list[HdlState]:
             if not target:
                 # Internal transition (no target) — wave-2 ignores.
                 continue
+            # SOS-08-C wave-3 events (2026-05-23 §15): extract <raise>
+            # event names — list of `event="..."` attributes on each
+            # <raise> child of the transition per SCXML §3.13.
+            raise_events: list[str] = []
+            for r in tr.get("raise_value", []) or []:
+                ev = r.get("event")
+                if isinstance(ev, str) and ev:
+                    raise_events.append(ev)
             hs.transitions.append(
                 HdlTransition(
                     source=sid,
@@ -504,6 +514,7 @@ def _states_from_container(container: dict[str, Any]) -> list[HdlState]:
                     event=tr.get("event"),
                     cond=tr.get("cond"),
                     doc_order=idx,
+                    raise_events=raise_events,
                 )
             )
         states.append(hs)
@@ -1091,12 +1102,55 @@ def _emit_header(chart_name: str, kind: str = "region-fsm") -> str:
     )
 
 
+def _collect_region_raise_events(region: HdlRegion) -> list[str]:
+    """Return the sorted, de-duplicated list of event names this
+    region's transitions raise via ``<raise event="..."/>``.
+
+    SOS-08-C wave-3 events (2026-05-23 §15): each unique raise-event
+    name becomes one ``event_<name>_send_valid`` output port on the
+    per-region FSM module per §6.5. The chart-top wrapper (wave-3-b)
+    will collect these per-region outputs into the global
+    ``sos_message_channel`` send-face for the named event.
+
+    Ordering is sorted-alphabetical for deterministic emission per
+    INV-S-HDL-C-1.
+    """
+    seen: set[str] = set()
+    for state in region.states:
+        for tr in state.transitions:
+            for ev in tr.raise_events:
+                if ev:
+                    seen.add(ev)
+    return sorted(seen)
+
+
+def _safe_event_ident(name: str) -> str:
+    """Sanitise an SCXML event name for use in a Verilog identifier.
+
+    SCXML event names use dots as namespace separators (`sem.give`);
+    Verilog identifiers don't permit dots, so we substitute `_`. The
+    mapping is documented in the emitted module's header comment so a
+    reviewer reading the SV can recover the chart-side event name.
+    """
+    return re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_") or "ev"
+
+
 def _emit_module_header(
     module_name: str,
     datamodel_signals: list[_DatamodelSignal],
     n_states: int,
+    raise_events: list[str] | None = None,
 ) -> str:
-    """Emit the SV module port list for a region FSM."""
+    """Emit the SV module port list for a region FSM.
+
+    SOS-08-C wave-3 events (2026-05-23 §15): when ``raise_events`` is
+    non-empty, emits one ``output wire event_<name>_send_valid`` per
+    raise-event name. The port is driven combinationally for one
+    clock cycle when a transition with the matching ``<raise>``
+    fires; the chart-top wrapper (wave-3-b) routes the pulse into
+    the global ``sos_message_channel`` send face for that event.
+    """
+    raise_events = raise_events or []
     port_lines: list[str] = []
     port_lines.append("input  wire clk")
     port_lines.append("input  wire rst")
@@ -1110,12 +1164,28 @@ def _emit_module_header(
     port_lines.append(
         f"output wire [{n_states - 1}:0] current_state"
     )
+    # Wave-3 events: one egress port per unique raise-event name.
+    # The trailing-comment form puts the chart-event-name annotation
+    # on a separate line from the port declaration so the comma-suffix
+    # logic doesn't end up inside the comment.
+    egress_annotations: list[str] = []
+    for ev in raise_events:
+        ev_ident = _safe_event_ident(ev)
+        port_lines.append(f"output wire event_{ev_ident}_send_valid")
+        egress_annotations.append(f"        // chart event `{ev}`")
 
     lines: list[str] = []
     lines.append(f"module {module_name} (")
+    # Track which port declarations have a trailing-comment annotation
+    # so the comma lands BEFORE the comment, not at end-of-line.
+    n_pre_egress = len(port_lines) - len(raise_events)
+    egress_idx = 0
     for i, pl in enumerate(port_lines):
         suffix = "," if i < len(port_lines) - 1 else ""
         lines.append(f"    {pl}{suffix}")
+        if i >= n_pre_egress:
+            lines.append(egress_annotations[egress_idx])
+            egress_idx += 1
     lines.append(");")
     return "\n".join(lines)
 
@@ -1298,6 +1368,83 @@ def _emit_output_drives(
     return "\n".join(lines)
 
 
+def _emit_event_egress_drives(
+    region: HdlRegion,
+    raise_events: list[str],
+    depth_budget: int,
+) -> str:
+    """Combinational drives for ``event_<name>_send_valid`` egress ports.
+
+    SOS-08-C wave-3 events (2026-05-23 §15 / §6.5): for each unique
+    raise-event name, assert the corresponding `_send_valid` output
+    for one clock cycle when ANY transition with `<raise event="<name>"/>`
+    in this region fires. "Fires" is defined as: the current state
+    register holds the transition's source state AND the transition's
+    guard (if any) evaluates true AND no preceding higher-priority
+    transition with the same source state has already taken
+    precedence per PCDN-C-006 document-order.
+
+    Wave-3-a emits the per-region drive only; the chart-top wrapper
+    (wave-3-b) collects the per-region pulses into the global
+    `sos_message_channel` send face for the named event.
+
+    Pure combinational: depends only on `state_q` + the same guard
+    expressions the transition mux already evaluates. Safe to drive
+    alongside `state_next`.
+    """
+    if not raise_events:
+        return ""
+    lines: list[str] = []
+    for ev in raise_events:
+        ev_ident = _safe_event_ident(ev)
+        terms: list[str] = []
+        for state in region.states:
+            cname = _state_constant_name(state.state_id)
+            # Walk the state's transitions in document order tracking
+            # priority — only transitions BEFORE the first unguarded
+            # one can fire (the unguarded transition itself fires when
+            # no preceding guard matches, so it counts too).
+            seen_unguarded = False
+            for tr in state.transitions:
+                if seen_unguarded:
+                    # PCDN-C-006: transitions after an unguarded one
+                    # are dead per document-order priority.
+                    break
+                if ev not in tr.raise_events:
+                    if not tr.cond:
+                        seen_unguarded = True
+                    continue
+                # This transition raises `ev`. Build its firing
+                # predicate: state matches AND no higher-priority
+                # transition out of this state has already won.
+                preds: list[str] = [f"state_q == {cname}"]
+                # Higher-priority guarded transitions out of the same
+                # state must NOT match (otherwise THEY fire, not us).
+                for higher in state.transitions:
+                    if higher is tr:
+                        break
+                    if higher.cond:
+                        higher_guard = _compile_guard_expr(
+                            higher.cond, depth_budget
+                        )
+                        preds.append(f"!({higher_guard})")
+                if tr.cond:
+                    own_guard = _compile_guard_expr(tr.cond, depth_budget)
+                    preds.append(f"({own_guard})")
+                terms.append("(" + " && ".join(preds) + ")")
+                if not tr.cond:
+                    seen_unguarded = True
+        if terms:
+            rhs = " || ".join(terms)
+        else:
+            rhs = "1'b0"
+        lines.append(
+            f"    assign event_{ev_ident}_send_valid = {rhs};"
+            f"  // chart event `{ev}`"
+        )
+    return "\n".join(lines)
+
+
 def _render_region_module(
     region: HdlRegion,
     chart_name: str,
@@ -1316,14 +1463,32 @@ def _render_region_module(
     n_states = len(region.states)
     datamodel_signals = [_infer_datamodel_signal(d) for d in region.datamodel]
 
+    raise_events = _collect_region_raise_events(region)
+
     header = _emit_header(chart_name, kind=f"region-fsm:{region.name}")
-    module_header = _emit_module_header(module_name, datamodel_signals, n_states)
+    module_header = _emit_module_header(
+        module_name, datamodel_signals, n_states, raise_events
+    )
     state_constants = _emit_state_constants(region)
     register_decls = _emit_register_decls(region, datamodel_signals, n_states)
     register_process = _emit_register_process(region, datamodel_signals)
     transition_block = _emit_combinational_block(region, depth_budget)
     output_drives = _emit_output_drives(datamodel_signals)
     state_const_block = "\n".join(f"    {line}" for line in state_constants)
+
+    # SOS-08-C wave-3 events (2026-05-23 §15 / §6.5): combinational
+    # `event_<name>_send_valid` drives — assert for one cycle when a
+    # transition with the matching `<raise>` fires. Pure combinational
+    # in terms of the current state register + the same guard
+    # expressions the transition mux already evaluates; safe to drive
+    # alongside `state_next`.
+    egress_drives = _emit_event_egress_drives(region, raise_events, depth_budget)
+    egress_block = (
+        f"\n    // ----- event egress (SOS-08-C §6.5 wave-3) -----\n"
+        f"{egress_drives}\n"
+        if raise_events
+        else ""
+    )
 
     body = (
         f"{header}\n"
@@ -1346,6 +1511,7 @@ def _render_region_module(
         f"\n"
         f"    // ----- output assigns -----\n"
         f"{output_drives}\n"
+        f"{egress_block}"
         f"\n"
         f"endmodule\n"
         f"\n"

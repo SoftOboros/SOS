@@ -513,3 +513,54 @@ Implementation wave-2 (hdl_common + VHDL/SV walker parallel-region + cross-domai
 - INV-S-HDL-C-3 (cross-domain transition enforcement) reinforced: `sos_synchronizer` instantiation in the chart-top wrapper per PCDN-C-002; static analysis detects writer × reader × clock-domain triples and emits one synchronizer per cross-domain edge (SV walker over-emits conservatively per agent-default ratification #4 above).
 
 **Status**: 🟢 **ratified (continuing)** — impl wave-2 PCDN amendments fold the guard / parallel / chart-top wrapper / cross-domain synchronizer design choices into the SOS-08-C normative surface. The wave-2 emit path now supports guards (with depth budget enforced at both lint and emit), parallel regions (one module per `<parallel>` child + chart-top wrapper), cross-domain synchronizers (PCDN-C-002), and port-width-from-signal-width polish. Wave-3 candidates: event ingress/egress via `sos_message_channel`, ECMAScript subset → HDL action lowering beyond `<assign>`, `<script>` bodies, `transition_observable` for SOS-08-G integration.
+
+### 2026-05-23 — Impl wave-3-a: event egress emission (Ira)
+
+Wave-3-a lifts the wave-2 `<raise>` rejection in both VHDL + SV walkers and emits per-region event-egress ports per §6.5. This is the first half of the wave-3 events scope; wave-3-b lands the chart-top wrapper `sos_message_channel` instantiation that collects per-region pulses into the global channel send face.
+
+**Wave-3-a implementation surface (both walkers)**:
+
+- **`HdlTransition.raise_events: list[str]`** field added in both `transliterate_hdl_sv.py` and `transliterate_hdl_vhdl.py`. The transition-build code in both walkers extracts the `raise_value` list per SCXML §3.13 and populates the new field; empty for transitions without `<raise>`.
+- **Wave-2 `<raise>` rejection lifted** in both walkers' rejection passes (`EventIngressNotSupportedError` raise removed in SV; `UnsupportedChartError` raise removed in VHDL). The rejection-pass comments now cite wave-3-a as the landing wave.
+- **`_collect_region_raise_events(region) -> list[str]`** helper added to both walkers. Returns sorted, de-duplicated set of event names raised by any transition in the region. One unique event name → one egress port on the region FSM module.
+- **`_safe_event_ident(name)`** (SV) and **`_safe_event_ident_vhdl(name)`** (VHDL) sanitise SCXML event names (which may contain dots per `sem.give` convention) into legal Verilog / VHDL identifiers (`sem_give`). The original chart-side event name is preserved verbatim in the port-list trailing comment + the concurrent-assignment trailing comment for chart-vocabulary traceability per [INV-SOS-H][inv-sos-h].
+- **Per-region module header** extended in both dialects to emit `output wire event_<ident>_send_valid` (SV) / `event_<ident>_send_valid : out std_logic` (VHDL) per unique raise-event name. The trailing chart-event-name comment lands on its own line so the comma/semicolon-suffix logic doesn't end up inside the comment.
+- **`_emit_event_egress_drives` / `_emit_event_egress_drives_vhdl`** helpers added. For each unique raise event, emit a combinational drive of the `_send_valid` output: asserted for one cycle when ANY transition with the matching `<raise event="<name>"/>` fires. Firing rule per [PCDN-C-006][pcdn-c-006] document-order priority — the predicate AND's together (a) state-match, (b) `not (higher_priority_guard)` for every earlier transition out of the same source state, (c) `(own_guard)` if the transition has a `cond`. SV uses `assign event_X_send_valid = <bool_expr>;`; VHDL uses `event_X_send_valid <= '1' when <bool_expr> else '0';` per std_logic convention.
+- **Both walkers' region-render functions** pass `raise_events` to the module-header + egress-drive emitters; the per-region FSM module body grows a new `-- event egress` section between the existing output-drive block and the `endmodule` / `end architecture` line.
+
+[inv-sos-h]: ./SOS-07-CONCEPTS.md#inv-sos-h--vector-to-chart-traceability
+[pcdn-c-006]: #62-step-2--synthesize-per-region-fsm-modules
+
+**Wave-3-a scope (what landed vs. what is deferred)**:
+
+- ✅ Per-region FSM module emits one `event_<name>_send_valid` output per unique `<raise event="..."/>` event name.
+- ✅ Combinational drive honors PCDN-C-006 document-order priority — only the highest-priority firing transition asserts the pulse.
+- ✅ Both dialects (VHDL + SV) emit symmetric port + drive shapes; cross-dialect parity preserved per INV-S-HDL-C-1.
+- ⏸ **wave-3-b**: chart-top wrapper `sos_message_channel` instantiation. Currently the per-region `event_<name>_send_valid` outputs hang at the chart-top boundary — the chart-top wrapper does NOT yet collect them into a global `sos_message_channel` send face. Per §6.5 the wave-3-b landing emits one `sos_message_channel` instance per chart-wide unique event name + wires each per-region send_valid output into the channel's `send_valid` input (with per-event arbitration when multiple regions raise the same event).
+- ⏸ **wave-3-c**: event ingress refactor. Currently transitions with `event="..."` consume a single chart-wide `event_in` port (per the SOS-08-E wave-1 virtual-interface shape); wave-3-c refactors this to one `sos_message_channel` receive-face port per consumed event name per §6.4.
+- ⏸ **wave-3-d**: `event_<name>_send_data` payload ports + payload-bearing `<raise>` extension. Wave-3-a only emits `_send_valid` strobes; payload data (e.g. integer values raised by `<raise event="counter" data="N"/>`) lands in wave-3-d alongside the SCXML `<param>` / `<content>` element support.
+
+**Wave-3 boundary not yet touched**:
+
+- ECMAScript subset → HDL action lowering beyond `<assign>` (§6.6): unchanged from wave-2 — `<script>` bodies still raise `UnsupportedChartError`.
+- `transition_observable` port for SOS-08-G integration (PCDN-SOS-08-C-wave2-transition-obs-deferred): still wave-3 scope; not landed in 3-a.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-C-1** (deterministic emission): `_collect_region_raise_events` returns sorted output; egress-drive ordering follows the same sorted sequence. Both walkers produce byte-identical output across rendered runs (verified by existing `test_emission_is_deterministic`).
+- **INV-S-HDL-C-2** (per-region observability): unchanged — `current_state` output retained. Egress ports are additive observability (new wires; nothing removed).
+- **INV-S-HDL-C-3** (cross-domain enforcement): unchanged at wave-3-a since the chart-top wrapper `sos_message_channel` instantiation is wave-3-b. When 3-b lands, INV-S-HDL-C-3's "cross-domain event consumption uses `sos_message_channel`" claim becomes operational; wave-3-a just emits per-region pulse outputs that 3-b will wire into the channel.
+- **INV-S-HDL-3** (cross-domain isolation): unchanged — wave-3-a emits no new cross-domain signal paths; the per-region egress port is a single-clock-domain signal until 3-b wires it through `sos_message_channel`'s internal `sos_fifo_async`.
+- **[INV-SOS-H][inv-sos-h]** (chart-vocabulary traceability): chart-side event names are preserved verbatim in the port-list trailing comment + the concurrent-assignment trailing comment for every emitted egress port + drive.
+
+**Test count**: 11 new tests:
+
+- SV (`test_transliterate_hdl_sv.py::TestWave3Events`, 6 tests): simple raise emits egress port; combinational drive present; multiple raises aggregated + sorted; guard lowered into drive (data signal reference verified); event-name dot-sanitisation (`sem.give` → `event_sem_give_send_valid`); single-region chart without raise unchanged (regression guard).
+- VHDL (`test_transliterate_hdl_vhdl.py::TestVhdlWave3Events`, 5 tests): raise accepted; egress port declared as `: out std_logic`; concurrent drive uses VHDL `when … else '0'` form; event-name sanitisation symmetric to SV; chart without raise unchanged.
+- Existing `test_raise_rejected_at_wave_2` renamed → `test_raise_accepted_at_wave_3`; assertions flipped to verify egress port + drive presence.
+
+**Test suite**: 381/381 passing (370 prior + 11 wave-3-a).
+
+**Cited PCDNs**: PCDN-C-006 (document-order priority — egress drives honor priority chain); PCDN-SOS-08-C-wave2-region-naming (per-region module naming convention extended to wave-3 egress ports without modification).
+
+Status: 🟢 **wave-3-a complete**. Wave-3-b picks up the chart-top wrapper `sos_message_channel` instantiation + per-event arbitration when multiple regions raise the same event. Wave-3-c refactors event ingress from the single `event_in` port to per-event receive-face ports. Wave-3-d adds payload data on `_send_data` ports for `<raise>` events with `<param>` / `<content>`.

@@ -1,4 +1,4 @@
-"""Unit tests for `transliterate_hdl_vhdl.render_target` (wave-1 + wave-2).
+"""Unit tests for `render_target` (wave-1 + wave-2).
 
 @spec  SOS-08-C-CONCEPTS.md §6 (emission algorithm), §15 (ratification)
 @spec  PCDN-C-001 (clock-domain default inherit-from-parent)
@@ -578,3 +578,91 @@ def test_wave2_rejection_messages_cite_wave3():
         render_target(chart, {"chart_name": "sc"})
     msg = str(exc_info.value)
     assert "wave-3" in msg
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-C wave-3 events: event egress emission (§6.5) — VHDL side.
+# ---------------------------------------------------------------------------
+
+
+def _chart_with_raise_vhdl():
+    return {
+        "initial": "A",
+        "state": [
+            _state(
+                "A",
+                transitions=[
+                    {"target": "B", "raise_value": [{"event": "go"}]},
+                ],
+            ),
+            _state("B"),
+        ],
+    }
+
+
+class TestVhdlWave3Events:
+    """SOS-08-C wave-3 events: VHDL emit accepts <raise> + emits per-event
+    `event_<name>_send_valid : out std_logic` egress ports + concurrent
+    `when … else '0'` drives."""
+
+    def test_raise_accepted_at_wave_3(self):
+        files = render_target(
+            _chart_with_raise_vhdl(), {"chart_name": "r"}
+        )
+        # Single-region chart → one .vhd file.
+        assert len(files) == 1
+        src = list(files.values())[0]
+        assert "event_go_send_valid" in src
+
+    def test_egress_port_declared_as_std_logic_out(self):
+        files = render_target(
+            _chart_with_raise_vhdl(), {"chart_name": "r"}
+        )
+        src = list(files.values())[0]
+        # Port declaration form: `event_go_send_valid : out std_logic`.
+        assert "event_go_send_valid : out std_logic" in src
+
+    def test_egress_drive_is_concurrent_when_else(self):
+        files = render_target(
+            _chart_with_raise_vhdl(), {"chart_name": "r"}
+        )
+        src = list(files.values())[0]
+        # Drive uses VHDL conditional concurrent signal assignment.
+        assert "event_go_send_valid <= '1' when" in src
+        assert "else '0';" in src
+
+    def test_event_name_sanitisation(self):
+        chart = {
+            "initial": "A",
+            "state": [
+                _state("A", transitions=[
+                    {"target": "B", "raise_value": [{"event": "sem.give"}]},
+                ]),
+                _state("B"),
+            ],
+        }
+        files = render_target(
+            chart, {"chart_name": "k"}
+        )
+        src = list(files.values())[0]
+        # `sem.give` → `sem_give` for the VHDL identifier; the original
+        # name is preserved in the trailing comment.
+        assert "event_sem_give_send_valid" in src
+        assert "`sem.give`" in src
+
+    def test_chart_without_raise_unchanged(self):
+        """Regression guard: charts without <raise> emit the same shape
+        as wave-2."""
+        chart = {
+            "initial": "A",
+            "state": [
+                _state("A", transitions=[{"target": "B"}]),
+                _state("B"),
+            ],
+        }
+        files = render_target(
+            chart, {"chart_name": "p"}
+        )
+        src = list(files.values())[0]
+        assert "event_" not in src
+        assert "send_valid" not in src
