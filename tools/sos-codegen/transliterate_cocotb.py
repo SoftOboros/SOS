@@ -70,6 +70,39 @@ Wave-1 scope (intentionally narrow — PCDN-D-003 / §5.5):
 @spec  PCDN-D-006 — one `test_<dut>.py` per DUT + shared helpers
 @spec  PCDN-D-007 — emit both Makefile and pytest.ini
 
+# SOS-08-G wave-1 extension (waveform annotation emission)
+
+@spec  SOS-08-G-CONCEPTS.md §5 (frozen decisions — three-file output
+       contract `.fst` + `.vcd` + `<test>.annotations.jsonl` per
+       EOQ-011-ROADMAP; overlay schema v1.0 per §5.2 + PCDN-G-001),
+       §5.6 (one annotation file per test run per PCDN-G-003),
+       §5.7 (per-event default annotation granularity per PCDN-G-005;
+       cycle-density opt-in via SOS_ANNOTATION_DENSITY=cycle env var),
+       §6 (viewer integration contract — GTKWave / Surfer extensions
+       consume the annotation overlay), §15 (ratified 2026-05-23).
+@spec  PCDN-SOS-08-G-001 — schema-version detection via first-line
+       header record `{"_meta": {"schema": "sos-annotations",
+       "version": "1.0", "chart_path_max_depth": 8}}`.
+@spec  PCDN-SOS-08-G-003 — one `.annotations.jsonl` per test run.
+@spec  PCDN-SOS-08-G-004 — viewer extensions live in-subrepo at
+       `tools/sos-codegen/viewers/{gtkwave,surfer}/` (sibling-agent
+       deliverable; this module emits the overlay they consume).
+@spec  PCDN-SOS-08-G-005 — per-event default granularity; cycle-density
+       opt-in honored via SOS_ANNOTATION_DENSITY environment variable.
+@spec  PCDN-SOS-08-G-006 — line-buffered flush (Python `open(...,
+       buffering=1)`); per-record flush available via simulator-side
+       opt-in (the helper exposes the file handle in line-buffered mode
+       so each `\n` triggers a flush — sufficient for review-side mid-
+       run inspection without per-record fsync overhead).
+@spec  INV-S-HDL-G-2 — chart-vocabulary mandatory in overlay; every
+       annotation record carries `chart_state` + `transition_id` so
+       review-surface readers can name what the hardware did at chart
+       vocabulary level (NOT raw RTL signal toggles alone).
+@spec  INV-S-HDL-G-3 — schema-version header required as first line.
+@spec  INV-S-HDL-G-5 — generation co-location: the annotation writer
+       is instrumented INSIDE the cocotb test (this emitter wires it
+       into every @cocotb.test() body), NOT a separate post-process.
+
 # Integration contract
 
 The codegen tool's CLI dispatcher (`main.py`) is intended to extend
@@ -370,11 +403,20 @@ chart-state encoding map mirrors SOS-08-C's one-hot encoding so
 synthesised state register (INV-S-HDL-C-1).
 
 Per PCDN-SOS-08-D-005 / §5.3, this module assumes Python 3.10+.
+
+SOS-08-G wave-1 extension (waveform annotation emission) lives at
+the bottom of this module: ``AnnotationWriter`` writes the
+``<test>.annotations.jsonl`` review-artifact overlay per SOS-08-G
+§5.2 (overlay schema), §5.6 (one file per test run — PCDN-G-003),
+§5.7 (per-event default granularity — PCDN-G-005), §5 (line-buffered
+flush — PCDN-G-006). The schema-version header is emitted as the
+first JSONL line per PCDN-G-001 / INV-S-HDL-G-3.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -480,6 +522,153 @@ def format_failure(vector: dict[str, Any], step: dict[str, Any] | None = None) -
         f"step={{step_index}} transition_id={{transition_id}} "
         f"expected_state={{expected_state}}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-G annotation-overlay writer (waveform review-artifact emission).
+#
+# Per SOS-08-G §5 frozen decisions:
+#   - PCDN-G-001: first-line schema-version header (single-file shape;
+#     viewer extensions read the first line cheaply).
+#   - PCDN-G-002: chart_path max depth = 8, mirrored by reference into
+#     the schema header.
+#   - PCDN-G-003: one `.annotations.jsonl` per test run.
+#   - PCDN-G-005: per-event default; `SOS_ANNOTATION_DENSITY=cycle`
+#     env var opts into per-cycle granularity for high-bandwidth debug.
+#   - PCDN-G-006: line-buffered flush (`open(..., buffering=1)`); every
+#     newline-terminated record is flushed without per-record fsync.
+#   - INV-S-HDL-G-2: chart-vocabulary mandatory — every record carries
+#     `chart_state` + `transition_id` (vector-to-chart traceability at
+#     the review-surface layer; INV-SOS-H).
+#   - INV-S-HDL-G-3: schema-version header required as first line.
+#   - INV-S-HDL-G-5: generation co-located with the cocotb test (this
+#     class is instantiated inside the @cocotb.test() body, NOT in a
+#     separate post-process step).
+# ---------------------------------------------------------------------------
+
+
+class AnnotationWriter:
+    """SOS-08-G chart-vocabulary annotation writer.
+
+    Writes one JSONL record per chart-state transition observed
+    during the cocotb test run. First record is the schema header
+    (PCDN-SOS-08-G-001 / INV-S-HDL-G-3). Subsequent records are
+    per-event annotations (PCDN-SOS-08-G-005 default; cycle-density
+    opt-in via env var ``SOS_ANNOTATION_DENSITY=cycle``).
+
+    Per PCDN-SOS-08-G-003 the file is one-per-test-run; per
+    PCDN-SOS-08-G-006 the file handle is line-buffered so each
+    record reaches disk on the trailing newline without per-record
+    fsync overhead.
+
+    Per INV-S-HDL-G-5 the writer is instantiated INSIDE the
+    @cocotb.test() body — it is instrumentation co-located with the
+    testbench, not a post-process step.
+    """
+
+    _SCHEMA_HEADER = {{
+        "_meta": {{
+            "schema": "sos-annotations",
+            "version": "1.0",
+            "chart_path_max_depth": 8,
+        }}
+    }}
+
+    _DENSITY_ENV_VAR = "SOS_ANNOTATION_DENSITY"
+
+    def __init__(self, test_name: str, output_dir: Path | str | None = None) -> None:
+        self.output_dir = Path(output_dir) if output_dir is not None else Path(".")
+        self.path = self.output_dir / f"{{test_name}}.annotations.jsonl"
+        # PCDN-G-005: per-event default; `cycle` opts into per-cycle.
+        density = os.environ.get(self._DENSITY_ENV_VAR, "event")
+        self.density: str = density if density in ("event", "cycle") else "event"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # PCDN-G-006: line-buffered (flush at every newline).
+        self._fh = open(self.path, "w", buffering=1, encoding="utf-8")
+        # PCDN-G-001 / INV-S-HDL-G-3: schema-version header is the
+        # first JSONL record. Viewer extensions parse this line to
+        # detect schema version compatibility before reading the rest.
+        self._fh.write(json.dumps(self._SCHEMA_HEADER) + "\\n")
+
+    def record_transition(
+        self,
+        cycle: int,
+        chart_state: str,
+        transition_id: str | None,
+        chart_path: list[str] | None = None,
+        signal: str | None = None,
+        region: str | None = None,
+        invariant_id: str | None = None,
+        vector_index: int | None = None,
+    ) -> None:
+        """Emit one annotation record per SOS-08-G §5.2 / PCDN-G-005.
+
+        Six normative fields per §5.2 (INV-S-HDL-G-2): ``cycle``,
+        ``signal``, ``chart_state``, ``transition_id``, ``chart_path``,
+        ``region``. Two optional: ``invariant_id``, ``vector_index``.
+
+        Per INV-S-HDL-G-2 every record carries the chart-vocabulary
+        triplet so review-surface readers (GTKWave / Surfer extensions
+        per §6) can render badges at the chart level. A record that
+        surfaces only ``cycle`` + ``signal`` regresses to RTL-signal-
+        level review and is non-conformant.
+        """
+        record: dict[str, Any] = {{
+            "cycle": cycle,
+            "signal": signal or "",
+            "chart_state": chart_state,
+            "transition_id": transition_id,
+            "chart_path": chart_path or [],
+            "region": region or "",
+        }}
+        if invariant_id is not None:
+            record["invariant_id"] = invariant_id
+        if vector_index is not None:
+            record["vector_index"] = vector_index
+        self._fh.write(json.dumps(record) + "\\n")
+
+    def record_cycle(
+        self,
+        cycle: int,
+        chart_state: str,
+        chart_path: list[str] | None = None,
+        signal: str | None = None,
+        region: str | None = None,
+    ) -> None:
+        """Per-cycle annotation (PCDN-G-005 ``cycle`` density opt-in).
+
+        Emits one record per simulator clock cycle naming the
+        currently-active chart state. Callers gate via
+        ``self.density == "cycle"``; the writer always honors the
+        call when invoked (the gate is a caller-side cost-knob, not
+        a hard filter — high-bandwidth debug sessions may always
+        want the per-cycle stream).
+        """
+        record = {{
+            "cycle": cycle,
+            "signal": signal or "",
+            "chart_state": chart_state,
+            "transition_id": None,
+            "chart_path": chart_path or [],
+            "region": region or "",
+        }}
+        self._fh.write(json.dumps(record) + "\\n")
+
+    def close(self) -> None:
+        """Close the underlying file handle.
+
+        Called at @cocotb.test() teardown (success or failure) so the
+        annotation file is well-formed on disk even if the test body
+        raised. Idempotent — repeated calls are safe.
+        """
+        if self._fh is not None and not self._fh.closed:
+            self._fh.close()
+
+    def __enter__(self) -> "AnnotationWriter":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 '''
     return body
 
@@ -542,7 +731,12 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
-from _cocotb_helpers import assert_state, format_failure, load_vector
+from _cocotb_helpers import (
+    AnnotationWriter,
+    assert_state,
+    format_failure,
+    load_vector,
+)
 
 
 _VECTORS_DIR = Path(__file__).parent / "vectors"
@@ -580,39 +774,97 @@ def _emit_one_test_function(
     """
     return f'''@cocotb.test()
 async def test_vector_{slug}(dut):
-    """SOS-08-D wave-1 — vector {vector_id!r}."""
+    """SOS-08-D wave-1 — vector {vector_id!r}.
+
+    SOS-08-G wave-1: an ``AnnotationWriter`` is instantiated at test
+    start and a per-step transition record is emitted on every step
+    whose ``expected_state`` is non-null. The writer's underlying
+    file (``<test>.annotations.jsonl``) is co-emitted alongside the
+    simulator's ``.fst`` + ``.vcd`` waveforms per SOS-08-G §5.1
+    three-file output contract / EOQ-011-ROADMAP. Per
+    INV-S-HDL-G-5 the writer is instrumented INSIDE the test
+    function (NOT a post-process step).
+    """
     vector = load_vector(_VECTORS_DIR / "{vector_id}.json")
     cocotb.start_soon(Clock(dut.clk, _CLOCK_PERIOD_NS, units="ns").start())
-    await _apply_reset(dut)
 
-    # After reset deassertion, the DUT MUST be in the chart's <initial>
-    # state per SOS-08-C §5.6 / PCDN-C-003. We assert that BEFORE walking
-    # the vector's steps so a wedged-at-reset DUT surfaces here, not
-    # downstream where the chart-vocabulary attribution is murkier.
-    await RisingEdge(dut.clk)
-    assert_state(dut, {initial_state!r}, format_failure(vector))
+    # SOS-08-G §5.6 (PCDN-G-003): one annotation file per test run.
+    # Created at test start; closed in the `finally` so the file is
+    # well-formed even when the test body raises.
+    writer = AnnotationWriter(test_name="test_vector_{slug}")
+    cycle = 0
+    try:
+        await _apply_reset(dut)
+        cycle += _RESET_CYCLES
 
-    # Walk vector steps if present (SOS-03 §7.1 extended for HDL targets;
-    # each step may carry `inputs` to drive, `expected_state` to assert,
-    # and a `transition_id` for chart-vocabulary failure attribution).
-    for step in vector.get("steps", []) or []:
-        # Drive input stimuli — wave-1 supports a flat `{{port: value}}`
-        # map on each step. Vector authors who name a port absent on
-        # the DUT will get a cocotb signal-resolution AttributeError;
-        # that surfaces as an ERROR per §6.5 (test-infrastructure
-        # failure), distinct from a chart-vocabulary FAIL.
-        for port_name, port_value in (step.get("inputs") or {{}}).items():
-            getattr(dut, port_name).value = port_value
+        # After reset deassertion, the DUT MUST be in the chart's
+        # <initial> state per SOS-08-C §5.6 / PCDN-C-003. We assert that
+        # BEFORE walking the vector's steps so a wedged-at-reset DUT
+        # surfaces here, not downstream where the chart-vocabulary
+        # attribution is murkier.
         await RisingEdge(dut.clk)
-        expected_state = step.get("expected_state")
-        if expected_state is not None:
-            assert_state(dut, expected_state, format_failure(vector, step))
+        cycle += 1
+        assert_state(dut, {initial_state!r}, format_failure(vector))
+        # SOS-08-G §5.2: emit a chart-state-entry record for the
+        # reset-baseline initial-state entry. `transition_id=None` per
+        # §5.2 (initial-state entry is a state-enter that did not
+        # transit).
+        writer.record_transition(
+            cycle=cycle,
+            chart_state={initial_state!r},
+            transition_id=None,
+            chart_path=[{initial_state!r}],
+            signal="dut.current_state",
+        )
 
-    # Final assertion: chart ended in the expected terminal state.
-    # Defaults to the chart's initial state for minimal vectors that
-    # only verify the reset-baseline (SOS-03 minimal vector shape).
-    terminal = vector.get("expected_terminal_state", {initial_state!r})
-    assert_state(dut, terminal, format_failure(vector))
+        # Walk vector steps if present (SOS-03 §7.1 extended for HDL
+        # targets; each step may carry `inputs` to drive, `expected_state`
+        # to assert, and a `transition_id` for chart-vocabulary failure
+        # attribution).
+        for step_index, step in enumerate(vector.get("steps", []) or []):
+            # Drive input stimuli — wave-1 supports a flat
+            # `{{port: value}}` map on each step. Vector authors who name
+            # a port absent on the DUT will get a cocotb signal-
+            # resolution AttributeError; that surfaces as an ERROR per
+            # §6.5 (test-infrastructure failure), distinct from a
+            # chart-vocabulary FAIL.
+            for port_name, port_value in (step.get("inputs") or {{}}).items():
+                getattr(dut, port_name).value = port_value
+            await RisingEdge(dut.clk)
+            cycle += 1
+            expected_state = step.get("expected_state")
+            if expected_state is not None:
+                assert_state(dut, expected_state, format_failure(vector, step))
+                # SOS-08-G §5.2 / INV-S-HDL-G-2: emit a chart-vocabulary
+                # transition record per step. The record names the
+                # destination chart state + the transition id so the
+                # review surface can render the badge at chart level.
+                writer.record_transition(
+                    cycle=cycle,
+                    chart_state=expected_state,
+                    transition_id=step.get("transition_id"),
+                    chart_path=[expected_state],
+                    signal="dut.current_state",
+                    vector_index=step_index,
+                )
+
+        # Final assertion: chart ended in the expected terminal state.
+        # Defaults to the chart's initial state for minimal vectors that
+        # only verify the reset-baseline (SOS-03 minimal vector shape).
+        terminal = vector.get("expected_terminal_state", {initial_state!r})
+        assert_state(dut, terminal, format_failure(vector))
+        writer.record_transition(
+            cycle=cycle,
+            chart_state=terminal,
+            transition_id=None,
+            chart_path=[terminal],
+            signal="dut.current_state",
+        )
+    finally:
+        # SOS-08-G §5.6 (PCDN-G-003): one file per test run; close on
+        # both success and failure so the annotation file is well-formed
+        # on disk regardless of the test outcome.
+        writer.close()
 '''
 
 
@@ -778,6 +1030,63 @@ emission bug per INV-S-HDL-D-5, not a passing test.
 - Clock period: **{config.clock_period_ns} ns** ({1000 // config.clock_period_ns if config.clock_period_ns else 0} MHz).
 - Reset cycles: **{config.reset_cycles}** (synchronously high at test
   start; SOS-08-A INV-S-HDL-A-1).
+
+## Waveform annotation overlay (SOS-08-G)
+
+Every `@cocotb.test()` in this directory emits a three-file review
+artifact per SOS-08-G-CONCEPTS.md §5.1 (three-file output contract,
+EOQ-011-ROADMAP) and §15 (ratified 2026-05-23):
+
+| File | Producer | Purpose |
+|------|----------|---------|
+| `<test>.fst` | simulator (`--trace`) | Fastsignaltrace waveform; GTKWave + Surfer native. |
+| `<test>.vcd` | simulator (`--trace`) | VCD waveform; universal compatibility. |
+| `<test>.annotations.jsonl` | this testbench (`AnnotationWriter`) | JSON-Lines chart-vocabulary overlay. |
+
+The annotation file's first line is the schema-version header per
+**PCDN-SOS-08-G-001** / INV-S-HDL-G-3:
+
+```json
+{{"_meta": {{"schema": "sos-annotations", "version": "1.0", "chart_path_max_depth": 8}}}}
+```
+
+Subsequent lines are per-event annotation records per
+**PCDN-SOS-08-G-005** (per-event default; `cycle`-density opt-in
+honored via `SOS_ANNOTATION_DENSITY=cycle` env var). Each record
+carries the six normative fields per SOS-08-G §5.2 / INV-S-HDL-G-2:
+`cycle`, `signal`, `chart_state`, `transition_id`, `chart_path`,
+`region`. Two optional fields: `invariant_id`, `vector_index`.
+
+The file handle is line-buffered per **PCDN-SOS-08-G-006**
+(`open(..., buffering=1)`); each newline-terminated record reaches
+disk without per-record fsync, sufficient for mid-run review.
+
+### Viewer integration
+
+Per SOS-08-G §6 (viewer integration) + **PCDN-SOS-08-G-004**, GTKWave
+and Surfer viewer extensions live in-subrepo at
+`tools/sos-codegen/viewers/{{gtkwave,surfer}}/` (sibling-agent
+deliverables landing alongside this emitter). They read the
+`.annotations.jsonl` overlay and render chart-state badges as a track
+on the waveform timeline next to the raw signal traces.
+
+Commercial viewers (Riviera, Questa, VCS DVE, Xcelium SimVision) do
+NOT receive native plugins from SOS; the customer wraps the
+annotation overlay via the vendor's TCL/Python user-script extension
+API. The overlay format is documented at SOS-08-G §5.2 so customers
+can author their own hookup.
+
+### Storage discipline
+
+Per SOS-08-G §5.8 + INV-S-HDL-G-4, `.fst` / `.vcd` /
+`.annotations.jsonl` files are **build outputs** and MUST NOT appear
+in the chart's tracked git history. Add to `.gitignore`:
+
+```
+*.fst
+*.vcd
+*.annotations.jsonl
+```
 """
 
 

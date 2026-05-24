@@ -537,3 +537,299 @@ def test_emitted_artifacts_cite_sos_08_d():
             # spec citations.
             continue
         assert "SOS-08-D" in body, f"{fname} missing SOS-08-D citation"
+
+
+# ---------------------------------------------------------------------------
+# Test 11 — SOS-08-G AnnotationWriter (waveform annotation emission).
+#
+# @spec  SOS-08-G-CONCEPTS.md §5.2 (overlay schema), §5.6 (one file
+#        per test run per PCDN-G-003), §5.7 (per-event default
+#        granularity per PCDN-G-005), §15 (ratified 2026-05-23).
+# @spec  PCDN-SOS-08-G-001 — first-line schema header
+# @spec  PCDN-SOS-08-G-005 — per-event default; SOS_ANNOTATION_DENSITY
+#        env var opts into cycle granularity.
+# @spec  PCDN-SOS-08-G-006 — line-buffered flush.
+# @spec  INV-S-HDL-G-2 — chart-vocabulary mandatory in overlay.
+# @spec  INV-S-HDL-G-3 — schema-version header required.
+# @spec  INV-S-HDL-G-5 — writer instrumented INSIDE @cocotb.test().
+# ---------------------------------------------------------------------------
+
+
+def _exec_helpers(files):
+    """Exec the emitted `_cocotb_helpers.py` into a fresh namespace
+    and return it. The module is dependency-free against cocotb so
+    this works without a simulator runtime."""
+    helpers = files["tests/demo/_cocotb_helpers.py"]
+    namespace: dict = {}
+    exec(compile(helpers, "_cocotb_helpers.py", "exec"), namespace)
+    return namespace, helpers
+
+
+def test_annotation_writer_emits_schema_header(tmp_path):
+    """SOS-08-G §5.2 + PCDN-G-001 + INV-S-HDL-G-3: the emitted
+    ``AnnotationWriter`` class carries the schema-version header
+    matching the spec, and writes it as the first JSONL record on
+    construction.
+
+    The header MUST carry:
+      - "schema": "sos-annotations"
+      - "version": "1.0"
+      - "chart_path_max_depth": 8 (mirrors SOS-12 depth-cap per
+        PCDN-G-002)
+    """
+    files = render_target(_simple_chart(), {"chart_name": "demo"})
+    ns, helpers_src = _exec_helpers(files)
+
+    # The class exists in the emitted module.
+    assert "AnnotationWriter" in ns, \
+        "AnnotationWriter class missing from _cocotb_helpers.py emit"
+    AnnotationWriter = ns["AnnotationWriter"]
+
+    # Class-level _SCHEMA_HEADER matches the spec exactly.
+    assert AnnotationWriter._SCHEMA_HEADER == {
+        "_meta": {
+            "schema": "sos-annotations",
+            "version": "1.0",
+            "chart_path_max_depth": 8,
+        }
+    }
+
+    # Header source text appears in the emitted module (so a
+    # source-level reviewer can grep for PCDN-G-001 / spec compliance).
+    assert '"schema"' in helpers_src
+    assert '"sos-annotations"' in helpers_src
+    assert '"version"' in helpers_src
+    assert '"1.0"' in helpers_src
+    assert '"chart_path_max_depth"' in helpers_src
+
+    # When instantiated, the writer's FIRST JSONL line MUST be the
+    # schema header (INV-S-HDL-G-3 — files without the header are
+    # non-conformant).
+    writer = AnnotationWriter("smoke", output_dir=tmp_path)
+    writer.close()
+    first_line = (tmp_path / "smoke.annotations.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()[0]
+    assert json.loads(first_line) == {
+        "_meta": {
+            "schema": "sos-annotations",
+            "version": "1.0",
+            "chart_path_max_depth": 8,
+        }
+    }
+
+
+def test_test_body_uses_annotation_writer():
+    """Per INV-S-HDL-G-5: the annotation writer MUST be instrumented
+    INSIDE each @cocotb.test() body (not a post-process step). The
+    emitted test module:
+      - Imports ``AnnotationWriter`` from the helpers.
+      - Instantiates an ``AnnotationWriter`` at test start.
+      - Calls ``record_transition`` (per PCDN-G-005 event default).
+      - Calls ``close()`` in a finally so the file is well-formed on
+        both success and failure (PCDN-G-003 one-file-per-run).
+    """
+    files = render_target(
+        _simple_chart(),
+        {"chart_name": "demo", "vector_ids": ["000-reset", "0001-step"]},
+    )
+    test_module = files["tests/demo/test_demo_fsm.py"]
+
+    # Import surfaces AnnotationWriter.
+    assert "AnnotationWriter" in test_module, \
+        "test module does not import AnnotationWriter"
+
+    # Each @cocotb.test() body instantiates an AnnotationWriter and
+    # calls record_transition + close. Count instantiations via AST.
+    tree = ast.parse(test_module)
+    instantiations = 0
+    record_calls = 0
+    close_calls = 0
+    finally_blocks = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name.startswith(
+            "test_vector_"
+        ):
+            # Walk the test body looking for AnnotationWriter(...) calls.
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
+                    if sub.func.id == "AnnotationWriter":
+                        instantiations += 1
+                if isinstance(sub, ast.Call) and isinstance(
+                    sub.func, ast.Attribute
+                ):
+                    if sub.func.attr == "record_transition":
+                        record_calls += 1
+                    if sub.func.attr == "close":
+                        close_calls += 1
+                if isinstance(sub, ast.Try) and sub.finalbody:
+                    finally_blocks += 1
+    # 2 vectors → 2 @cocotb.test() bodies → 2 writer instantiations.
+    assert instantiations == 2, (
+        f"expected one AnnotationWriter() per test body, got {instantiations}"
+    )
+    # Each test body emits at least one record_transition (reset
+    # baseline) — typically two (baseline + terminal). We just require
+    # one-per-vector at minimum.
+    assert record_calls >= 2, (
+        f"expected record_transition calls in each test body, got {record_calls}"
+    )
+    # Each test body MUST close() the writer in finally (PCDN-G-003).
+    assert close_calls >= 2, (
+        f"expected writer.close() in each test body, got {close_calls}"
+    )
+    # And the close() lives in a `finally` (so failure paths still
+    # flush the annotation file to disk).
+    assert finally_blocks >= 2, (
+        f"expected try/finally per test body, got {finally_blocks}"
+    )
+
+
+def test_annotation_density_env_var_respected(tmp_path, monkeypatch):
+    """Per PCDN-SOS-08-G-005: per-event is the v1 default; per-cycle
+    is the opt-in via ``SOS_ANNOTATION_DENSITY=cycle``. The helper
+    module MUST reference the env var name so a future migration to
+    a flag-driven configuration has a single grep target.
+    """
+    files = render_target(_simple_chart(), {"chart_name": "demo"})
+    ns, helpers_src = _exec_helpers(files)
+
+    # Env-var name appears literally in the emitted source.
+    assert "SOS_ANNOTATION_DENSITY" in helpers_src
+
+    AnnotationWriter = ns["AnnotationWriter"]
+
+    # Default density (env var unset) is "event" per PCDN-G-005.
+    monkeypatch.delenv("SOS_ANNOTATION_DENSITY", raising=False)
+    w = AnnotationWriter("default_density", output_dir=tmp_path)
+    try:
+        assert w.density == "event"
+    finally:
+        w.close()
+
+    # Setting the env var to "cycle" flips the writer's mode.
+    monkeypatch.setenv("SOS_ANNOTATION_DENSITY", "cycle")
+    w_cycle = AnnotationWriter("cycle_density", output_dir=tmp_path)
+    try:
+        assert w_cycle.density == "cycle"
+    finally:
+        w_cycle.close()
+
+    # Unknown values fall back to "event" (defensive — opt-ins must
+    # be explicit; typos do not silently change behaviour).
+    monkeypatch.setenv("SOS_ANNOTATION_DENSITY", "garbage")
+    w_unknown = AnnotationWriter("unknown_density", output_dir=tmp_path)
+    try:
+        assert w_unknown.density == "event"
+    finally:
+        w_unknown.close()
+
+
+def test_annotation_record_carries_chart_vocabulary(tmp_path):
+    """Per INV-S-HDL-G-2: every annotation record MUST carry the
+    chart-vocabulary fields (`chart_state`, `transition_id`,
+    `chart_path`). A record that surfaces only `cycle` + `signal`
+    regresses to RTL-signal-level review.
+    """
+    files = render_target(_simple_chart(), {"chart_name": "demo"})
+    ns, _ = _exec_helpers(files)
+    AnnotationWriter = ns["AnnotationWriter"]
+
+    w = AnnotationWriter("vocab", output_dir=tmp_path)
+    w.record_transition(
+        cycle=42,
+        chart_state="working",
+        transition_id="T_GO",
+        chart_path=["working"],
+        signal="dut.current_state",
+    )
+    w.close()
+
+    lines = (tmp_path / "vocab.annotations.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    # Line 0 is the schema header (verified by the dedicated test);
+    # line 1 is the transition record.
+    record = json.loads(lines[1])
+    # Six normative fields per §5.2 / INV-S-HDL-G-2.
+    for field in ("cycle", "signal", "chart_state", "transition_id",
+                  "chart_path", "region"):
+        assert field in record, f"normative field {field!r} missing"
+    assert record["cycle"] == 42
+    assert record["chart_state"] == "working"
+    assert record["transition_id"] == "T_GO"
+    assert record["chart_path"] == ["working"]
+    assert record["signal"] == "dut.current_state"
+
+
+def test_annotation_writer_line_buffered(tmp_path):
+    """Per PCDN-SOS-08-G-006: the writer's file handle is line-
+    buffered (`buffering=1`) so every newline-terminated record
+    reaches disk without per-record fsync overhead.
+
+    We probe this by writing a record and then reading the file from
+    a separate handle BEFORE closing the writer — line-buffered mode
+    guarantees the line is visible.
+    """
+    files = render_target(_simple_chart(), {"chart_name": "demo"})
+    ns, _ = _exec_helpers(files)
+    AnnotationWriter = ns["AnnotationWriter"]
+
+    w = AnnotationWriter("buffered", output_dir=tmp_path)
+    w.record_transition(
+        cycle=1,
+        chart_state="idle",
+        transition_id=None,
+        chart_path=["idle"],
+        signal="dut.current_state",
+    )
+    # Probe BEFORE close — line-buffered mode flushed the newline
+    # already, so the file on disk MUST carry both the header line
+    # and the transition record.
+    on_disk = (tmp_path / "buffered.annotations.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(on_disk) >= 2, (
+        "line-buffered flush should make both header + record visible "
+        "before close()"
+    )
+    w.close()
+
+
+def test_readme_documents_annotation_overlay():
+    """Per SOS-08-G §6 (viewer integration): the emitted README MUST
+    document the `.annotations.jsonl` overlay + how viewers consume
+    it, citing the relevant PCDN identifiers.
+    """
+    files = render_target(_simple_chart(), {"chart_name": "demo"})
+    readme = files["tests/demo/README.md"]
+
+    # SOS-08-G citation per chart-vocabulary doctrine.
+    assert "SOS-08-G" in readme
+
+    # Three-file output contract documented.
+    assert ".fst" in readme
+    assert ".vcd" in readme
+    assert ".annotations.jsonl" in readme
+
+    # Key PCDNs cited.
+    assert "PCDN-SOS-08-G-001" in readme  # schema header
+    assert "PCDN-SOS-08-G-004" in readme  # viewer location
+    assert "PCDN-SOS-08-G-005" in readme  # density default
+    assert "PCDN-SOS-08-G-006" in readme  # line-buffered
+
+    # Viewer integration named (GTKWave + Surfer per §6).
+    assert "GTKWave" in readme
+    assert "Surfer" in readme
+
+
+def test_helpers_module_parses_with_annotation_writer():
+    """Sanity gate: the extended `_cocotb_helpers.py` MUST still parse
+    cleanly as Python. The AnnotationWriter class is added inline; if
+    the emit ever generates malformed f-string interpolation the AST
+    parser will catch it before a downstream test does."""
+    files = render_target(_simple_chart(), {"chart_name": "demo"})
+    ast.parse(files["tests/demo/_cocotb_helpers.py"])
+    # And the emitted test module continues to parse (the wired-in
+    # AnnotationWriter usage must not regress the test body's syntax).
+    ast.parse(files["tests/demo/test_demo_fsm.py"])

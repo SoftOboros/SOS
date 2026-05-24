@@ -1,0 +1,7 @@
+{"_meta": {"schema": "sos-annotations", "version": "1.0", "chart_path_max_depth": 8}}
+{"cycle": 0, "signal": "dut.fsm_state", "chart_state": "idle", "transition_id": null, "chart_path": "/orchestrator", "region": null}
+{"cycle": 12, "signal": "dut.fsm_state", "chart_state": "arming", "transition_id": "t_idle_to_arming", "chart_path": "/orchestrator", "region": null, "vector_index": 0}
+{"cycle": 47, "signal": "dut.fsm_state", "chart_state": "running", "transition_id": "t_arming_to_running", "chart_path": "/orchestrator", "region": null, "vector_index": 1}
+{"cycle": 88, "signal": "dut.syscalls.fsm_state", "chart_state": "sem.take.wait", "transition_id": "t_take_to_wait", "chart_path": "/orchestrator/syscalls/sem.take", "region": "r0"}
+{"cycle": 102, "signal": "dut.syscalls.fsm_state", "chart_state": "sem.take.acquired", "transition_id": "t_wait_to_acquired", "chart_path": "/orchestrator/syscalls/sem.take", "region": "r0", "invariant_id": "INV-S-CHART-3", "vector_index": 7}
+{"cycle": 156, "signal": "dut.fsm_state", "chart_state": "halted", "transition_id": "t_running_to_halted", "chart_path": "/orchestrator", "region": null, "vector_index": 12}
