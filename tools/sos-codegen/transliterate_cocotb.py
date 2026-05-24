@@ -81,7 +81,7 @@ Wave-1 scope (intentionally narrow — PCDN-D-003 / §5.5):
        §6 (viewer integration contract — GTKWave / Surfer extensions
        consume the annotation overlay), §15 (ratified 2026-05-23).
 @spec  PCDN-SOS-08-G-001 — schema-version detection via first-line
-       header record `{"_meta": {"schema": "sos-annotations",
+       header record `{"_meta": {"schema": "sos-08-g/annotations",
        "version": "1.0", "chart_path_max_depth": 8}}`.
 @spec  PCDN-SOS-08-G-003 — one `.annotations.jsonl` per test run.
 @spec  PCDN-SOS-08-G-004 — viewer extensions live in-subrepo at
@@ -568,7 +568,7 @@ class AnnotationWriter:
 
     _SCHEMA_HEADER = {{
         "_meta": {{
-            "schema": "sos-annotations",
+            "schema": "sos-08-g/annotations",
             "version": "1.0",
             "chart_path_max_depth": 8,
         }}
@@ -1047,7 +1047,7 @@ The annotation file's first line is the schema-version header per
 **PCDN-SOS-08-G-001** / INV-S-HDL-G-3:
 
 ```json
-{{"_meta": {{"schema": "sos-annotations", "version": "1.0", "chart_path_max_depth": 8}}}}
+{{"_meta": {{"schema": "sos-08-g/annotations", "version": "1.0", "chart_path_max_depth": 8}}}}
 ```
 
 Subsequent lines are per-event annotation records per

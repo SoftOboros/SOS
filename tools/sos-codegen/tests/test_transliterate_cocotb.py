@@ -572,7 +572,7 @@ def test_annotation_writer_emits_schema_header(tmp_path):
     construction.
 
     The header MUST carry:
-      - "schema": "sos-annotations"
+      - "schema": "sos-08-g/annotations"  (per §5.2 + PCDN-G-wave1-001)
       - "version": "1.0"
       - "chart_path_max_depth": 8 (mirrors SOS-12 depth-cap per
         PCDN-G-002)
@@ -588,7 +588,7 @@ def test_annotation_writer_emits_schema_header(tmp_path):
     # Class-level _SCHEMA_HEADER matches the spec exactly.
     assert AnnotationWriter._SCHEMA_HEADER == {
         "_meta": {
-            "schema": "sos-annotations",
+            "schema": "sos-08-g/annotations",
             "version": "1.0",
             "chart_path_max_depth": 8,
         }
@@ -597,7 +597,7 @@ def test_annotation_writer_emits_schema_header(tmp_path):
     # Header source text appears in the emitted module (so a
     # source-level reviewer can grep for PCDN-G-001 / spec compliance).
     assert '"schema"' in helpers_src
-    assert '"sos-annotations"' in helpers_src
+    assert '"sos-08-g/annotations"' in helpers_src
     assert '"version"' in helpers_src
     assert '"1.0"' in helpers_src
     assert '"chart_path_max_depth"' in helpers_src
@@ -612,7 +612,7 @@ def test_annotation_writer_emits_schema_header(tmp_path):
     ).splitlines()[0]
     assert json.loads(first_line) == {
         "_meta": {
-            "schema": "sos-annotations",
+            "schema": "sos-08-g/annotations",
             "version": "1.0",
             "chart_path_max_depth": 8,
         }

@@ -25,7 +25,7 @@ APIs lands in wave-2 once that API stabilises.
        co-location per §6 (a)).
 @spec  SOS-08-G-CONCEPTS.md §5.2 + §15 (PCDN-G-001 resolution):
        schema-version header is the first line of the overlay file;
-       header carries `{"_meta": {"schema": "sos-annotations",
+       header carries `{"_meta": {"schema": "sos-08-g/annotations",
        "version": "1.0", "chart_path_max_depth": 8}}` per
        PCDN-G-001 + PCDN-G-002 resolutions.
 @spec  SOS-08-G-CONCEPTS.md §5.5 + §15 (PCDN-G-004 resolution):

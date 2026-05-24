@@ -120,11 +120,13 @@ Frozen-enumeration registration policy for the file-set: **Standards Action** (m
 
 ### 5.2 Annotation overlay schema
 
-The `<test>.annotations.jsonl` file is line-delimited JSON (one JSON object per line; no enclosing array; no trailing comma; UTF-8). The first line of every file MUST be a schema-version header record:
+The `<test>.annotations.jsonl` file is line-delimited JSON (one JSON object per line; no enclosing array; no trailing comma; UTF-8). The first line of every file MUST be a schema-version header record. Per PCDN-G-wave1-001 the canonical header shape is the `_meta`-envelope form:
 
 ```
-{"schema": "sos-08-g/annotations", "version": "1.0"}
+{"_meta": {"schema": "sos-08-g/annotations", "version": "1.0", "chart_path_max_depth": 8}}
 ```
+
+The `_meta` envelope segregates schema bookkeeping from data records (so JSONL stream-consumers can dispatch on `"_meta" in record`); the namespaced `sos-08-g/annotations` schema name reserves a path for cross-phase overlay families to coexist; the `chart_path_max_depth` field publishes the SOS-12 cap (mirrored per PCDN-G-002) so viewer extensions can size path-truncation hints without an out-of-band lookup. Conforming readers MAY accept the flat shape (`{"schema": ..., "version": ...}`) for backwards compatibility with v1-pre-canonicalization producers; conforming **emitters** MUST emit the `_meta` envelope form.
 
 Every subsequent line is an **annotation record**. Six normative fields, two optional:
 
@@ -210,7 +212,7 @@ Frozen registration policy: **Standards Action** (any change to storage discipli
 A conforming viewer integration (GTKWave plugin, Surfer extension, commercial-viewer user script, or headless CI renderer) MUST satisfy:
 
 - (a) **Co-locate** — given a waveform file path `<test>.fst` or `<test>.vcd`, locate `<test>.annotations.jsonl` in the same directory. If absent, the integration MAY render the waveform alone (no overlay) without error.
-- (b) **Schema-version-aware** — read the first line, verify `schema == "sos-08-g/annotations"` and `version == "1.0"` (or a version the integration declares support for). Reject with a clear error if the schema is unknown.
+- (b) **Schema-version-aware** — read the first line, unwrap the `_meta` envelope (or accept the flat shape for backwards compatibility), and verify `schema == "sos-08-g/annotations"` and `version == "1.0"` (or a version the integration declares support for). Reject with a clear error if the schema is unknown.
 - (c) **Per-record render** — for each annotation record, render a badge at `(cycle, signal)` on the waveform timeline carrying `chart_state` (and, when present, `transition_id` / `invariant_id` as secondary detail). Badges MUST be visually distinguishable from raw signal traces.
 - (d) **Chart-path navigation** — when the chart-family has sub-charts ([SOS-12][sos-12]), the integration SHOULD provide a UI affordance to filter or scope by `chart_path` so the developer can focus on one sub-chart's transitions at a time.
 - (e) **Invariant-fire highlighting** — records with `invariant_id` non-null SHOULD render with a distinct visual treatment (color, icon) so SVA fires stand out from ordinary chart-state transitions.
@@ -426,3 +428,30 @@ Wave-1 implementation surface landed under the 2026-05-23 ratification of §15 a
 **Cited PCDNs** (all resolved 2026-05-23 §15 ratification entry above, implementation now in place): PCDN-SOS-08-G-001 (first-line header), PCDN-SOS-08-G-002 (`chart_path_max_depth=8` mirrored from SOS-12), PCDN-SOS-08-G-003 (one `.annotations.jsonl` per test run), PCDN-SOS-08-G-004 (in-subrepo viewer-extension location at `tools/sos-codegen/viewers/{gtkwave,surfer}/`), PCDN-SOS-08-G-005 (per-event default density; `SOS_ANNOTATION_DENSITY=cycle` opt-in), PCDN-SOS-08-G-006 (line-buffered flush via `open(..., buffering=1)`), PCDN-SOS-08-G-007 (sub-chart-local `vector_index`; `chart_path` disambiguates ownership).
 
 **Status**: 🟢 **ratified (continuing)** — wave-1 scaffold lands the annotation-emission half of SOS-08-G; viewer integration scaffolds are CLI tools, full GUI integration in wave-2.
+
+### 2026-05-23 — Wave-1 PCDN walkthrough (Ira)
+
+The wave-1 scaffold implementation exposed five new PCDNs (PCDN-G-wave1-001 through 005). All five resolved with recommendations accepted.
+
+- **PCDN-G-wave1-001 — Schema header shape canonicalization → RESOLVED**. §5.2 originally froze the flat shape `{"schema": "sos-08-g/annotations", "version": "1.0"}`; the wave-1 ratification §15 entry above + the wave-1 impl emitted the wrapped form `{"_meta": {"schema": "sos-annotations", "version": "1.0", "chart_path_max_depth": 8}}` with an un-namespaced schema name. The two diverged on three axes: envelope shape (`_meta`-wrapped vs flat), schema name (`sos-annotations` vs `sos-08-g/annotations`), and extra field (`chart_path_max_depth` carried vs absent). Resolution: **hybrid form** — `_meta`-wrapped envelope (segregates bookkeeping from data records; cleaner for JSONL stream-consumers), namespaced `sos-08-g/annotations` schema name (reserves path for cross-phase overlay families; matches §5.2's original discipline), `chart_path_max_depth: 8` retained (viewer extensions need it for path-truncation hints). §5.2 amended to publish the hybrid form as the canonical emitter contract; §6 (b) viewer-integration contract extended to unwrap `_meta` (or accept flat shape for backwards compatibility); INV-S-HDL-G-3 unchanged (header is still line-0). Code/viewer/test changes landed in the same commit as this amendment.
+
+- **PCDN-G-wave1-002 — Per-cycle density actual implementation → DEFERRED to wave-2**. Wave-1 reads `SOS_ANNOTATION_DENSITY`, resolves the `density` attribute on `AnnotationWriter`, and exposes the `record_cycle` method on the writer; the `@cocotb.test()` body does NOT yet wire a per-`RisingEdge(dut.clk)` callback that invokes `record_cycle`. Reason for deferral: the cycle callback needs to discover `dut.clk` from the SOS-08-C chart→FSM port-naming convention (currently `clk_<domain>` per SOS-08-C wave-3 polish), and that requires threading the SOS-08-C port-name convention into the cocotb walker's emit. Wave-2 does the threading + the callback wire-up together. Wave-1 surface remains conforming because §5.7 freezes per-event as the default; per-cycle is opt-in.
+
+- **PCDN-G-wave1-003 — Filename-prefix coordination by construction → DEFERRED to wave-2**. INV-S-HDL-G-1 (three-file output coupling) is currently caller-coordinated: the operator passes `--trace --trace-structs` to Verilator/Icarus separately from the cocotb test's `AnnotationWriter(test_name=...)` argument, and the matching filename prefix is by convention. Wave-2 emits a cocotb-classic Makefile fragment that binds the simulator's dump path to the writer's annotation path so prefix coordination is by construction. Wave-1 surface is conforming as long as the caller's invocation pattern preserves the prefix.
+
+- **PCDN-G-wave1-004 — Nested-chart `chart_path` walking → DEFERRED to wave-2**. Wave-1 emits `chart_path=[chart_state]` (single-segment, top-level chart only). Wave-2 walks the SCXML hierarchy at emit time using `ChartAst.raw_scjson` (the field added to `ChartAst` in SOS-08-C wave-2) so sub-chart transitions carry the full `/parent/child/grandchild` path per [SOS-12][sos-12] recursive-dispatch vocabulary, capped at depth 8 per PCDN-G-002. INV-S-HDL-G-2 (chart-vocabulary mandatory) currently upheld by the single-segment form; nested-chart compositions ratifying §10's [SOS-12][sos-12] reconciliation need the walk.
+
+- **PCDN-G-wave1-005 — SVA bind-file `invariant_id` integration → DEFERRED to wave-2**. The SVA bind walker (`transliterate_sva_bind.py`, sibling of `transliterate_cocotb.py`) emits SystemVerilog assertion bind files whose `$display` / `$fwrite` fire-events are currently written to simulator stderr. Wave-2 wires those fires into the cocotb test body's `AnnotationWriter` via a sideband sim-output file the cocotb test reads at teardown so each assertion fire records as an annotation record with `invariant_id="INV-S-CHART-N"` (per §5.2 optional-field shape + §9 vs SOS-08-D reconciliation). Wave-1 surface is conforming with `invariant_id=null` on every record; the field is optional per §5.2.
+
+**§5.2 / §6 / INV amendments landed**:
+- §5.2 frozen JSON example replaced with the hybrid form. New paragraph explains the rationale for the three axis decisions (envelope, schema name, extra field) and pins emitter MUST / reader MAY semantics.
+- §6 (b) viewer-integration contract updated to unwrap `_meta` envelope before validating `schema` / `version`; backwards compatibility with the flat shape is permitted by reader implementations but not by emitters.
+- INV-S-HDL-G-3 (schema-version header required) wording unchanged; the header is still line-0 of the overlay file; only the canonical record shape was canonicalized.
+
+**Code / viewer / test changes landed in the same commit**:
+- `tools/sos-codegen/transliterate_cocotb.py` — `_SCHEMA_HEADER` constant uses `sos-08-g/annotations` schema name.
+- `tools/sos-codegen/viewers/gtkwave/sos_gtkwave_ext.py` — `SCHEMA_NAME = "sos-08-g/annotations"` (single source of truth re-exported to Surfer ext).
+- `tools/sos-codegen/viewers/tests/fixtures/example_annotations.jsonl` — header line updated.
+- `tools/sos-codegen/tests/test_transliterate_cocotb.py` + `tools/sos-codegen/tests/test_sos_08_g_integration.py` — assertions updated to expect `sos-08-g/annotations`.
+
+**Status**: 🟢 **wave-1 PCDN walkthrough complete**. PCDN-G-wave1-001 closed in-tree; PCDN-G-wave1-002 through 005 are documented wave-2 boundary entries (each names its specific deferral reason). Wave-2 may now proceed against an unambiguous spec / impl baseline.

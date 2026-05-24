@@ -1,4 +1,4 @@
-{"_meta": {"schema": "sos-annotations", "version": "1.0", "chart_path_max_depth": 8}}
+{"_meta": {"schema": "sos-08-g/annotations", "version": "1.0", "chart_path_max_depth": 8}}
 {"cycle": 0, "signal": "dut.fsm_state", "chart_state": "idle", "transition_id": null, "chart_path": "/orchestrator", "region": null}
 {"cycle": 12, "signal": "dut.fsm_state", "chart_state": "arming", "transition_id": "t_idle_to_arming", "chart_path": "/orchestrator", "region": null, "vector_index": 0}
 {"cycle": 47, "signal": "dut.fsm_state", "chart_state": "running", "transition_id": "t_arming_to_running", "chart_path": "/orchestrator", "region": null, "vector_index": 1}

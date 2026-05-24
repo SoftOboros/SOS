@@ -14,7 +14,7 @@
        record render are MUST)
 @spec  docs/concepts/SOS-08-G-CONCEPTS.md §15 (2026-05-23 ratification
        — PCDN-SOS-08-G-001..007 resolved; first-line header carrying
-       ``{"_meta": {"schema": "sos-annotations", "version": "1.0",
+       ``{"_meta": {"schema": "sos-08-g/annotations", "version": "1.0",
        "chart_path_max_depth": 8}}``)
 
 @invariants  INV-S-HDL-G-1 (three-file output coupling)
@@ -198,7 +198,7 @@ class TestAnnotationEmitsAtTestRuntime:
         # The header MUST be the ratified §15 shape.
         for token in (
             '"schema"',
-            '"sos-annotations"',
+            '"sos-08-g/annotations"',
             '"version"',
             '"1.0"',
             "chart_path_max_depth",
@@ -206,9 +206,9 @@ class TestAnnotationEmitsAtTestRuntime:
             assert token in helpers, (
                 f"SOS-08-G §15 (2026-05-23): emitted helpers schema "
                 f"header missing token {token!r}. Expected "
-                f'`{{"_meta": {{"schema": "sos-annotations", '
+                f'`{{"_meta": {{"schema": "sos-08-g/annotations", '
                 f'"version": "1.0", "chart_path_max_depth": 8}}}}` per '
-                f"PCDN-G-001 + PCDN-G-002."
+                f"PCDN-G-001 + PCDN-G-002 + PCDN-G-wave1-001."
             )
 
     def test_cocotb_test_body_calls_record_transition(self):
@@ -313,7 +313,7 @@ class TestAnnotationSchema:
     def test_schema_header_shape(self, tmp_path):
         """SOS-08-G §15 / PCDN-G-001 + PCDN-G-002: the first line of
         every ``.annotations.jsonl`` is
-        ``{"_meta": {"schema": "sos-annotations", "version": "1.0",
+        ``{"_meta": {"schema": "sos-08-g/annotations", "version": "1.0",
         "chart_path_max_depth": 8}}``; subsequent records carry the
         six normative fields per §5.2."""
         files = _emit_via_walker()
@@ -358,9 +358,10 @@ class TestAnnotationSchema:
 
         header = json.loads(lines[0])
         meta = header.get("_meta", header)
-        assert meta.get("schema") == "sos-annotations", (
-            f"SOS-08-G §15 / PCDN-G-001: schema header `schema` field "
-            f"must be 'sos-annotations'; got {meta.get('schema')!r}."
+        assert meta.get("schema") == "sos-08-g/annotations", (
+            f"SOS-08-G §5.2 + PCDN-G-wave1-001: schema header `schema` "
+            f"field must be 'sos-08-g/annotations'; got "
+            f"{meta.get('schema')!r}."
         )
         assert meta.get("version") == "1.0", (
             f"SOS-08-G §5.2: schema header `version` field must be "

@@ -24,7 +24,7 @@ API lands in wave-2 once that API stabilises.
        co-location per §6 (a)).
 @spec  SOS-08-G-CONCEPTS.md §5.2 + §15 (PCDN-G-001 resolution):
        schema-version header is the first line of the overlay file;
-       header carries `{"_meta": {"schema": "sos-annotations",
+       header carries `{"_meta": {"schema": "sos-08-g/annotations",
        "version": "1.0", "chart_path_max_depth": 8}}` per
        PCDN-G-001 + PCDN-G-002 resolutions.
 @spec  SOS-08-G-CONCEPTS.md §5.5 + §15 (PCDN-G-004 resolution):
@@ -64,8 +64,8 @@ from typing import Iterable, Sequence
 # Schema constants (frozen by SOS-08-G §5.2 + §15 PCDN-G-001 resolution).
 # ---------------------------------------------------------------------------
 
-SCHEMA_NAME = "sos-annotations"
-"""Schema identifier per SOS-08-G §15 PCDN-G-001 resolution."""
+SCHEMA_NAME = "sos-08-g/annotations"
+"""Schema identifier per SOS-08-G §5.2 (canonicalized in PCDN-G-wave1-001)."""
 
 SCHEMA_VERSION = "1.0"
 """Schema version frozen at v1.0 per SOS-08-G §5.2 + §12 (b)."""
@@ -99,12 +99,13 @@ def validate_schema_header(header: dict) -> None:
     """Validate the first-line schema-version header per INV-S-HDL-G-3.
 
     Accepts either the simple shape (``{"schema": ..., "version": ...}``)
-    or the §15-amendment ``_meta`` envelope shape; both forms are
-    permitted because §5.2 freezes the contract and §15 amended the
-    delivery envelope without breaking the field semantics.
+    or the canonical ``_meta`` envelope shape; both are permitted
+    because PCDN-G-wave1-001 ratifies the ``_meta``-wrapped form as the
+    emit-side canonical envelope while preserving the flat shape for
+    legacy / external producers.
 
     Raises ``ValueError`` if the header does not declare the v1
-    ``sos-annotations`` schema.
+    ``sos-08-g/annotations`` schema.
     """
     meta = header.get("_meta", header)
     schema = meta.get("schema")
