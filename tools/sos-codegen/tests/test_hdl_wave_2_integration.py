@@ -362,21 +362,33 @@ class TestMultipleGuardedTransitions:
     def test_document_order_preserved(self, dialect):
         """SOS-08-C §5.2: the chart's document order of transitions is
         the chart-author-visible priority. The emitted guards SHALL
-        appear in the order `a == 1`, `b > 5`, `c != 0`."""
+        appear in the order `a == 1`, `b > 5`, `c != 0`.
+
+        Operator syntax is dialect-specific (per §6.3): SV uses `==`/`!=`
+        (C-family), VHDL uses `=`/`/=` (Ada-family). The relational `>`
+        is shared. Both dialects share the chart-author identifier (the
+        walker MAY prefix with `data_` or suffix with `_q`).
+        """
         walker = _walker_for(dialect)
         chart = _load_chart_ir(self.FIXTURE)
         files = walker.render_target(chart, {"chart_name": self.CHART_NAME})
         src = "\n".join(files.values())
         # Tolerant of `data_a` / `a_q` prefixes the walker may apply.
         identifier_pattern = lambda base: rf"(?:data_)?{base}(?:_q)?"
+        if dialect is Dialect.VHDL:
+            eq_op = r"="
+            neq_op = r"/="
+        else:
+            eq_op = r"=="
+            neq_op = r"!="
         idx_a = re.search(
-            rf"{identifier_pattern('a')}\s*==\s*1", src
+            rf"{identifier_pattern('a')}\s*{eq_op}\s*1", src
         )
         idx_b = re.search(
             rf"{identifier_pattern('b')}\s*>\s*5", src
         )
         idx_c = re.search(
-            rf"{identifier_pattern('c')}\s*!=\s*0", src
+            rf"{identifier_pattern('c')}\s*{neq_op}\s*0", src
         )
         assert idx_a is not None, f"{dialect.name}: guard `a == 1` missing"
         assert idx_b is not None, f"{dialect.name}: guard `b > 5` missing"

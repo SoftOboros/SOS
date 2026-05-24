@@ -141,6 +141,25 @@ try:  # pragma: no cover
 except ImportError:  # pragma: no cover
     _hdl_port_width = None  # type: ignore
 
+# PCDN-SOS-08-C-wave3-clk-naming-passthrough (2026-05-23): defensively
+# import the clk_/rst_ port-name helpers from hdl_common; fall back to
+# local definitions of the same shape if the sibling module is older.
+try:  # pragma: no cover
+    from hdl_common import clk_port_name as _clk_port_name  # type: ignore
+    from hdl_common import rst_port_name as _rst_port_name  # type: ignore
+except ImportError:  # pragma: no cover
+    def _clk_port_name(domain: str) -> str:
+        """Local fallback for hdl_common.clk_port_name; see
+        PCDN-SOS-08-C-wave3-clk-naming-passthrough."""
+        return domain if domain.startswith("clk_") else f"clk_{domain}"
+
+    def _rst_port_name(domain: str) -> str:
+        """Local fallback for hdl_common.rst_port_name; see
+        PCDN-SOS-08-C-wave3-clk-naming-passthrough."""
+        if domain.startswith("clk_"):
+            return "rst_" + domain[len("clk_"):]
+        return f"rst_{domain}"
+
 
 # Backward-compat: tests may catch GuardDepthError; expose at module level.
 GuardDepthError = _HdlGuardDepthError
@@ -1131,7 +1150,14 @@ def _emit_sync_instance(
                 dst_signal=f"{signal_name}_dst",
                 src_clk=src_clock,
                 dst_clk=dst_clock,
-                dst_rst=f"rst_{dst_clock}",
+                # PCDN-SOS-08-C-wave3-clk-naming-passthrough: dst_clock
+                # is already a port name (e.g. "clk_main"); derive the
+                # matching rst port name from it.
+                dst_rst=(
+                    "rst_" + dst_clock[len("clk_"):]
+                    if dst_clock.startswith("clk_")
+                    else f"rst_{dst_clock}"
+                ),
                 width=width,
                 stages=2,
                 dialect=Dialect.VHDL,
@@ -1157,7 +1183,10 @@ def _emit_sync_instance(
         f"        port map (\n"
         f"            src_clk  => {src_clock},\n"
         f"            dst_clk  => {dst_clock},\n"
-        f"            dst_rst  => rst_{dst_clock},\n"
+        # PCDN-SOS-08-C-wave3-clk-naming-passthrough: dst_clock is
+        # already the wrapper port name; derive matching rst port.
+        f"            dst_rst  => "
+        f"{('rst_' + dst_clock[len('clk_'):]) if dst_clock.startswith('clk_') else ('rst_' + dst_clock)},\n"
         f"            src_data => {signal_name}_src,\n"
         f"            dst_data => {signal_name}_dst\n"
         f"        );"
@@ -1254,10 +1283,14 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
     top_entity = f"{chart_id}_top"
 
     # Build port list — one clk/rst per distinct clock domain.
+    # PCDN-SOS-08-C-wave3-clk-naming-passthrough (2026-05-23): the chart
+    # author's clock attribute is the literal port name. _clk_port_name
+    # falls back to `clk_<dom>` only when the input is a legacy bare
+    # domain (no `clk_` prefix).
     port_lines: list[str] = []
     for clk in clocks:
-        port_lines.append(f"        clk_{clk} : in std_logic")
-        port_lines.append(f"        rst_{clk} : in std_logic")
+        port_lines.append(f"        {_clk_port_name(clk)} : in std_logic")
+        port_lines.append(f"        {_rst_port_name(clk)} : in std_logic")
 
     # Datamodel + per-region current_state outputs — one per region for
     # observability (INV-S-HDL-C-2).
@@ -1291,8 +1324,9 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
         entity_id = _entity_name(chart.name, r.name)
         n = len(r.states)
         port_map_lines: list[str] = []
-        port_map_lines.append(f"            clk           => clk_{r.clock_domain},")
-        port_map_lines.append(f"            rst           => rst_{r.clock_domain},")
+        # PCDN-SOS-08-C-wave3-clk-naming-passthrough: pass domain through.
+        port_map_lines.append(f"            clk           => {_clk_port_name(r.clock_domain)},")
+        port_map_lines.append(f"            rst           => {_rst_port_name(r.clock_domain)},")
         for d in r.datamodel:
             port_map_lines.append(
                 f"            data_{d.name} => data_{d.name}_{_safe_ident(r.name)},"
@@ -1346,8 +1380,11 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
             _emit_sync_instance(
                 inst_name=inst,
                 signal_name=sig,
-                src_clock=f"clk_{src_clk}",
-                dst_clock=f"clk_{dst_clk}",
+                # PCDN-SOS-08-C-wave3-clk-naming-passthrough: emit the
+                # literal wrapper port names; the helper handles legacy
+                # bare-domain inputs.
+                src_clock=_clk_port_name(src_clk),
+                dst_clock=_clk_port_name(dst_clk),
                 width=width,
             )
         )

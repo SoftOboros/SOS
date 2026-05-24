@@ -190,24 +190,37 @@ def _chart_with_deep_guard():
 
 
 def _chart_with_parallel():
-    """Wave-2: chart with a top-level <parallel> — now ACCEPTED."""
+    """Wave-2: chart with a top-level <parallel> — now ACCEPTED.
+
+    Shape mirrors the canonical scjson tree (see
+    ``fixtures/parallel_two_regions.scxml``): a single ``<parallel>``
+    element whose ``state`` children are the per-region containers
+    (``region_left``/``region_right``). Each region container owns its
+    own leaf states + ``initial``. SOS-08-C §6.1 maps each ``<parallel>``
+    child to one HDL region module.
+    """
     return {
         "initial": "p",
         "parallel": [
             {
-                "id": "left",
-                "initial": "L1",
+                "id": "p",
                 "state": [
-                    _state("L1", transitions=[{"target": "L2"}]),
-                    _state("L2"),
-                ],
-            },
-            {
-                "id": "right",
-                "initial": "R1",
-                "state": [
-                    _state("R1", transitions=[{"target": "R2"}]),
-                    _state("R2"),
+                    {
+                        "id": "left",
+                        "initial": "L1",
+                        "state": [
+                            _state("L1", transitions=[{"target": "L2"}]),
+                            _state("L2"),
+                        ],
+                    },
+                    {
+                        "id": "right",
+                        "initial": "R1",
+                        "state": [
+                            _state("R1", transitions=[{"target": "R2"}]),
+                            _state("R2"),
+                        ],
+                    },
                 ],
             },
         ],

@@ -1416,6 +1416,53 @@ def _render_guard_node(node: ast.AST, dialect: Dialect) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Clock-/reset-port naming helpers (PCDN-SOS-08-C-wave3-clk-naming-passthrough).
+# ---------------------------------------------------------------------------
+
+
+def clk_port_name(domain: str) -> str:
+    """Return the wrapper-side clock port name for a clock-domain value.
+
+    Per the 2026-05-23 SOS-08-C wave-3 polish PCDN
+    (``PCDN-SOS-08-C-wave3-clk-naming-passthrough``), the chart-author's
+    ``<sos:region clock="..."/>`` attribute is the literal port name —
+    the walker passes the value through verbatim instead of prepending
+    ``clk_`` to it. For backward compatibility with legacy fixtures that
+    wrote a bare domain (e.g. ``clock="main"``), this helper prepends
+    ``clk_`` only when the input does not already start with it.
+
+    Examples::
+
+        clk_port_name("clk_main")  -> "clk_main"   # pass-through
+        clk_port_name("clk_fast")  -> "clk_fast"   # pass-through
+        clk_port_name("main")      -> "clk_main"   # legacy fallback
+    """
+
+    return domain if domain.startswith("clk_") else f"clk_{domain}"
+
+
+def rst_port_name(domain: str) -> str:
+    """Return the wrapper-side reset port name for a clock-domain value.
+
+    Per ``PCDN-SOS-08-C-wave3-clk-naming-passthrough`` (2026-05-23): the
+    reset port mirrors the clock port's domain suffix. If the input
+    starts with ``clk_``, the ``clk_`` prefix is rewritten to ``rst_``
+    (preserving the trailing domain identifier). If the input is bare,
+    ``rst_`` is prepended.
+
+    Examples::
+
+        rst_port_name("clk_main")  -> "rst_main"
+        rst_port_name("clk_fast")  -> "rst_fast"
+        rst_port_name("main")      -> "rst_main"   # legacy fallback
+    """
+
+    if domain.startswith("clk_"):
+        return "rst_" + domain[len("clk_"):]
+    return f"rst_{domain}"
+
+
+# ---------------------------------------------------------------------------
 # Cross-domain synchronizer instantiation (wave-2; SOS-08-A §6.9 binding).
 # ---------------------------------------------------------------------------
 
@@ -1710,10 +1757,18 @@ def _emit_chart_top_wrapper_new(
     #   3. Per-region datamodel signals (in region iteration order).
     #   4. Per-region current_state_<name> observability outputs.
     boundary_ports: list[HdlPort] = []
+    # PCDN-SOS-08-C-wave3-clk-naming-passthrough (2026-05-23): walker
+    # passes the chart-author's clock-domain value through verbatim
+    # instead of prepending `clk_`. clk_port_name / rst_port_name handle
+    # the legacy-bare-domain fallback in one place.
     for dom in clock_order:
-        boundary_ports.append(HdlPort(name=f"clk_{dom}", direction="in", width=1))
+        boundary_ports.append(
+            HdlPort(name=clk_port_name(dom), direction="in", width=1)
+        )
     for dom in clock_order:
-        boundary_ports.append(HdlPort(name=f"rst_{dom}", direction="in", width=1))
+        boundary_ports.append(
+            HdlPort(name=rst_port_name(dom), direction="in", width=1)
+        )
     seen_port_names: set[str] = {p.name for p in boundary_ports}
     for rm in region_modules:
         for sig in rm["datamodel_signals"]:
@@ -1872,9 +1927,9 @@ def _emit_chart_top_wrapper_vhdl_new(
                 inst_name=f"u_sync_{cd['name']}",
                 src_signal=cd["name"],
                 dst_signal=f"{cd['name']}_sync",
-                src_clk=f"clk_{src_rm['clock_domain']}",
-                dst_clk=f"clk_{dst_rm['clock_domain']}",
-                dst_rst=f"rst_{dst_rm['clock_domain']}",
+                src_clk=clk_port_name(src_rm["clock_domain"]),
+                dst_clk=clk_port_name(dst_rm["clock_domain"]),
+                dst_rst=rst_port_name(dst_rm["clock_domain"]),
                 width=int(cd.get("width", 1)),
                 stages=int(cd.get("stages", 2)),
                 dialect=Dialect.VHDL,
@@ -1887,8 +1942,9 @@ def _emit_chart_top_wrapper_vhdl_new(
         lines.append(f"    {inst} : entity work.{rm['module']}")
         lines.append("        port map (")
         port_lines: list[str] = []
-        port_lines.append(f"clk => clk_{dom}")
-        port_lines.append(f"rst => rst_{dom}")
+        # PCDN-SOS-08-C-wave3-clk-naming-passthrough: pass domain through.
+        port_lines.append(f"clk => {clk_port_name(dom)}")
+        port_lines.append(f"rst => {rst_port_name(dom)}")
         for sig in rm["datamodel_signals"]:
             wrapper_side = wrapper_port_name(rm["name"], sig["name"])
             port_lines.append(f"{sig['name']} => {wrapper_side}")
@@ -1957,9 +2013,9 @@ def _emit_chart_top_wrapper_sv_new(
                 inst_name=f"u_sync_{cd['name']}",
                 src_signal=cd["name"],
                 dst_signal=f"{cd['name']}_sync",
-                src_clk=f"clk_{src_rm['clock_domain']}",
-                dst_clk=f"clk_{dst_rm['clock_domain']}",
-                dst_rst=f"rst_{dst_rm['clock_domain']}",
+                src_clk=clk_port_name(src_rm["clock_domain"]),
+                dst_clk=clk_port_name(dst_rm["clock_domain"]),
+                dst_rst=rst_port_name(dst_rm["clock_domain"]),
                 width=int(cd.get("width", 1)),
                 stages=int(cd.get("stages", 2)),
                 dialect=Dialect.SV,
@@ -1971,8 +2027,9 @@ def _emit_chart_top_wrapper_sv_new(
         dom = rm["clock_domain"]
         lines.append(f"    {rm['module']} {inst} (")
         port_lines: list[str] = []
-        port_lines.append(f".clk(clk_{dom})")
-        port_lines.append(f".rst(rst_{dom})")
+        # PCDN-SOS-08-C-wave3-clk-naming-passthrough: pass domain through.
+        port_lines.append(f".clk({clk_port_name(dom)})")
+        port_lines.append(f".rst({rst_port_name(dom)})")
         for sig in rm["datamodel_signals"]:
             wrapper_side = wrapper_port_name(rm["name"], sig["name"])
             port_lines.append(f".{sig['name']}({wrapper_side})")

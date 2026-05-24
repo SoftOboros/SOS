@@ -181,6 +181,25 @@ try:  # pragma: no cover
 except (ImportError, AttributeError):  # pragma: no cover
     _DEFAULT_GUARD_DEPTH_BUDGET = 8
 
+# PCDN-SOS-08-C-wave3-clk-naming-passthrough (2026-05-23): defensively
+# import the clk_/rst_ port-name helpers from hdl_common; fall back to
+# local definitions of the same shape if the sibling module is older.
+try:  # pragma: no cover
+    from hdl_common import clk_port_name as _clk_port_name  # type: ignore
+    from hdl_common import rst_port_name as _rst_port_name  # type: ignore
+except (ImportError, AttributeError):  # pragma: no cover
+    def _clk_port_name(domain: str) -> str:
+        """Local fallback for hdl_common.clk_port_name; see
+        PCDN-SOS-08-C-wave3-clk-naming-passthrough."""
+        return domain if domain.startswith("clk_") else f"clk_{domain}"
+
+    def _rst_port_name(domain: str) -> str:
+        """Local fallback for hdl_common.rst_port_name; see
+        PCDN-SOS-08-C-wave3-clk-naming-passthrough."""
+        if domain.startswith("clk_"):
+            return "rst_" + domain[len("clk_"):]
+        return f"rst_{domain}"
+
 
 # ---------------------------------------------------------------------------
 # Wave-2 error surface.
@@ -990,18 +1009,23 @@ def _emit_sync_inst_local(sig: HdlCrossDomainSignal, idx: int) -> str:
     src_signal = f"data_{_sanitize_sv_identifier(sig.name)}_from_{_sanitize_sv_identifier(sig.src_region)}"
     dst_signal = f"data_{_sanitize_sv_identifier(sig.name)}_to_{_sanitize_sv_identifier(sig.dst_region)}"
     width = max(1, sig.width)
+    # PCDN-SOS-08-C-wave3-clk-naming-passthrough: emit the literal
+    # wrapper port names; the helpers handle legacy bare-domain inputs.
+    src_clk_port = _clk_port_name(sig.src_clock)
+    dst_clk_port = _clk_port_name(sig.dst_clock)
+    dst_rst_port = _rst_port_name(sig.dst_clock)
     lines = [
         f"    // Cross-domain synchronizer for chart `<data id=\"{sig.name}\"/>`",
-        f"    // src region={sig.src_region} clk_{sig.src_clock} -> dst region={sig.dst_region} clk_{sig.dst_clock}",
+        f"    // src region={sig.src_region} {src_clk_port} -> dst region={sig.dst_region} {dst_clk_port}",
         f"    // Per PCDN-C-002 (retain_synchronizers) + INV-S-HDL-C-3 (cross-domain enforcement).",
         f"    // MTBF claim sign-off requirement: see docs/MTBF.md.",
         f"    sos_synchronizer #(",
         f"        .WIDTH({width}),",
         f"        .STAGES({sig.stages})",
         f"    ) {inst_name} (",
-        f"        .src_clk(clk_{sig.src_clock}),",
-        f"        .dst_clk(clk_{sig.dst_clock}),",
-        f"        .dst_rst(rst_{sig.dst_clock}),",
+        f"        .src_clk({src_clk_port}),",
+        f"        .dst_clk({dst_clk_port}),",
+        f"        .dst_rst({dst_rst_port}),",
         f"        .src_data({src_signal}),",
         f"        .dst_data({dst_signal})",
         f"    );",
@@ -1030,9 +1054,11 @@ def _emit_sync_inst_dispatch(
             inst_name=inst_name,
             src_signal=src_signal,
             dst_signal=dst_signal,
-            src_clk=f"clk_{sig.src_clock}",
-            dst_clk=f"clk_{sig.dst_clock}",
-            dst_rst=f"rst_{sig.dst_clock}",
+            # PCDN-SOS-08-C-wave3-clk-naming-passthrough: walker passes
+            # the chart-author's clock-domain value through verbatim.
+            src_clk=_clk_port_name(sig.src_clock),
+            dst_clk=_clk_port_name(sig.dst_clock),
+            dst_rst=_rst_port_name(sig.dst_clock),
             width=max(1, sig.width),
             stages=sig.stages,
             dialect=Dialect.SV,
@@ -1355,10 +1381,14 @@ def _render_chart_top_local(
             clock_domains.append(region.clock_domain)
 
     # Port list — per-domain clk/rst + chart-wide datamodel exposure.
+    # PCDN-SOS-08-C-wave3-clk-naming-passthrough (2026-05-23): walker
+    # passes the chart-author's clock-domain value through verbatim;
+    # helpers fall back to `clk_<dom>` only for legacy bare-domain
+    # fixtures.
     port_lines: list[str] = []
     for dom in clock_domains:
-        port_lines.append(f"input  wire clk_{dom}")
-        port_lines.append(f"input  wire rst_{dom}")
+        port_lines.append(f"input  wire {_clk_port_name(dom)}")
+        port_lines.append(f"input  wire {_rst_port_name(dom)}")
     # Expose each region's datamodel signals through the chart top.
     chart_datamodel_done: set[str] = set()
     for region in regions:
@@ -1420,9 +1450,10 @@ def _render_chart_top_local(
         inst_name = f"u_region_{_sanitize_sv_identifier(region.name)}"
         dom = region.clock_domain
         lines.append(f"    {rmod} {inst_name} (")
+        # PCDN-SOS-08-C-wave3-clk-naming-passthrough: pass domain through.
         conns = [
-            f"        .clk(clk_{dom})",
-            f"        .rst(rst_{dom})",
+            f"        .clk({_clk_port_name(dom)})",
+            f"        .rst({_rst_port_name(dom)})",
         ]
         for sig in region_datamodel_signals.get(region.name, []):
             conns.append(f"        .{sig.sv_name}({sig.sv_name})")
