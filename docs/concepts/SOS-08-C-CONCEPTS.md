@@ -828,3 +828,60 @@ Wave-3-e remains for payload data routing on `_tpayload` ports + chart `<param>`
 **Cited PCDNs / amendments**: SOS-08-B §15 2026-05-24 (async sibling variant ratified); SOS-08-A §6.1 (sos_fifo_async contract — composition root); INV-S-HDL-3 (cross-domain isolation — now operational); PCDN-SOS-08-C-002 (retain_synchronizers across `--verified-strip`).
 
 Status: 🟢 **wave-3-d-2 complete**. Wave-3-d sub-wave family is fully landed. Future amendments: wave-3-e (payload data) + multi-domain fanin/fanout primitives (deferred per scope).
+
+### 2026-05-24 — Impl wave-3-e: payload data routing (Ira)
+
+Closes the wave-3 event-routing arc by routing chart-side `<param>` data through the channel's `s_axis_tpayload` / `m_axis_tpayload` bus. With wave-3-e, raise events can carry typed payload values that propagate to consumers and external boundary observers.
+
+**Wave-3-e implementation surface**:
+
+- **`HdlTransition.raise_params: dict[event_name, list[(param_name, expr)]]`** — new field on both SV and VHDL walker dataclasses. Captures `<param>` children of each `<raise>` element keyed by event name. At v1, only the FIRST `<param>` per event is honoured (multi-param composition is a future extension requiring a chart-side payload-struct ratification).
+- **Chart-side parsing**: each walker's transition-extraction loop reads `r.get("param", [])` per `<raise>` and stores `(name, expr)` tuples. Non-`<param>`-bearing raises stay unchanged (empty `raise_params` dict).
+- **Chart-wide payload-bearing event collection**: at `render_target` (SV) / public entry (VHDL), scan all regions for transitions with non-empty `raise_params` to build `payload_events: set[str]`. Threaded through:
+  - `_render_region_module` (SV) / `_render_region` (VHDL) — compute per-region `payload_send_events` (region's raise events ∩ chart-wide payload set) and `payload_recv_events` (region's consume events ∩ chart-wide payload set).
+  - `_emit_module_header` (SV) / `_emit_entity` (VHDL) — emit one `output wire [7:0] event_<name>_send_data` per `payload_send_events` and one `input wire [7:0] event_<name>_recv_data` per `payload_recv_events`. PAYLOAD_WIDTH = 8 at v1 (matches channel hardcoded baseline at the chart-top wrapper; `_PAYLOAD_WIDTH` constant).
+- **`_emit_event_payload_send_data_drives` (SV) / `_emit_event_payload_send_data_drives_vhdl` (VHDL)** — new emitter. For each payload-bearing event the region raises:
+  - Per firing transition (walked with the wave-3-d-3 `_walk_state_for_event` + `_transition_fire_predicate_terms` helpers, filtered to transitions raising `ev` with non-empty `raise_params[ev]`), compute the fire predicate (including own `_recv_valid` when consuming).
+  - Compile the param's `expr` via the existing guard-expr pipeline (`_compile_guard_expr` SV / `_compile_guard` VHDL) so bare datamodel identifiers rewrite to `data_<x>_q` form.
+  - Drive: `event_<name>_send_data = (fire_pred ? <PAYLOAD_WIDTH>'(compiled_expr) : 0)`. Multi-transition OR-aggregate (under INV-S-HDL-4 cooperative-only, at most one raises per cycle).
+- **`hdl_common.py` chart-top wrapper** (SV + VHDL):
+  - **Region instance port-map**: per `payload_send_events` add `.event_<name>_send_data(w_ev_<region>_<name>_data)`; per `payload_recv_events` add `.event_<name>_recv_data(ev_<name>_recv_data_w)`.
+  - **Internal wires**: declare `wire [7:0] w_ev_<region>_<name>_data` per (producer-region, payload-event) edge; declare `wire [7:0] ev_<name>_recv_data_w` per payload-bearing event for the m_axis fanout.
+  - **Data aggregation**: `wire [7:0] ev_<name>_send_data = OR of producer data wires` (broadcast under INV-S-HDL-4).
+  - **Channel wiring**: `s_axis_tpayload(ev_<name>_send_data)` / `m_axis_tpayload(ev_<name>_recv_data_w)` when the event is payload-bearing; else tied off (`'0` / unconnected) preserving the wave-3-c behaviour for non-payload events.
+  - **Boundary observer**: chart-top wrapper gains an `output wire [7:0] event_<name>_recv_data` port per payload-bearing event, driven by `assign event_<name>_recv_data = ev_<name>_recv_data_w`. External observers can monitor the payload data alongside the wave-3-d-3 `_recv_valid`/`_recv_ready` boundary surface.
+- **Walker `_build_region_modules_canonical`**: surfaces `payload_send_events` + `payload_recv_events` fields per region module dict.
+
+**Wave-3-e scope explicitly excludes**:
+
+- **Multi-param raises**: only the FIRST `<param>` per `<raise>` is honoured. Multi-param composition requires a chart-side payload-struct ratification (one packed-struct variant per ExternalEventName ID per PCDN-SOS-08-B-005) which is a future amendment.
+- **`<content>` element**: SCXML `<content>` (raw payload text/JSON) is a future extension; v1 supports `<param>` only.
+- **Datamodel binding on the consume side**: the consumer region's `event_<name>_recv_data` input is exposed but NOT auto-bound to a chart datamodel signal. Wiring `event.X.value` to `<assign location="local_counter" expr="event.X.value"/>` in a target state's `<onentry>` requires the chart-side event-object lowering pipeline which is a future wave (likely paired with the SCXML execution-content semantics).
+- **PAYLOAD_WIDTH parameterisation**: hardcoded to 8 at v1. Per-chart width based on the widest param expr is a future amendment (would require chart-compile-time width inference).
+- **Sub-byte payload encoding**: `<param expr="counter"/>` where `counter` is a 32-bit datamodel signal is truncated to 8 bits via SV cast (`8'(data_counter_q)`). Chart authors should keep payload exprs within 8-bit range or wait for the parameterised-width amendment.
+
+**Cycle-level behaviour** (payload-bearing event, producer drives counter=5):
+
+| Cycle | producer state | `send_data` | `send_valid` | `send_ready` | channel state | `recv_data` (boundary) |
+|-------|----------------|-------------|--------------|--------------|---------------|------------------------|
+| N     | L1             | 8'd5        | 1            | 1            | empty → full  | 8'd5 (after handshake) |
+| N+1   | L2             | 8'd0        | 0            | —            | full          | 8'd5 (held until consumed) |
+| N+2   | L2             | 8'd0        | 0            | —            | empty (consumer popped) | 8'd0 |
+
+**Invariants upheld**:
+
+- **INV-S-HDL-1** (handshake-compatible ports): the new `_send_data` / `_recv_data` ports complete the AXI-Stream payload surface alongside the wave-3-d-{1,3} handshake.
+- **INV-S-HDL-C-1** (deterministic emission): payload event sets sorted; data wires emit in deterministic order.
+- **INV-S-HDL-4** (cooperative-only): OR-aggregation of producer data wires correct under cooperative single-producer-per-cycle.
+- **INV-SOS-H** (chart-vocabulary traceability): payload data ports carry chart-event-name annotations matching the wave-3-d-3 ingress/egress port annotations.
+- **PCDN-SOS-08-B-005** (chart-derived metadata struct) — partially operational. The L1 service's `tpayload` bus is now driven from chart-emitted expressions; the per-event packed-struct VARIANT interpretation (one struct per `ExternalEventName`) is the future extension.
+
+**Backwards compatibility**: events without `<param>` are unchanged. The wave-3-{a..d} valid/ready-only emission shape is preserved by construction — `_send_data` / `_recv_data` ports are emitted ONLY when at least one `<param>` exists for that event somewhere in the chart. Test `test_non_payload_event_keeps_minimal_ports` is the regression guard.
+
+**Test count**: net +7 — `TestWave3ePayloadRouting` (7 tests): producer region emits `_send_data` output; consumer region emits `_recv_data` input; `_send_data` driven from param expr (datamodel signal rewritten to `data_<x>_q`); chart-top exposes `_recv_data` boundary port; chart-top wires channel's `s_axis_tpayload`/`m_axis_tpayload`; chart-top region instances wire data ports; non-payload events retain minimal port set (regression guard).
+
+**Test suite**: 401/401 passing (394 baseline + 7 net wave-3-e).
+
+**Cited PCDNs / amendments**: PCDN-SOS-08-B-005 (chart-derived metadata struct); SOS-08-B §6.5 (channel `tpayload` bus); SOS-08-A §6.1 (sos_fifo_async/sos_fifo_sync data path inheritance); INV-SOS-H (chart-vocabulary traceability for payload).
+
+Status: 🟢 **wave-3-e complete**. The SCXML event-routing arc (wave-3-a through wave-3-e) is now end-to-end functional: events raised by one region pulse through the channel with backpressure + payload data + CDC awareness, are consumed by other regions or external observers, and the payload data round-trips through the channel's `tpayload` bus. Multi-param composition + sub-byte payload encoding + chart-side payload-struct ratification remain future amendments.

@@ -1448,3 +1448,160 @@ class TestWave3d2AsyncChannelVariant:
             transliterate_hdl_sv.render_target(
                 chart, {"chart_name": "x"}
             )
+
+
+class TestWave3ePayloadRouting:
+    """SOS-08-C wave-3-e (2026-05-24 §15): payload data routing.
+
+    Chart `<raise>` elements with `<param name="x" expr="..."/>`
+    children produce payload data ports:
+      - Region FSM: `event_<name>_send_data[7:0]` output (producer)
+        + `event_<name>_recv_data[7:0]` input (consumer).
+      - Chart-top: per-event data wires; channel's `s_axis_tpayload`
+        and `m_axis_tpayload` wired through; boundary observer port
+        `event_<name>_recv_data[7:0]` exposes payload externally.
+    PAYLOAD_WIDTH = 8 at v1 (matches channel hardcoded baseline).
+
+    Events without `<param>` retain the wave-3-{a..d} valid/ready-
+    only emission (no data ports).
+    """
+
+    def _chart_with_payload(self):
+        return {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1",
+                     "datamodel": [
+                         {"data": [{"id": "counter", "expr": "5"}]},
+                     ],
+                     "state": [
+                         _state("L1", transitions=[
+                             {"target": "L2", "raise_value": [
+                                 {"event": "tick", "param": [
+                                     {"name": "value", "expr": "counter"},
+                                 ]},
+                             ]},
+                         ]),
+                         _state("L2"),
+                     ]},
+                    {"id": "right", "initial": "R1", "state": [
+                        _state("R1", transitions=[
+                            {"event": "tick", "target": "R2"},
+                        ]),
+                        _state("R2"),
+                    ]},
+                ],
+            }],
+        }
+
+    def test_payload_event_emits_send_data_on_producer(self):
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_payload(), {"chart_name": "pl"}
+        )
+        producer = files["pl_region_left_fsm.sv"]
+        assert "output wire [7:0] event_tick_send_data" in producer
+
+    def test_payload_event_emits_recv_data_on_consumer(self):
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_payload(), {"chart_name": "pl"}
+        )
+        consumer = files["pl_region_right_fsm.sv"]
+        assert "input  wire [7:0] event_tick_recv_data" in consumer
+
+    def test_send_data_driven_from_param_expr(self):
+        """When the raising transition fires, `_send_data` carries
+        the compiled param expr (datamodel signal rewritten to
+        registered form `data_<x>_q`). Else zero."""
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_payload(), {"chart_name": "pl"}
+        )
+        producer = files["pl_region_left_fsm.sv"]
+        # The fire predicate gates the data drive; data_counter_q
+        # comes from the param expr "counter" rewritten to its
+        # registered form.
+        assert (
+            "((state_q == ST_L1) ? 8'(data_counter_q) : 8'd0)"
+            in producer
+        )
+
+    def test_chart_top_exposes_recv_data_boundary_port(self):
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_payload(), {"chart_name": "pl"}
+        )
+        top = files["pl_top.sv"]
+        assert "output wire [7:0] event_tick_recv_data" in top
+
+    def test_chart_top_wires_channel_tpayload(self):
+        """Channel's `s_axis_tpayload` connects to producer-data
+        aggregate; `m_axis_tpayload` connects to recv_data fanout."""
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_payload(), {"chart_name": "pl"}
+        )
+        top = files["pl_top.sv"]
+        assert ".s_axis_tpayload(ev_tick_send_data)" in top
+        assert ".m_axis_tpayload(ev_tick_recv_data_w)" in top
+        # Data wire declarations.
+        assert "wire [7:0] w_ev_left_tick_data;" in top
+        assert "wire [7:0] ev_tick_recv_data_w;" in top
+        # Producer-side aggregation (single producer here).
+        assert (
+            "wire [7:0] ev_tick_send_data = w_ev_left_tick_data;" in top
+        )
+        # Boundary observer driven by fanout wire.
+        assert (
+            "assign event_tick_recv_data = ev_tick_recv_data_w;" in top
+        )
+
+    def test_chart_top_region_instance_wires_data_ports(self):
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_payload(), {"chart_name": "pl"}
+        )
+        top = files["pl_top.sv"]
+        # Producer region wires its _send_data to the per-region wire.
+        assert (
+            ".event_tick_send_data(w_ev_left_tick_data)" in top
+        )
+        # Consumer region wires its _recv_data to the chart-wide
+        # fanout wire.
+        assert (
+            ".event_tick_recv_data(ev_tick_recv_data_w)" in top
+        )
+
+    def test_non_payload_event_keeps_minimal_ports(self):
+        """Events raised WITHOUT `<param>` MUST NOT get data ports —
+        the wave-3-{a..d} valid/ready-only shape is preserved."""
+        chart = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[
+                            {"target": "L2", "raise_value": [
+                                {"event": "tick"},  # NO <param>
+                            ]},
+                        ]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1", "state": [
+                        _state("R1", transitions=[
+                            {"event": "tick", "target": "R2"},
+                        ]),
+                        _state("R2"),
+                    ]},
+                ],
+            }],
+        }
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "np"}
+        )
+        producer = files["np_region_left_fsm.sv"]
+        consumer = files["np_region_right_fsm.sv"]
+        top = files["np_top.sv"]
+        # No data ports anywhere.
+        assert "send_data" not in producer
+        assert "recv_data" not in consumer
+        assert "send_data" not in top
+        assert "recv_data" not in top

@@ -1833,6 +1833,7 @@ def _emit_chart_top_wrapper_new(
     chart_event_set: list[str] = []
     chart_event_producers: dict[str, list[str]] = {}
     chart_event_consumers: dict[str, list[str]] = {}
+    chart_payload_events: set[str] = set()
     for rm in region_modules:
         for ev in rm.get("raise_events", []) or []:
             if ev not in chart_event_producers:
@@ -1848,6 +1849,12 @@ def _emit_chart_top_wrapper_new(
                     chart_event_set.append(ev)
                 chart_event_consumers[ev] = []
             chart_event_consumers[ev].append(rm["name"])
+        # SOS-08-C wave-3-e (2026-05-24 §15): chart-wide payload-
+        # bearing event union (across producer + consumer regions).
+        for ev in rm.get("payload_send_events", []) or []:
+            chart_payload_events.add(ev)
+        for ev in rm.get("payload_recv_events", []) or []:
+            chart_payload_events.add(ev)
     for ev in chart_event_set:
         ev_ident = _safe_event_ident_top(ev)
         boundary_ports.append(
@@ -1864,6 +1871,21 @@ def _emit_chart_top_wrapper_new(
                 width=1,
             )
         )
+        # SOS-08-C wave-3-e: per chart-wide payload-bearing event,
+        # add `event_<name>_recv_data` (output, 8-bit) boundary
+        # observer port. PAYLOAD_WIDTH = 8 at v1 (matches channel
+        # baseline). Producer-side `_send_data` is INTERNAL only —
+        # boundary surface exposes only the receive side because
+        # external producers wishing to inject events would require
+        # the full slave-side AXI-Stream surface, which is deferred.
+        if ev in chart_payload_events:
+            boundary_ports.append(
+                HdlPort(
+                    name=f"event_{ev_ident}_recv_data",
+                    direction="out",
+                    width=8,
+                )
+            )
 
     # ---- Emit per dialect. ----
     if dialect is Dialect.VHDL:
@@ -1874,6 +1896,7 @@ def _emit_chart_top_wrapper_new(
             chart_event_set=chart_event_set,
             chart_event_producers=chart_event_producers,
             chart_event_consumers=chart_event_consumers,
+            chart_payload_events=chart_payload_events,
         )
     return _emit_chart_top_wrapper_sv_new(
         top_name, boundary_ports, region_modules,
@@ -1882,6 +1905,7 @@ def _emit_chart_top_wrapper_new(
         chart_event_set=chart_event_set,
         chart_event_producers=chart_event_producers,
         chart_event_consumers=chart_event_consumers,
+        chart_payload_events=chart_payload_events,
     )
 
 
@@ -1952,10 +1976,12 @@ def _emit_chart_top_wrapper_vhdl_new(
     chart_event_set: list[str] | None = None,
     chart_event_producers: dict[str, list[str]] | None = None,
     chart_event_consumers: dict[str, list[str]] | None = None,
+    chart_payload_events: set[str] | None = None,
 ) -> str:
     """VHDL realisation of the new wave-2 wrapper shape
     (`PCDN-SOS-08-C-wave2-wrapper-shape`)."""
     chart_event_consumers = chart_event_consumers or {}
+    chart_payload_events = chart_payload_events or set()
     lines: list[str] = []
     # Header comment per SOS-08-C §6.10 + §15 wave-2 ratification.
     lines.append(
@@ -2065,6 +2091,19 @@ def _emit_chart_top_wrapper_vhdl_new(
                 f"event_{ev_ident}_recv_ready => "
                 f"w_ev_{rm['name']}_{ev_ident}_ready"
             )
+        # SOS-08-C wave-3-e: payload data port-map.
+        for ev in rm.get("payload_send_events", []) or []:
+            ev_ident = _safe_event_ident_top(ev)
+            port_lines.append(
+                f"event_{ev_ident}_send_data => "
+                f"w_ev_{rm['name']}_{ev_ident}_data"
+            )
+        for ev in rm.get("payload_recv_events", []) or []:
+            ev_ident = _safe_event_ident_top(ev)
+            port_lines.append(
+                f"event_{ev_ident}_recv_data => "
+                f"ev_{ev_ident}_recv_data_w"
+            )
         for j, pl in enumerate(port_lines):
             suffix = "," if j < len(port_lines) - 1 else ""
             lines.append(f"            {pl}{suffix}")
@@ -2102,6 +2141,21 @@ def _emit_chart_top_wrapper_vhdl_new(
                 f"{' or '.join(ready_terms)};"
                 f"  -- chart event `{ev}` recv_ready aggregate"
             )
+            # SOS-08-C wave-3-e: payload data aggregation +
+            # boundary observer drive (VHDL mirror).
+            if ev in chart_payload_events:
+                data_terms = " or ".join(
+                    f"w_ev_{r}_{ev_ident}_data" for r in producers
+                ) or "(others => '0')"
+                lines.append(
+                    f"    ev_{ev_ident}_send_data <= {data_terms};"
+                    f"  -- chart event `{ev}` payload aggregate"
+                )
+                lines.append(
+                    f"    event_{ev_ident}_recv_data <= "
+                    f"ev_{ev_ident}_recv_data_w;"
+                    f"  -- chart event `{ev}` boundary payload observer"
+                )
             # Wave-3-d-2 variant selection (mirror of SV walker).
             producer_domains = sorted({
                 region_index[r]["clock_domain"]
@@ -2132,6 +2186,13 @@ def _emit_chart_top_wrapper_vhdl_new(
             )
             rd_dom = consumer_domains[0] if consumer_domains else wr_dom
             is_cdc = wr_dom != rd_dom and bool(producer_domains) and bool(consumer_domains)
+            # Wave-3-e payload term selection (VHDL).
+            if ev in chart_payload_events:
+                s_payload_term_vhdl = f"ev_{ev_ident}_send_data"
+                m_payload_term_vhdl = f"ev_{ev_ident}_recv_data_w"
+            else:
+                s_payload_term_vhdl = "(others => '0')"
+                m_payload_term_vhdl = "open"
             if is_cdc:
                 lines.append(
                     f"    -- SOS-08-C wave-3-d-2 (CDC variant) for event `{ev}` —\n"
@@ -2150,7 +2211,7 @@ def _emit_chart_top_wrapper_vhdl_new(
                     f"            wr_rst           => {rst_port_name(wr_dom)},\n"
                     f"            s_axis_tdata     => (others => '0'),\n"
                     f"            s_axis_tevent_id => std_logic_vector(to_unsigned({idx}, 8)),\n"
-                    f"            s_axis_tpayload  => (others => '0'),\n"
+                    f"            s_axis_tpayload  => {s_payload_term_vhdl},\n"
                     f"            s_axis_tvalid    => ev_{ev_ident}_send_valid,\n"
                     f"            s_axis_tready    => ev_{ev_ident}_send_ready,\n"
                     f"            wr_full          => open,\n"
@@ -2159,7 +2220,7 @@ def _emit_chart_top_wrapper_vhdl_new(
                     f"            rd_rst           => {rst_port_name(rd_dom)},\n"
                     f"            m_axis_tdata     => open,\n"
                     f"            m_axis_tevent_id => open,\n"
-                    f"            m_axis_tpayload  => open,\n"
+                    f"            m_axis_tpayload  => {m_payload_term_vhdl},\n"
                     f"            m_axis_tvalid    => ev_{ev_ident}_recv_valid_w,\n"
                     f"            m_axis_tready    => ev_{ev_ident}_recv_ready_w,\n"
                     f"            rd_empty         => open,\n"
@@ -2181,12 +2242,12 @@ def _emit_chart_top_wrapper_vhdl_new(
                     f"            rst              => {rst_port_name(wr_dom)},\n"
                     f"            s_axis_tdata     => (others => '0'),\n"
                     f"            s_axis_tevent_id => std_logic_vector(to_unsigned({idx}, 8)),\n"
-                    f"            s_axis_tpayload  => (others => '0'),\n"
+                    f"            s_axis_tpayload  => {s_payload_term_vhdl},\n"
                     f"            s_axis_tvalid    => ev_{ev_ident}_send_valid,\n"
                     f"            s_axis_tready    => ev_{ev_ident}_send_ready,\n"
                     f"            m_axis_tdata     => open,\n"
                     f"            m_axis_tevent_id => open,\n"
-                    f"            m_axis_tpayload  => open,\n"
+                    f"            m_axis_tpayload  => {m_payload_term_vhdl},\n"
                     f"            m_axis_tvalid    => ev_{ev_ident}_recv_valid_w,\n"
                     f"            m_axis_tready    => ev_{ev_ident}_recv_ready_w,\n"
                     f"            full             => open,\n"
@@ -2235,6 +2296,21 @@ def _emit_chart_top_wrapper_vhdl_new(
             decl_block.append(
                 f"    signal ev_{ev_ident}_recv_ready_w : std_logic;"
             )
+            # SOS-08-C wave-3-e: payload-bearing event data signals.
+            if ev in chart_payload_events:
+                for region_name in chart_event_producers.get(ev, []):
+                    decl_block.append(
+                        f"    signal w_ev_{region_name}_{ev_ident}_data : "
+                        f"std_logic_vector(7 downto 0);"
+                    )
+                decl_block.append(
+                    f"    signal ev_{ev_ident}_send_data : "
+                    f"std_logic_vector(7 downto 0);"
+                )
+                decl_block.append(
+                    f"    signal ev_{ev_ident}_recv_data_w : "
+                    f"std_logic_vector(7 downto 0);"
+                )
         decl_text = "\n".join(decl_block)
         # Locate the architecture-decl marker (the line right after the
         # `architecture rtl of <top_name> is` line) and inject.
@@ -2256,6 +2332,7 @@ def _emit_chart_top_wrapper_sv_new(
     chart_event_set: list[str] | None = None,
     chart_event_producers: dict[str, list[str]] | None = None,
     chart_event_consumers: dict[str, list[str]] | None = None,
+    chart_payload_events: set[str] | None = None,
 ) -> str:
     """SystemVerilog realisation of the new wave-2 wrapper shape
     (`PCDN-SOS-08-C-wave2-wrapper-shape`).
@@ -2271,6 +2348,7 @@ def _emit_chart_top_wrapper_sv_new(
     chart_event_set = chart_event_set or []
     chart_event_producers = chart_event_producers or {}
     chart_event_consumers = chart_event_consumers or {}
+    chart_payload_events = chart_payload_events or set()
     lines: list[str] = []
     lines.append(
         "// SOS-08-C §6.10 chart-top wrapper "
@@ -2374,6 +2452,22 @@ def _emit_chart_top_wrapper_sv_new(
                 f".event_{ev_ident}_recv_ready"
                 f"(w_ev_{rm['name']}_{ev_ident}_ready)"
             )
+        # SOS-08-C wave-3-e: payload data ports on producer side
+        # (_send_data, per-region wire OR-aggregated into channel
+        # tpayload) and consumer side (_recv_data, fanout from
+        # channel tpayload).
+        for ev in rm.get("payload_send_events", []) or []:
+            ev_ident = _safe_event_ident_top(ev)
+            port_lines.append(
+                f".event_{ev_ident}_send_data"
+                f"(w_ev_{rm['name']}_{ev_ident}_data)"
+            )
+        for ev in rm.get("payload_recv_events", []) or []:
+            ev_ident = _safe_event_ident_top(ev)
+            port_lines.append(
+                f".event_{ev_ident}_recv_data"
+                f"(ev_{ev_ident}_recv_data_w)"
+            )
         for j, pl in enumerate(port_lines):
             suffix = "," if j < len(port_lines) - 1 else ""
             lines.append(f"        {pl}{suffix}")
@@ -2429,6 +2523,18 @@ def _emit_chart_top_wrapper_sv_new(
                 f"    wire ev_{ev_ident}_recv_valid_w;"
                 f"  // chart event `{ev}` recv_valid fanout"
             )
+            # SOS-08-C wave-3-e: per payload-bearing event, per-producer
+            # data wire + per-event recv_data fanout wire.
+            if ev in chart_payload_events:
+                for region_name in chart_event_producers.get(ev, []):
+                    lines.append(
+                        f"    wire [7:0] w_ev_{region_name}_{ev_ident}_data;"
+                        f"  // chart event `{ev}` payload (region `{region_name}`)"
+                    )
+                lines.append(
+                    f"    wire [7:0] ev_{ev_ident}_recv_data_w;"
+                    f"  // chart event `{ev}` recv_data fanout"
+                )
         # One channel + OR-aggregated valid + hardcoded event_id per
         # unique event. Channel params per SOS-08-B §5 v1 baseline.
         for idx, ev in enumerate(sorted(chart_event_set)):
@@ -2462,6 +2568,25 @@ def _emit_chart_top_wrapper_sv_new(
                 f"{' | '.join(ready_terms)};"
                 f"  // chart event `{ev}` recv_ready aggregate"
             )
+            # SOS-08-C wave-3-e: payload-bearing event data aggregation +
+            # boundary observer drive.
+            if ev in chart_payload_events:
+                # OR-aggregate producer data wires (under INV-S-HDL-4
+                # cooperative-only, at most one producer drives non-zero
+                # per cycle so OR-aggregate is correct).
+                data_terms = " | ".join(
+                    f"w_ev_{r}_{ev_ident}_data" for r in producers
+                ) or "8'd0"
+                lines.append(
+                    f"    wire [7:0] ev_{ev_ident}_send_data = {data_terms};"
+                    f"  // chart event `{ev}` payload aggregate"
+                )
+                # Boundary observer recv_data driven by the fanout wire.
+                lines.append(
+                    f"    assign event_{ev_ident}_recv_data = "
+                    f"ev_{ev_ident}_recv_data_w;"
+                    f"  // chart event `{ev}` boundary payload observer"
+                )
             # SOS-08-C wave-3-d-2 (2026-05-24 §15): variant selection.
             #
             # Per SOS-08-B §15 2026-05-24 amendment, the channel family
@@ -2512,6 +2637,18 @@ def _emit_chart_top_wrapper_sv_new(
             )
             rd_dom = consumer_domains[0] if consumer_domains else wr_dom
             is_cdc = wr_dom != rd_dom and bool(producer_domains) and bool(consumer_domains)
+            # Wave-3-e payload wiring: tpayload connects to data
+            # aggregate/fanout wires when the event is payload-bearing.
+            if ev in chart_payload_events:
+                s_payload_term = f"ev_{ev_ident}_send_data"
+                m_payload_term = f"ev_{ev_ident}_recv_data_w"
+            else:
+                s_payload_term = "'0"
+                m_payload_term = ""  # unconnected
+            m_payload_port = (
+                f".m_axis_tpayload({m_payload_term})" if m_payload_term
+                else ".m_axis_tpayload()"
+            )
             if is_cdc:
                 lines.append(
                     f"    // SOS-08-C wave-3-d-2 (CDC variant) for event `{ev}` — "
@@ -2532,7 +2669,7 @@ def _emit_chart_top_wrapper_sv_new(
                     f"        .wr_rst({rst_port_name(wr_dom)}),\n"
                     f"        .s_axis_tdata('0),\n"
                     f"        .s_axis_tevent_id(8'd{idx}),\n"
-                    f"        .s_axis_tpayload('0),\n"
+                    f"        .s_axis_tpayload({s_payload_term}),\n"
                     f"        .s_axis_tvalid(ev_{ev_ident}_send_valid),\n"
                     f"        .s_axis_tready(ev_{ev_ident}_send_ready),\n"
                     f"        .wr_full(),\n"
@@ -2541,7 +2678,7 @@ def _emit_chart_top_wrapper_sv_new(
                     f"        .rd_rst({rst_port_name(rd_dom)}),\n"
                     f"        .m_axis_tdata(),\n"
                     f"        .m_axis_tevent_id(),\n"
-                    f"        .m_axis_tpayload(),\n"
+                    f"        {m_payload_port},\n"
                     f"        .m_axis_tvalid(ev_{ev_ident}_recv_valid_w),\n"
                     f"        .m_axis_tready(ev_{ev_ident}_recv_ready_w),\n"
                     f"        .rd_empty(),\n"
@@ -2558,6 +2695,8 @@ def _emit_chart_top_wrapper_sv_new(
                     f"    // (fanout to boundary + consumer regions);\n"
                     f"    //              m_axis_tready ← OR of boundary +\n"
                     f"    //              per-consumer recv_ready signals.\n"
+                    f"    // Wave-3-e: tpayload wired to data wires when\n"
+                    f"    //              the event is payload-bearing.\n"
                     f"    sos_message_channel #(\n"
                     f"        .EVENT_ID_WIDTH(8),\n"
                     f"        .PAYLOAD_WIDTH(8),\n"
@@ -2569,12 +2708,12 @@ def _emit_chart_top_wrapper_sv_new(
                     f"        .rst({rst_port_name(wr_dom)}),\n"
                     f"        .s_axis_tdata('0),\n"
                     f"        .s_axis_tevent_id(8'd{idx}),\n"
-                    f"        .s_axis_tpayload('0),\n"
+                    f"        .s_axis_tpayload({s_payload_term}),\n"
                     f"        .s_axis_tvalid(ev_{ev_ident}_send_valid),\n"
                     f"        .s_axis_tready(ev_{ev_ident}_send_ready),\n"
                     f"        .m_axis_tdata(),\n"
                     f"        .m_axis_tevent_id(),\n"
-                    f"        .m_axis_tpayload(),\n"
+                    f"        {m_payload_port},\n"
                     f"        .m_axis_tvalid(ev_{ev_ident}_recv_valid_w),\n"
                     f"        .m_axis_tready(ev_{ev_ident}_recv_ready_w),\n"
                     f"        .full(),\n"

@@ -217,6 +217,11 @@ class HdlTransition:
     # transition raises via ``<raise event="..."/>``. Wave-1/2 rejected
     # charts containing <raise>; wave-3 emits per-event egress ports.
     raise_events: list[str] = field(default_factory=list)
+    # SOS-08-C wave-3-e (2026-05-24 §15): per-event `<param>` lists
+    # (mirror of SV walker; (name, expr) tuples keyed by event name).
+    raise_params: dict[str, list[tuple[str, str]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -514,11 +519,22 @@ def _normalise_region(
                 reads.update(_read_idents_in_expr(cond))
             # SOS-08-C wave-3 events: extract <raise event="..."/>
             # names per SCXML §3.13. Empty list when no <raise> child.
+            # Wave-3-e: also extract <param> children for payload
+            # routing.
             raise_events: list[str] = []
+            raise_params: dict[str, list[tuple[str, str]]] = {}
             for r in tr.get("raise_value", []) or []:
                 ev = r.get("event")
                 if isinstance(ev, str) and ev:
                     raise_events.append(ev)
+                    params: list[tuple[str, str]] = []
+                    for p in r.get("param", []) or []:
+                        p_name = p.get("name")
+                        p_expr = p.get("expr")
+                        if isinstance(p_name, str) and isinstance(p_expr, str):
+                            params.append((p_name, p_expr))
+                    if params:
+                        raise_params[ev] = params
             hs.transitions.append(
                 HdlTransition(
                     source=sid,
@@ -527,6 +543,7 @@ def _normalise_region(
                     cond=cond,
                     doc_order=idx,
                     raise_events=raise_events,
+                    raise_params=raise_params,
                 )
             )
         states.append(hs)
@@ -921,6 +938,21 @@ def _datamodel_signal_lines(
     return decls, resets, ports, widths
 
 
+_PAYLOAD_WIDTH = 8
+
+
+def _collect_region_payload_send_events(region: HdlRegion) -> list[str]:
+    """VHDL mirror of the SV walker's
+    ``_collect_region_payload_send_events``."""
+    seen: set[str] = set()
+    for state in region.states:
+        for tr in state.transitions:
+            for ev in tr.raise_events:
+                if ev and tr.raise_params.get(ev):
+                    seen.add(ev)
+    return sorted(seen)
+
+
 def _collect_region_consume_events(region: HdlRegion) -> list[str]:
     """Return the sorted, de-duplicated list of event names this
     region's transitions CONSUME via ``event="..."`` attributes.
@@ -977,6 +1009,8 @@ def _emit_entity(
     n_states: int,
     raise_events: list[str] | None = None,
     consume_events: list[str] | None = None,
+    payload_send_events: list[str] | None = None,
+    payload_recv_events: list[str] | None = None,
 ) -> str:
     """Emit the VHDL entity port list for a region FSM module.
 
@@ -986,6 +1020,8 @@ def _emit_entity(
     """
     raise_events = raise_events or []
     consume_events = consume_events or []
+    payload_send_events = payload_send_events or []
+    payload_recv_events = payload_recv_events or []
     entity_id = _entity_name(chart_name, region.name)
     lines: list[str] = []
     lines.append(f"entity {entity_id} is")
@@ -1090,7 +1126,46 @@ def _emit_entity(
         egress_annotations.append(
             f"        -- chart event `{ev}` (wave-3-d-3 consume-ready)"
         )
-    n_egress_ports = 2 * len(raise_events) + 2 * len(consume_events)
+    # SOS-08-C wave-3-e: payload data ports per chart-wide payload-
+    # bearing event.
+    for ev in payload_send_events:
+        ev_ident = _safe_event_ident_vhdl(ev)
+        port_lines.append(
+            emit_port_decl(
+                HdlPort(
+                    name=f"event_{ev_ident}_send_data",
+                    direction="out",
+                    width=_PAYLOAD_WIDTH,
+                    width_expr=f"std_logic_vector({_PAYLOAD_WIDTH - 1} downto 0)",
+                ),
+                dialect=Dialect.VHDL,
+            )
+        )
+        egress_annotations.append(
+            f"        -- chart event `{ev}` (wave-3-e payload)"
+        )
+    for ev in payload_recv_events:
+        ev_ident = _safe_event_ident_vhdl(ev)
+        port_lines.append(
+            emit_port_decl(
+                HdlPort(
+                    name=f"event_{ev_ident}_recv_data",
+                    direction="in",
+                    width=_PAYLOAD_WIDTH,
+                    width_expr=f"std_logic_vector({_PAYLOAD_WIDTH - 1} downto 0)",
+                ),
+                dialect=Dialect.VHDL,
+            )
+        )
+        egress_annotations.append(
+            f"        -- chart event `{ev}` (wave-3-e payload)"
+        )
+    n_egress_ports = (
+        2 * len(raise_events)
+        + 2 * len(consume_events)
+        + len(payload_send_events)
+        + len(payload_recv_events)
+    )
     n_pre_egress = len(port_lines) - n_egress_ports
     egress_idx = 0
     for i, pl in enumerate(port_lines):
@@ -1376,7 +1451,10 @@ def _emit_sync_instance(
     )
 
 
-def _emit_chart_top_wrapper(chart: HdlChart) -> str:
+def _emit_chart_top_wrapper(
+    chart: HdlChart,
+    payload_events: set[str] | None = None,
+) -> str:
     """Emit the chart-top wrapper module that instantiates each region
     plus any cross-domain synchronizers.  §6.10 + PCDN-C-001 (clock
     inherit) + PCDN-C-002 (retain synchronizers).
@@ -1384,6 +1462,7 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
     Falls back to inline emission when hdl_common's canonical helper
     is unavailable.
     """
+    payload_events = payload_events or set()
 
     if _hdl_emit_chart_top_wrapper is not None:
         try:
@@ -1434,6 +1513,12 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
                 # OR-aggregates consumers' recv_ready into m_axis_tready.
                 raise_events_list = _collect_region_raise_events(r)
                 consume_events_list = _collect_region_consume_events(r)
+                payload_send_list = [
+                    ev for ev in raise_events_list if ev in payload_events
+                ]
+                payload_recv_list = [
+                    ev for ev in consume_events_list if ev in payload_events
+                ]
                 region_modules.append(
                     {
                         "name": _safe_ident(r.name),
@@ -1443,6 +1528,8 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
                         "state_width": len(r.states),
                         "raise_events": raise_events_list,
                         "consume_events": consume_events_list,
+                        "payload_send_events": payload_send_list,
+                        "payload_recv_events": payload_recv_list,
                     }
                 )
             cross_domain_signals = [
@@ -1765,6 +1852,68 @@ def _emit_event_egress_drives_vhdl(
     return "\n".join(lines)
 
 
+def _emit_event_payload_send_data_drives_vhdl(
+    region: HdlRegion,
+    payload_send_events: list[str],
+    depth_budget: int,
+) -> str:
+    """VHDL mirror of the SV walker's
+    ``_emit_event_payload_send_data_drives``. Emits concurrent
+    `event_<name>_send_data` assigns selecting between the firing
+    transition's compiled `<param>` expr (cast to std_logic_vector
+    of PAYLOAD_WIDTH bits) and a zeros default when no firing.
+    """
+    if not payload_send_events:
+        return ""
+    lines: list[str] = []
+    for ev in payload_send_events:
+        ev_ident = _safe_event_ident_vhdl(ev)
+        # Walk transitions raising `ev` with at least one `<param>`.
+        cases: list[tuple[str, str, str]] = []
+        for state in region.states:
+            for tr in _walk_state_for_event_vhdl(
+                state,
+                lambda t, ev=ev: ev in t.raise_events and bool(
+                    t.raise_params.get(ev)
+                ),
+            ):
+                preds = _transition_fire_predicate_terms_vhdl(
+                    state, tr, depth_budget,
+                    include_state_match=True,
+                    include_own_event=True,
+                )
+                fire_expr = " and ".join(preds)
+                p_name, p_expr = tr.raise_params[ev][0]
+                # Compile the param expr via the guard-expr pipeline.
+                compiled = _compile_guard(
+                    p_expr, depth_budget=depth_budget,
+                    source_state=tr.source,
+                )
+                cases.append((fire_expr, compiled, tr.source))
+        if cases:
+            # Chain when-else expressions. Each case maps fire→payload;
+            # the trailing else is all-zeros.
+            chain: list[str] = []
+            for fire_expr, compiled, _src in cases:
+                chain.append(
+                    f"std_logic_vector(to_unsigned("
+                    f"{compiled}, {_PAYLOAD_WIDTH})) when {fire_expr}"
+                )
+            chain_str = " else\n        ".join(chain)
+            lines.append(
+                f"    event_{ev_ident}_send_data <=\n"
+                f"        {chain_str} else\n"
+                f"        (others => '0');"
+                f"  -- chart event `{ev}` payload"
+            )
+        else:
+            lines.append(
+                f"    event_{ev_ident}_send_data <= (others => '0');"
+                f"  -- chart event `{ev}` payload"
+            )
+    return "\n".join(lines)
+
+
 def _emit_event_ingress_recv_ready_drives_vhdl(
     region: HdlRegion,
     consume_events: list[str],
@@ -1814,6 +1963,7 @@ def _render_region(
     region: HdlRegion,
     chart_name: str,
     depth_budget: int,
+    payload_events: set[str] | None = None,
 ) -> str:
     """Compose the architecture + entity for one region into a single
     `.vhd` file body."""
@@ -1822,9 +1972,19 @@ def _render_region(
     n_states = len(region.states)
     raise_events = _collect_region_raise_events(region)
     consume_events = _collect_region_consume_events(region)
+    # SOS-08-C wave-3-e: per-region payload-bearing event subsets.
+    payload_events = payload_events or set()
+    payload_send_events = [
+        ev for ev in raise_events if ev in payload_events
+    ]
+    payload_recv_events = [
+        ev for ev in consume_events if ev in payload_events
+    ]
     entity_block = _emit_entity(
         region, chart_name, dm_ports, n_states,
         raise_events, consume_events,
+        payload_send_events=payload_send_events,
+        payload_recv_events=payload_recv_events,
     )
     state_constants = _emit_state_constants(region)
     register_process = _emit_register_process(region, dm_resets)
@@ -1880,6 +2040,9 @@ def _render_region(
     ingress_block = _emit_event_ingress_recv_ready_drives_vhdl(
         region, consume_events, depth_budget
     )
+    payload_block = _emit_event_payload_send_data_drives_vhdl(
+        region, payload_send_events, depth_budget
+    )
     architecture = (
         f"architecture rtl of {entity_id} is\n"
         f"{arch_decls_block}\n"
@@ -1898,6 +2061,12 @@ def _render_region(
             f"\n    -- ----- event ingress (SOS-08-C §6.4 wave-3-d-3) -----\n"
             f"{ingress_block}\n"
             if ingress_block
+            else ""
+        )
+        + (
+            f"\n    -- ----- event payload (SOS-08-C §6.5 wave-3-e) -----\n"
+            f"{payload_block}\n"
+            if payload_block
             else ""
         )
         + f"end architecture rtl;\n"
@@ -1958,6 +2127,15 @@ def render_target(chart_ir: Any, config: Any) -> dict[str, str]:
     # Steps 1-3 / 6-9 of §6 — parse + build region tree + datamodel.
     chart = _normalise_chart(chart_ir, chart_name)
 
+    # SOS-08-C wave-3-e: chart-wide payload-bearing event collection.
+    payload_events: set[str] = set()
+    for region in chart.regions:
+        for state in region.states:
+            for tr in state.transitions:
+                for ev, params in tr.raise_params.items():
+                    if params:
+                        payload_events.add(ev)
+
     # Single-region path: one file, no wrapper.
     if len(chart.regions) == 1:
         region = chart.regions[0]
@@ -1965,16 +2143,24 @@ def render_target(chart_ir: Any, config: Any) -> dict[str, str]:
         # for back-compat with wave-1 tests the file name is
         # `<chart>_fsm.vhd`.
         region.name = chart_name
-        body = _render_region(region, chart_name, depth_budget)
+        body = _render_region(
+            region, chart_name, depth_budget,
+            payload_events=payload_events,
+        )
         return {f"{_entity_name(chart_name)}.vhd": body}
 
     # Multi-region path: one region file per region + chart-top wrapper.
     out: dict[str, str] = {}
     for region in chart.regions:
-        region_body = _render_region(region, chart_name, depth_budget)
+        region_body = _render_region(
+            region, chart_name, depth_budget,
+            payload_events=payload_events,
+        )
         out[f"{_entity_name(chart_name, region.name)}.vhd"] = region_body
 
-    out[f"{_safe_ident(chart_name)}_top.vhd"] = _emit_chart_top_wrapper(chart)
+    out[f"{_safe_ident(chart_name)}_top.vhd"] = _emit_chart_top_wrapper(
+        chart, payload_events=payload_events
+    )
     return out
 
 

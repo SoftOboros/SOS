@@ -310,6 +310,14 @@ class HdlTransition:
     # ports + drives `event_<name>_send_valid` for one cycle when the
     # transition fires. Empty for transitions with no <raise>.
     raise_events: list[str] = field(default_factory=list)
+    # SOS-08-C wave-3-e (2026-05-24 §15): per-event raise parameters
+    # keyed by event name. Each entry is the list of `<param>`
+    # children of the matching `<raise>` element, captured as
+    # `(name, expr)` tuples. Used to drive the channel's
+    # `s_axis_tpayload` data bus when the transition fires.
+    raise_params: dict[str, list[tuple[str, str]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -502,11 +510,23 @@ def _states_from_container(container: dict[str, Any]) -> list[HdlState]:
             # SOS-08-C wave-3 events (2026-05-23 §15): extract <raise>
             # event names — list of `event="..."` attributes on each
             # <raise> child of the transition per SCXML §3.13.
+            #
+            # SOS-08-C wave-3-e (2026-05-24 §15): also extract <param>
+            # children of each <raise> for payload routing.
             raise_events: list[str] = []
+            raise_params: dict[str, list[tuple[str, str]]] = {}
             for r in tr.get("raise_value", []) or []:
                 ev = r.get("event")
                 if isinstance(ev, str) and ev:
                     raise_events.append(ev)
+                    params: list[tuple[str, str]] = []
+                    for p in r.get("param", []) or []:
+                        p_name = p.get("name")
+                        p_expr = p.get("expr")
+                        if isinstance(p_name, str) and isinstance(p_expr, str):
+                            params.append((p_name, p_expr))
+                    if params:
+                        raise_params[ev] = params
             hs.transitions.append(
                 HdlTransition(
                     source=sid,
@@ -515,6 +535,7 @@ def _states_from_container(container: dict[str, Any]) -> list[HdlState]:
                     cond=tr.get("cond"),
                     doc_order=idx,
                     raise_events=raise_events,
+                    raise_params=raise_params,
                 )
             )
         states.append(hs)
@@ -1124,6 +1145,26 @@ def _collect_region_raise_events(region: HdlRegion) -> list[str]:
     return sorted(seen)
 
 
+def _collect_region_payload_send_events(region: HdlRegion) -> list[str]:
+    """Return the sorted, de-duplicated list of event names this
+    region raises WITH at least one `<param>` somewhere.
+
+    SOS-08-C wave-3-e (2026-05-24 §15): payload-bearing raise events
+    get a per-event `event_<name>_send_data` output port on the
+    region FSM, driven combinationally with the compiled `<param>`
+    expr when the raising transition fires. Events raised without
+    any `<param>` do NOT get a send_data port — the wave-3-a
+    valid/ready-only emission is preserved.
+    """
+    seen: set[str] = set()
+    for state in region.states:
+        for tr in state.transitions:
+            for ev in tr.raise_events:
+                if ev and tr.raise_params.get(ev):
+                    seen.add(ev)
+    return sorted(seen)
+
+
 def _collect_region_consume_events(region: HdlRegion) -> list[str]:
     """Return the sorted, de-duplicated list of event names this
     region's transitions CONSUME via ``event="..."`` attributes.
@@ -1165,12 +1206,17 @@ def _safe_event_ident(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_") or "ev"
 
 
+_PAYLOAD_WIDTH = 8
+
+
 def _emit_module_header(
     module_name: str,
     datamodel_signals: list[_DatamodelSignal],
     n_states: int,
     raise_events: list[str] | None = None,
     consume_events: list[str] | None = None,
+    payload_send_events: list[str] | None = None,
+    payload_recv_events: list[str] | None = None,
 ) -> str:
     """Emit the SV module port list for a region FSM.
 
@@ -1182,6 +1228,8 @@ def _emit_module_header(
     """
     raise_events = raise_events or []
     consume_events = consume_events or []
+    payload_send_events = payload_send_events or []
+    payload_recv_events = payload_recv_events or []
     port_lines: list[str] = []
     port_lines.append("input  wire clk")
     port_lines.append("input  wire rst")
@@ -1240,14 +1288,43 @@ def _emit_module_header(
         egress_annotations.append(
             f"        // chart event `{ev}` (wave-3-d-3 consume-ready)"
         )
+    # SOS-08-C wave-3-e (2026-05-24 §15): payload data ports per
+    # chart-wide payload-bearing event. Width = PAYLOAD_WIDTH = 8 at
+    # v1 (matches channel's hardcoded baseline). Only events with
+    # `<param>` somewhere in the chart get data ports — uniform
+    # payload-less events keep the wave-3-{a..d-3} valid/ready-only
+    # shape.
+    for ev in payload_send_events:
+        ev_ident = _safe_event_ident(ev)
+        port_lines.append(
+            f"output wire [{_PAYLOAD_WIDTH - 1}:0] "
+            f"event_{ev_ident}_send_data"
+        )
+        egress_annotations.append(
+            f"        // chart event `{ev}` (wave-3-e payload)"
+        )
+    for ev in payload_recv_events:
+        ev_ident = _safe_event_ident(ev)
+        port_lines.append(
+            f"input  wire [{_PAYLOAD_WIDTH - 1}:0] "
+            f"event_{ev_ident}_recv_data"
+        )
+        egress_annotations.append(
+            f"        // chart event `{ev}` (wave-3-e payload)"
+        )
 
     lines: list[str] = []
     lines.append(f"module {module_name} (")
     # Track which port declarations have a trailing-comment annotation
     # so the comma lands BEFORE the comment, not at end-of-line. Raise
     # events contribute 2 ports each; consume events contribute 2
-    # ports each.
-    n_egress_ports = 2 * len(raise_events) + 2 * len(consume_events)
+    # ports each; wave-3-e payload events add 1 port per (send|recv).
+    n_egress_ports = (
+        2 * len(raise_events)
+        + 2 * len(consume_events)
+        + len(payload_send_events)
+        + len(payload_recv_events)
+    )
     n_pre_egress = len(port_lines) - n_egress_ports
     egress_idx = 0
     for i, pl in enumerate(port_lines):
@@ -1630,6 +1707,72 @@ def _emit_event_egress_drives(
     return "\n".join(lines)
 
 
+def _emit_event_payload_send_data_drives(
+    region: HdlRegion,
+    payload_send_events: list[str],
+    depth_budget: int,
+) -> str:
+    """Combinational drives for ``event_<name>_send_data`` payload
+    output ports.
+
+    SOS-08-C wave-3-e (2026-05-24 §15 / §6.5): for each payload-bearing
+    raise-event the region produces, drive `_send_data` with the
+    compiled `<param>` expression from the firing transition. Under
+    INV-S-HDL-4 cooperative-only, at most one raising transition for
+    a given event fires per cycle, so the OR-aggregate across
+    transitions emits the active payload without ambiguity.
+
+    Only the FIRST `<param>` of each `<raise>` is honoured at v1 —
+    multi-param composition is a future extension (would require
+    chart-side payload-struct ratification). The param expr is
+    compiled via `_compile_guard_expr` (which already handles bare
+    datamodel-identifier rewrite + numeric literals); the result is
+    truncated/extended to PAYLOAD_WIDTH bits via SV cast.
+    """
+    if not payload_send_events:
+        return ""
+    lines: list[str] = []
+    for ev in payload_send_events:
+        ev_ident = _safe_event_ident(ev)
+        terms: list[str] = []
+        for state in region.states:
+            for tr in _walk_state_for_event(
+                state,
+                lambda t, ev=ev: ev in t.raise_events and bool(
+                    t.raise_params.get(ev)
+                ),
+            ):
+                preds = _transition_fire_predicate_terms(
+                    state, tr, depth_budget,
+                    include_state_match=True,
+                    include_own_event=True,
+                )
+                fire_expr = "(" + " && ".join(preds) + ")"
+                # Honour the FIRST param's expr at v1. Compiled via
+                # the guard-expr pipeline so chart-side identifiers
+                # rewrite to `data_<x>_q` form.
+                p_name, p_expr = tr.raise_params[ev][0]
+                compiled = _compile_guard_expr(p_expr, depth_budget)
+                # Sized cast to PAYLOAD_WIDTH bits — handles both
+                # narrower (zero-extend) and wider (truncate)
+                # source expressions.
+                payload_term = (
+                    f"({fire_expr} ? "
+                    f"{_PAYLOAD_WIDTH}'({compiled}) : "
+                    f"{_PAYLOAD_WIDTH}'d0)"
+                )
+                terms.append(payload_term)
+        if terms:
+            rhs = " | ".join(terms)
+        else:
+            rhs = f"{_PAYLOAD_WIDTH}'d0"
+        lines.append(
+            f"    assign event_{ev_ident}_send_data = {rhs};"
+            f"  // chart event `{ev}` payload"
+        )
+    return "\n".join(lines)
+
+
 def _emit_event_ingress_recv_ready_drives(
     region: HdlRegion,
     consume_events: list[str],
@@ -1695,6 +1838,7 @@ def _render_region_module(
     chart_name: str,
     multi_region: bool,
     depth_budget: int,
+    payload_events: set[str] | None = None,
 ) -> tuple[str, str, list[_DatamodelSignal]]:
     """Render a single region into a complete SV module file body.
 
@@ -1711,10 +1855,24 @@ def _render_region_module(
     raise_events = _collect_region_raise_events(region)
     consume_events = _collect_region_consume_events(region)
 
+    # SOS-08-C wave-3-e (2026-05-24 §15): per-region payload-bearing
+    # event subsets. send_data events = chart-wide payload events
+    # this region raises; recv_data events = chart-wide payload
+    # events this region consumes.
+    payload_events = payload_events or set()
+    payload_send_events = [
+        ev for ev in raise_events if ev in payload_events
+    ]
+    payload_recv_events = [
+        ev for ev in consume_events if ev in payload_events
+    ]
+
     header = _emit_header(chart_name, kind=f"region-fsm:{region.name}")
     module_header = _emit_module_header(
         module_name, datamodel_signals, n_states,
         raise_events, consume_events,
+        payload_send_events=payload_send_events,
+        payload_recv_events=payload_recv_events,
     )
     state_constants = _emit_state_constants(region)
     register_decls = _emit_register_decls(region, datamodel_signals, n_states)
@@ -1748,6 +1906,18 @@ def _render_region_module(
         if consume_events
         else ""
     )
+    # SOS-08-C wave-3-e (2026-05-24 §15 / §6.5): combinational
+    # `event_<name>_send_data` drives — output the compiled
+    # `<param>` expr from the firing raise transition.
+    payload_drives = _emit_event_payload_send_data_drives(
+        region, payload_send_events, depth_budget
+    )
+    payload_block = (
+        f"\n    // ----- event payload (SOS-08-C §6.5 wave-3-e) -----\n"
+        f"{payload_drives}\n"
+        if payload_send_events
+        else ""
+    )
 
     body = (
         f"{header}\n"
@@ -1772,6 +1942,7 @@ def _render_region_module(
         f"{output_drives}\n"
         f"{egress_block}"
         f"{ingress_block}"
+        f"{payload_block}"
         f"\n"
         f"endmodule\n"
         f"\n"
@@ -1902,6 +2073,7 @@ def _build_region_modules_canonical(
     chart_name: str,
     regions: list[HdlRegion],
     region_datamodel_signals: dict[str, list[_DatamodelSignal]],
+    payload_events: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the canonical ``region_modules`` list per
     PCDN-SOS-08-C-wave2-wrapper-shape (resolved 2026-05-23):
@@ -1915,6 +2087,7 @@ def _build_region_modules_canonical(
     region to writes from another (synchronised across clock domains
     by ``cross_domain_signals``).
     """
+    payload_events = payload_events or set()
     region_modules: list[dict[str, Any]] = []
     for region in regions:
         # Determine writes / reads for this region by walking its
@@ -1968,8 +2141,17 @@ def _build_region_modules_canonical(
         # `m_axis_tvalid` to each consuming region + OR-aggregates the
         # consumers' `_recv_ready` outputs into the channel's
         # `m_axis_tready`.
+        # SOS-08-C wave-3-e (2026-05-24 §15): per-region payload-
+        # bearing events surfaced so the wrapper wires
+        # `_send_data` / `_recv_data` to the channel's tpayload bus.
         raise_events_list = _collect_region_raise_events(region)
         consume_events_list = _collect_region_consume_events(region)
+        payload_send_list = [
+            ev for ev in raise_events_list if ev in payload_events
+        ]
+        payload_recv_list = [
+            ev for ev in consume_events_list if ev in payload_events
+        ]
         region_modules.append(
             {
                 "name": _sanitize_sv_identifier(region.name),
@@ -1979,6 +2161,8 @@ def _build_region_modules_canonical(
                 "state_width": max(1, len(region.states)),
                 "raise_events": raise_events_list,
                 "consume_events": consume_events_list,
+                "payload_send_events": payload_send_list,
+                "payload_recv_events": payload_recv_list,
             }
         )
     return region_modules
@@ -2023,6 +2207,7 @@ def _render_chart_top(
     regions: list[HdlRegion],
     region_datamodel_signals: dict[str, list[_DatamodelSignal]],
     cross_domain_signals: list[HdlCrossDomainSignal],
+    payload_events: set[str] | None = None,
 ) -> tuple[str, str]:
     """Emit the chart-top wrapper.
 
@@ -2039,7 +2224,8 @@ def _render_chart_top(
     if _emit_chart_top_wrapper is not None:
         try:
             region_modules = _build_region_modules_canonical(
-                chart_name, regions, region_datamodel_signals
+                chart_name, regions, region_datamodel_signals,
+                payload_events=payload_events,
             )
             cds_dicts = _build_cross_domain_signals_canonical(
                 cross_domain_signals, region_modules
@@ -2148,12 +2334,25 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
 
     multi_region = len(regions) > 1 or bool(chart_ir.get("parallel"))
 
+    # SOS-08-C wave-3-e (2026-05-24 §15): collect chart-wide
+    # payload-bearing events — any event with at least one `<param>`
+    # somewhere in the chart. Drives whether the channel + region
+    # FSMs emit `_send_data` / `_recv_data` ports for the event.
+    payload_events: set[str] = set()
+    for region in regions:
+        for state in region.states:
+            for tr in state.transitions:
+                for ev, params in tr.raise_params.items():
+                    if params:
+                        payload_events.add(ev)
+
     files: dict[str, str] = {}
     region_datamodel_signals: dict[str, list[_DatamodelSignal]] = {}
 
     for region in regions:
         fname, body, dmsigs = _render_region_module(
-            region, chart_name, multi_region, depth_budget
+            region, chart_name, multi_region, depth_budget,
+            payload_events=payload_events,
         )
         files[fname] = body
         region_datamodel_signals[region.name] = dmsigs
@@ -2162,7 +2361,8 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
         # Step 7 + step 10 — detect cross-domain signals, emit wrapper.
         cds = _detect_cross_domain_signals(regions)
         wrapper_name, wrapper_body = _render_chart_top(
-            chart_name, regions, region_datamodel_signals, cds
+            chart_name, regions, region_datamodel_signals, cds,
+            payload_events=payload_events,
         )
         files[wrapper_name] = wrapper_body
 
