@@ -885,3 +885,91 @@ Closes the wave-3 event-routing arc by routing chart-side `<param>` data through
 **Cited PCDNs / amendments**: PCDN-SOS-08-B-005 (chart-derived metadata struct); SOS-08-B §6.5 (channel `tpayload` bus); SOS-08-A §6.1 (sos_fifo_async/sos_fifo_sync data path inheritance); INV-SOS-H (chart-vocabulary traceability for payload).
 
 Status: 🟢 **wave-3-e complete**. The SCXML event-routing arc (wave-3-a through wave-3-e) is now end-to-end functional: events raised by one region pulse through the channel with backpressure + payload data + CDC awareness, are consumed by other regions or external observers, and the payload data round-trips through the channel's `tpayload` bus. Multi-param composition + sub-byte payload encoding + chart-side payload-struct ratification remain future amendments.
+
+### 2026-05-24 — Impl wave-3-f: datamodel binding on consume side (Ira)
+
+Wave-3-f closes the consume-side datamodel-binding gap the wave-3-e §15 entry called out: chart-side `<onentry><assign location="<X>" expr="event.<EV>.value"/></onentry>` lowering now routes the consumed event's payload data into the destination datamodel register on the entry-edge into the target state. With wave-3-f, an end-to-end "raise → channel → consume → store-into-datamodel" loop is expressible in pure SCXML + lowered to deterministic RTL by the SV + VHDL walkers.
+
+**Wave-3-f declaration form (frozen 2026-05-24 §15)**:
+
+```xml
+<state id="S">
+    <onentry>
+        <assign location="<X>" expr="event.<EV>.value"/>
+    </onentry>
+    ...
+</state>
+```
+
+Where:
+- `<X>` MUST be a chart-side datamodel signal declared in `<datamodel>`.
+- `<EV>` MUST be an event the region consumes (i.e., named in a `event="<EV>"` attribute on some transition in the same region). Walkers reject otherwise with a chart-vocabulary error (`UnsupportedChartError` naming the unknown consume event).
+- `.value` is the canonical single-`<param>` form (per wave-3-e payload convention). Other suffixes (`event.<EV>.<custom_name>`) are wave-3-f-future, gated on multi-`<param>` event payload composition.
+
+**Lowering semantics**:
+
+On every clock edge where `state_q != ST_S && state_next == ST_S && event_<EV>_recv_valid`, capture `event_<EV>_recv_data` into the destination datamodel register. This is the entry-edge into state S triggered by event EV. The condition is intentionally specific:
+
+- `state_q != ST_S` rules out the case where we're already in S (no entry edge).
+- `state_next == ST_S` is the standard entry condition.
+- `event_<EV>_recv_valid` confirms the event was actually consumed on this cycle (the FSM's predicate already requires this to fire the transition, but the capture re-checks it for safety + clarity).
+
+Multiple captures into the same datamodel signal from different states form an if/else if chain (document-order priority); the final `else` clause holds the register's current value. Different datamodel signals get independent chains in the same `always_ff` body.
+
+**Wave-3-f implementation surface (both walkers)**:
+
+- `HdlEventPayloadCapture` dataclass — `(state_id, location, event_name)`.
+- `_EVENT_PAYLOAD_RE` regex — matches `event.<EV>.value` (whitespace-tolerant; alphanumeric + underscore + hyphen in `<EV>`).
+- `_collect_region_event_payload_captures(region)` walker — extracts captures from each state's `onentry_assigns`; validates `<EV>` is a consume event of the region (hard error otherwise).
+- `_emit_register_process` extended — when captures are non-empty, emits per-capture entry-edge override branches; otherwise preserves the wave-1/wave-2 default-hold shape (byte-identical for charts without captures).
+
+**Cross-walker mirror equivalence**: SV emit shape:
+
+```sv
+if (state_q != ST_OBSERVED && state_next == ST_OBSERVED && event_tick_recv_valid) begin
+    data_last_value_q <= event_tick_recv_data;
+end else begin
+    data_last_value_q <= data_last_value_q;
+end
+```
+
+VHDL emit shape:
+
+```vhdl
+if state_q /= ST_OBSERVED and state_next = ST_OBSERVED and event_tick_recv_valid = '1' then
+    last_value_q <= signed(event_tick_recv_data);
+else
+    last_value_q <= last_value_q;
+end if;
+```
+
+The VHDL emit casts `_recv_data` (a `std_logic_vector`) to `signed` because the datamodel register is declared `signed` per `_datamodel_signal_lines`; SV's `data_<X>_q` is already a packed logic vector so no cast is needed.
+
+**Wave-3-f-future boundary** (explicit out-of-scope):
+
+- **Multi-`<param>` events**: when a chart event carries multiple `<param>` children, the `event.<EV>.<custom_name>` form needs to select among the per-param `_recv_data_<custom>` buses. Wave-3-e v1 supports single-`<param>` (`name="value"`) only; wave-3-f mirrors that scope.
+- **`<onexit>` captures**: lowering `<assign>` in `<onexit>` requires a different gating condition (entry-edge OUT of S — i.e., `state_q == ST_S && state_next != ST_S`). Wave-3-f covers `<onentry>` only.
+- **Non-event-value `<assign>` lowering**: `<assign location="x" expr="42"/>` (numeric-literal) or `<assign location="x" expr="other_signal"/>` (datamodel-to-datamodel) are silently ignored at wave-3-f (preserves wave-1/wave-2 no-op behavior). The general `<assign>` ECMAScript-subset lowering remains a future wave.
+- **Cross-region event-value capture**: when a region's `<onentry>` references an event consumed by a DIFFERENT region, wave-3-f raises `UnsupportedChartError`. Composing captures across regions requires the chart-top wrapper to expose the channel's `_recv_data` to additional consumers — a future amendment.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-C-1** (chart-as-source): preserved — capture lowering is deterministic from the chart text.
+- **INV-S-HDL-C-2** (datamodel signals reach RTL register form): **extended** — datamodel registers now have a defined write source beyond reset (the entry-edge capture).
+- **INV-S-HDL-C-3** (cross-domain CDC isolation): unchanged — captures read `_recv_data` which is the channel's already-synchronised consumer-side output.
+- **INV-S-HDL-C-4** (datamodel-write observability): retained — wave-3-f's entry-edge capture is the kind of write site INV-S-HDL-C-4 expected the debug-strobe pass to expose.
+- **INV-S-HDL-C-5** (one-hot encoding deterministic across dialects): unchanged — the wave-3-f if/elsif chain uses the same `ST_<UPPER>` constants both walkers emit.
+
+**Test count**: 15 new tests across `TestWave3fEventPayloadCapture` (9 — SV) + `TestWave3fEventPayloadCaptureVhdl` (6 — VHDL). Both walkers verified to:
+- Emit the entry-edge capture branch with the correct gating expression.
+- Assign `_recv_data` into the datamodel register.
+- Hold the previous value in the else branch.
+- Reject captures referencing events the region doesn't consume.
+- Form an if/elsif chain for multiple captures into the same signal.
+- Preserve wave-1/wave-2 emit shape for charts without captures.
+
+**Test suite**: 570/570 passing (555 prior + 15 wave-3-f).
+
+**Cited PCDNs / amendments**: §15 wave-3-f (this entry) ratifies the `event.<EV>.value` event-object form; wave-3-e §15 payload-bearing event ports (consumed); INV-S-HDL-C-2/-C-4 extended.
+
+Status: 🟢 **wave-3-f complete**. The SCXML event-routing arc + datamodel-binding-on-consume-side is now end-to-end functional: events raised by one region pulse through the channel with backpressure + payload data + CDC awareness, are consumed by other regions, and the payload value is captured into a chart-side datamodel signal on the entry-edge into the consuming state. Multi-`<param>` composition, `<onexit>` captures, general ECMAScript-subset `<assign>` lowering, and cross-region event-value capture remain future amendments.

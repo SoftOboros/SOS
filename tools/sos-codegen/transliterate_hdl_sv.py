@@ -331,6 +331,28 @@ class HdlAssign:
 
 
 @dataclass
+class HdlEventPayloadCapture:
+    """SOS-08-C wave-3-f (2026-05-24 §15) — datamodel binding on the
+    consume side.
+
+    Represents an `<onentry><assign location="<X>" expr="event.<EV>.value"/>
+    </onentry>` lowering: when the region enters state ``state_id`` via
+    a transition that consumed event ``event_name``, capture the
+    event's payload (``event_<EV>_recv_data``) into the chart-side
+    datamodel signal ``location``.
+
+    At v1, ``expr="event.<EV>.value"`` is the only supported event-
+    object form (single ``<param name="value">`` per the wave-3-e
+    payload convention). Multi-param composition + alternate field
+    names (``event.<EV>.<custom>``) are wave-3-f-future.
+    """
+
+    state_id: str          # the target state whose <onentry> carried the assign
+    location: str          # chart datamodel signal name (RHS of `data_<X>_q`)
+    event_name: str        # consumed event whose `_recv_data` supplies the value
+
+
+@dataclass
 class HdlState:
     """One <state id="..."/> inside a region."""
 
@@ -1145,6 +1167,69 @@ def _collect_region_raise_events(region: HdlRegion) -> list[str]:
     return sorted(seen)
 
 
+# SOS-08-C wave-3-f (2026-05-24 §15) — `event.<EV>.value` event-object
+# binding on the consume side. Pattern matches exactly the v1 frozen
+# shape; whitespace tolerated around tokens, no other suffixes (e.g.
+# `event.<EV>.<param_name>` for multi-param events) accepted at v1.
+_EVENT_PAYLOAD_RE = re.compile(
+    r"^\s*event\.([A-Za-z_][A-Za-z0-9_\-]*)\.value\s*$"
+)
+
+
+def _collect_region_event_payload_captures(
+    region: HdlRegion,
+) -> list[HdlEventPayloadCapture]:
+    """Walk a region's states and extract `<onentry><assign location="..."
+    expr="event.<EV>.value"/></onentry>` records per SOS-08-C wave-3-f.
+
+    Returns the list of ``HdlEventPayloadCapture`` records found. The
+    walker is forgiving on non-matching expressions (those keep the
+    pre-wave-3-f no-op semantics — they're collected into
+    `onentry_assigns` but the SV emit ignores them, as wave-1/wave-2/
+    wave-3-{a..e} did).
+
+    Per wave-3-f v1 validation (warnings, not errors):
+      - The state's incoming transitions MAY include one triggered by
+        ``event="<EV>"``; if no such transition exists in the region,
+        the capture would never fire (silent dead code). The walker
+        annotates this via a header comment in the emit so a reviewer
+        notices, but does NOT raise — the capture might fire via
+        cross-region event routing not visible to this region.
+      - The ``<EV>`` event must be a consume event of the region; if
+        not, the capture has no ``_recv_data`` port to read from and
+        the walker raises ``UnsupportedChartError`` (a hard error —
+        the chart references an event the region doesn't consume).
+    """
+    captures: list[HdlEventPayloadCapture] = []
+    consume_events = set(_collect_region_consume_events(region))
+    for state in region.states:
+        for assign in state.onentry_assigns:
+            m = _EVENT_PAYLOAD_RE.match(assign.expr)
+            if not m:
+                continue
+            event_name = m.group(1)
+            if event_name not in consume_events:
+                raise UnsupportedChartError(
+                    f"SOS-08-C wave-3-f: <onentry><assign location="
+                    f"'{assign.location}' expr='event.{event_name}.value'/> "
+                    f"references event `{event_name}` which is NOT a "
+                    f"consume event of region `{region.name}`. The "
+                    f"region's consume events are: "
+                    f"{sorted(consume_events) or '<none>'}. Either add "
+                    f"a transition with event=\"{event_name}\" to a "
+                    f"state in this region, or relocate the assign to "
+                    f"the region that consumes the event."
+                )
+            captures.append(
+                HdlEventPayloadCapture(
+                    state_id=state.state_id,
+                    location=assign.location,
+                    event_name=event_name,
+                )
+            )
+    return captures
+
+
 def _collect_region_payload_send_events(region: HdlRegion) -> list[str]:
     """Return the sorted, de-duplicated list of event names this
     region raises WITH at least one `<param>` somewhere.
@@ -1354,8 +1439,20 @@ def _emit_state_constants(region: HdlRegion) -> list[str]:
 def _emit_register_process(
     region: HdlRegion,
     datamodel_signals: list[_DatamodelSignal],
+    event_payload_captures: list[HdlEventPayloadCapture] | None = None,
 ) -> str:
-    """Step 1 + step 6: state register + datamodel reset values."""
+    """Step 1 + step 6: state register + datamodel reset values.
+
+    SOS-08-C wave-3-f (2026-05-24 §15): when ``event_payload_captures``
+    is non-empty, the always_ff body emits per-capture override
+    branches that capture ``event_<EV>_recv_data`` into the destination
+    datamodel register on the entry-edge into the capture's target
+    state (``state_q != ST_S && state_next == ST_S && event_<EV>_recv_valid``).
+    Captures are walked in document order; multiple captures targeting
+    the same datamodel signal are last-write-wins per SCXML §3.13
+    onentry execution order.
+    """
+    event_payload_captures = event_payload_captures or []
     initial_const = _state_constant_name(region.initial_state)
     reset_lines: list[str] = [
         f"            state_q <= {initial_const};",
@@ -1365,7 +1462,48 @@ def _emit_register_process(
     ]
     for sig in datamodel_signals:
         reset_lines.append(f"            {sig.sv_name}_q <= {sig.reset_expr};")
-        update_lines.append(f"            {sig.sv_name}_q <= {sig.sv_name}_q;")
+
+    # Group captures by datamodel signal so each signal gets one
+    # priority chain (multiple captures into the same signal compose
+    # via if/else if). Per-state captures are document-order; multi-
+    # signal captures emit independent if/else if chains.
+    captures_by_location: dict[str, list[HdlEventPayloadCapture]] = {}
+    for cap in event_payload_captures:
+        captures_by_location.setdefault(cap.location, []).append(cap)
+
+    sig_names = {sig.chart_id: sig.sv_name for sig in datamodel_signals}
+
+    for sig in datamodel_signals:
+        cap_list = captures_by_location.get(sig.chart_id, [])
+        if not cap_list:
+            # Default: hold current value (wave-1/wave-2 shape preserved).
+            update_lines.append(
+                f"            {sig.sv_name}_q <= {sig.sv_name}_q;"
+            )
+            continue
+        # Wave-3-f: build an if/else if chain mapping each capture's
+        # entry-edge condition to the corresponding event-recv_data
+        # source. The final ``else`` clause is the hold-value default.
+        chain_lines: list[str] = []
+        for idx, cap in enumerate(cap_list):
+            ev_ident = _safe_event_ident(cap.event_name)
+            state_const = _state_constant_name(cap.state_id)
+            cond = (
+                f"state_q != {state_const} && "
+                f"state_next == {state_const} && "
+                f"event_{ev_ident}_recv_valid"
+            )
+            keyword = "            if" if idx == 0 else "            end else if"
+            chain_lines.append(
+                f"{keyword} ({cond}) begin"
+            )
+            chain_lines.append(
+                f"                {sig.sv_name}_q <= event_{ev_ident}_recv_data;"
+            )
+        chain_lines.append(f"            end else begin")
+        chain_lines.append(f"                {sig.sv_name}_q <= {sig.sv_name}_q;")
+        chain_lines.append(f"            end")
+        update_lines.extend(chain_lines)
 
     return (
         "    always_ff @(posedge clk) begin\n"
@@ -1876,7 +2014,13 @@ def _render_region_module(
     )
     state_constants = _emit_state_constants(region)
     register_decls = _emit_register_decls(region, datamodel_signals, n_states)
-    register_process = _emit_register_process(region, datamodel_signals)
+    # SOS-08-C wave-3-f (2026-05-24 §15): collect <onentry><assign
+    # location="X" expr="event.<EV>.value"/> records so the register
+    # process can route event payload data into datamodel signals.
+    event_payload_captures = _collect_region_event_payload_captures(region)
+    register_process = _emit_register_process(
+        region, datamodel_signals, event_payload_captures
+    )
     transition_block = _emit_combinational_block(region, depth_budget)
     output_drives = _emit_output_drives(datamodel_signals)
     state_const_block = "\n".join(f"    {line}" for line in state_constants)

@@ -1605,3 +1605,159 @@ class TestWave3ePayloadRouting:
         assert "recv_data" not in consumer
         assert "send_data" not in top
         assert "recv_data" not in top
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-C wave-3-f (2026-05-24 §15) — datamodel binding on consume side.
+# ---------------------------------------------------------------------------
+
+
+class TestWave3fEventPayloadCapture:
+    """Wave-3-f lowers `<onentry><assign location="X"
+    expr="event.<EV>.value"/></onentry>` into a registered assignment
+    gated by `state_q != ST_S && state_next == ST_S &&
+    event_<EV>_recv_valid`. Tests verify the SV emit shape +
+    backwards-compat with charts that don't use the form."""
+
+    def _chart_with_capture(self):
+        return {
+            "datamodel": [{"data": [
+                {"id": "last_value", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [{"event": "tick", "target": "observed"}]},
+                {
+                    "id": "observed",
+                    "onentry": [{"assign": [
+                        {"location": "last_value", "expr": "event.tick.value"},
+                    ]}],
+                    "transition": [{"target": "idle"}],
+                },
+            ],
+            "initial": "idle",
+        }
+
+    def _files(self) -> dict:
+        return transliterate_hdl_sv.render_target(
+            self._chart_with_capture(), {"chart_name": "cap"}
+        )
+
+    def test_register_process_emits_capture_branch(self):
+        sv = self._files()["cap_fsm.sv"]
+        assert (
+            "state_q != ST_OBSERVED && state_next == ST_OBSERVED && "
+            "event_tick_recv_valid"
+        ) in sv
+
+    def test_capture_branch_assigns_recv_data(self):
+        sv = self._files()["cap_fsm.sv"]
+        assert "data_last_value_q <= event_tick_recv_data" in sv
+
+    def test_capture_default_holds_value(self):
+        """Outside the capture entry-edge the datamodel register holds
+        its previous value (the else branch of the if/else chain)."""
+        sv = self._files()["cap_fsm.sv"]
+        assert "data_last_value_q <= data_last_value_q" in sv
+
+    def test_capture_does_not_break_state_register(self):
+        sv = self._files()["cap_fsm.sv"]
+        assert "state_q <= state_next" in sv
+        assert "state_q <= ST_IDLE" in sv
+
+    def test_capture_target_is_consume_event_check(self):
+        """If the chart writes `event.<EV>.value` but the region does
+        NOT consume event EV, the walker MUST raise a chart-vocabulary
+        error rather than silently emit dead code."""
+        chart = self._chart_with_capture()
+        chart["state"][1]["onentry"][0]["assign"][0]["expr"] = (
+            "event.nonsense.value"
+        )
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match="NOT a consume event",
+        ):
+            transliterate_hdl_sv.render_target(chart, {"chart_name": "cap"})
+
+    def test_multiple_captures_into_same_signal_form_chain(self):
+        """Two `<onentry>` captures into the SAME datamodel signal
+        from DIFFERENT states form an if/else if chain (document
+        order). Each branch routes its own event's `_recv_data`."""
+        chart = {
+            "datamodel": [{"data": [{"id": "buf", "expr": "0", "type": "i32"}]}],
+            "state": [
+                {"id": "s0", "transition": [
+                    {"event": "a", "target": "s_a"},
+                    {"event": "b", "target": "s_b"},
+                ]},
+                {
+                    "id": "s_a",
+                    "onentry": [{"assign": [
+                        {"location": "buf", "expr": "event.a.value"},
+                    ]}],
+                    "transition": [{"target": "s0"}],
+                },
+                {
+                    "id": "s_b",
+                    "onentry": [{"assign": [
+                        {"location": "buf", "expr": "event.b.value"},
+                    ]}],
+                    "transition": [{"target": "s0"}],
+                },
+            ],
+            "initial": "s0",
+        }
+        sv = transliterate_hdl_sv.render_target(chart, {"chart_name": "m"})["m_fsm.sv"]
+        assert "event_a_recv_valid" in sv
+        assert "event_b_recv_valid" in sv
+        assert "data_buf_q <= event_a_recv_data" in sv
+        assert "data_buf_q <= event_b_recv_data" in sv
+        # If/else if chain present.
+        assert "end else if" in sv
+
+    def test_capture_only_emitted_for_event_value_form(self):
+        """An `<assign>` with a numeric-literal expr (not
+        `event.<EV>.value`) is silently ignored by wave-3-f — the
+        register-process body does NOT emit a capture branch for it
+        (preserves wave-1/wave-2 semantics for non-event assigns)."""
+        chart = {
+            "datamodel": [{"data": [{"id": "x", "expr": "0", "type": "i32"}]}],
+            "state": [
+                {"id": "a",
+                 "onentry": [{"assign": [{"location": "x", "expr": "42"}]}],
+                 "transition": [{"target": "b"}]},
+                {"id": "b"},
+            ],
+            "initial": "a",
+        }
+        sv = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "n"}
+        )["n_fsm.sv"]
+        # No event-recv reference on data_x_q.
+        assert "data_x_q <= event_" not in sv
+        # data_x_q still holds (wave-1/wave-2 shape).
+        assert "data_x_q <= data_x_q" in sv
+
+    def test_no_captures_preserves_wave1_register_process_shape(self):
+        """A chart with NO event-payload captures emits the wave-1/-2
+        register-process shape (no wave-3-f if/else if chain)."""
+        chart = {
+            "datamodel": [{"data": [{"id": "x", "expr": "0", "type": "i32"}]}],
+            "state": [
+                {"id": "a", "transition": [{"target": "b"}]},
+                {"id": "b"},
+            ],
+            "initial": "a",
+        }
+        sv = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "p"}
+        )["p_fsm.sv"]
+        assert "data_x_q <= event_" not in sv
+        assert "data_x_q <= data_x_q" in sv
+
+    def test_emitted_sv_default_nettype_guards_present(self):
+        """Wave-3-f emit MUST preserve the `default_nettype` guards
+        (wave-1 shape) so the module compiles cleanly under strict
+        Verilator settings."""
+        sv = self._files()["cap_fsm.sv"]
+        assert "`default_nettype none" in sv
+        assert "`default_nettype wire" in sv

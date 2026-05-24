@@ -235,6 +235,21 @@ class HdlAssign:
 
 
 @dataclass
+class HdlEventPayloadCapture:
+    """SOS-08-C wave-3-f (2026-05-24 §15) — datamodel binding on the
+    consume side. Mirror of the SV walker's ``HdlEventPayloadCapture``;
+    see ``transliterate_hdl_sv.HdlEventPayloadCapture`` for the full
+    normative reference. VHDL emit mirrors the SV semantics: on the
+    entry-edge into ``state_id`` with ``event_<EV>_recv_valid``
+    asserted, capture ``event_<EV>_recv_data`` into ``data_<X>_q``.
+    """
+
+    state_id: str
+    location: str
+    event_name: str
+
+
+@dataclass
 class HdlState:
     """One <state id="..."/> inside a region."""
 
@@ -969,6 +984,49 @@ def _collect_region_consume_events(region: HdlRegion) -> list[str]:
     return sorted(seen)
 
 
+# SOS-08-C wave-3-f (2026-05-24 §15): event-object binding regex.
+# Mirror of SV walker's _EVENT_PAYLOAD_RE — matches `event.<EV>.value`.
+_EVENT_PAYLOAD_RE = re.compile(
+    r"^\s*event\.([A-Za-z_][A-Za-z0-9_\-]*)\.value\s*$"
+)
+
+
+def _collect_region_event_payload_captures(
+    region: HdlRegion,
+) -> list[HdlEventPayloadCapture]:
+    """SOS-08-C wave-3-f (2026-05-24 §15) — VHDL-side mirror of the SV
+    walker's ``_collect_region_event_payload_captures``. Walks each
+    state's ``onentry_assigns`` and extracts records matching
+    ``expr="event.<EV>.value"``. Validates the event is consumed by
+    the region (hard error) per the SV walker's contract.
+    """
+    captures: list[HdlEventPayloadCapture] = []
+    consume_events = set(_collect_region_consume_events(region))
+    for state in region.states:
+        for assign in state.onentry_assigns:
+            m = _EVENT_PAYLOAD_RE.match(assign.expr)
+            if not m:
+                continue
+            event_name = m.group(1)
+            if event_name not in consume_events:
+                raise UnsupportedChartError(
+                    f"SOS-08-C wave-3-f (VHDL): <onentry><assign "
+                    f"location='{assign.location}' "
+                    f"expr='event.{event_name}.value'/> references event "
+                    f"`{event_name}` which is NOT a consume event of "
+                    f"region `{region.name}`. Consume events: "
+                    f"{sorted(consume_events) or '<none>'}."
+                )
+            captures.append(
+                HdlEventPayloadCapture(
+                    state_id=state.state_id,
+                    location=assign.location,
+                    event_name=event_name,
+                )
+            )
+    return captures
+
+
 def _collect_region_raise_events(region: HdlRegion) -> list[str]:
     """Sorted, de-duplicated event names this region raises via <raise>.
 
@@ -1314,34 +1372,121 @@ def _emit_transition_case_arm(
 def _emit_register_process(
     region: HdlRegion,
     datamodel_resets: list[str],
+    event_payload_captures: list[HdlEventPayloadCapture] | None = None,
+    datamodel_signals: list[HdlDatamodelSignal] | None = None,
 ) -> str:
-    """Emit the synchronous active-high reset register process."""
-    try:
-        return emit_register_process(
-            state_q="state_q",
-            state_next="state_next",
-            initial_state=_state_constant_name(region.initial_state),
-            datamodel_resets=datamodel_resets,
-            reset_polarity=ResetPolarity.ACTIVE_HIGH_SYNC,
-            dialect=Dialect.VHDL,
+    """Emit the synchronous active-high reset register process.
+
+    SOS-08-C wave-3-f (2026-05-24 §15): when ``event_payload_captures``
+    is non-empty, the process emits per-capture entry-edge override
+    branches that route ``event_<EV>_recv_data`` into the destination
+    ``data_<X>_q`` register. Mirrors the SV walker's wave-3-f behavior.
+
+    When ``event_payload_captures`` is empty the function falls back
+    to the wave-1/wave-2 ``emit_register_process`` helper (or its
+    local TypeError fallback), preserving the pre-wave-3-f emit
+    byte-identical for charts without event-payload captures.
+    """
+    event_payload_captures = event_payload_captures or []
+
+    if not event_payload_captures:
+        try:
+            return emit_register_process(
+                state_q="state_q",
+                state_next="state_next",
+                initial_state=_state_constant_name(region.initial_state),
+                datamodel_resets=datamodel_resets,
+                reset_polarity=ResetPolarity.ACTIVE_HIGH_SYNC,
+                dialect=Dialect.VHDL,
+            )
+        except TypeError:
+            reset_body = "\n".join(
+                f"                {line}" for line in datamodel_resets
+            )
+            return (
+                "    process(clk) is\n"
+                "    begin\n"
+                "        if rising_edge(clk) then\n"
+                "            if rst = '1' then\n"
+                f"                state_q <= {_state_constant_name(region.initial_state)};\n"
+                + (reset_body + "\n" if reset_body else "")
+                + "            else\n"
+                "                state_q <= state_next;\n"
+                "            end if;\n"
+                "        end if;\n"
+                "    end process;"
+            )
+
+    # Wave-3-f path: manual emit with per-capture entry-edge override
+    # branches. Mirrors the SV walker's _emit_register_process wave-3-f
+    # body structurally; VHDL syntax differs in the if/elsif chain.
+    captures_by_location: dict[str, list[HdlEventPayloadCapture]] = {}
+    for cap in event_payload_captures:
+        captures_by_location.setdefault(cap.location, []).append(cap)
+
+    datamodel_signals = datamodel_signals or []
+    reset_lines: list[str] = [
+        f"                state_q <= {_state_constant_name(region.initial_state)};",
+    ]
+    reset_lines.extend(f"                {line}" for line in datamodel_resets)
+
+    # Build the update side. Default: state_q <= state_next; per signal
+    # default-hold OR wave-3-f capture chain. Per the VHDL walker's
+    # signal-naming convention each datamodel signal's register is
+    # ``<name>_q`` (no `data_` prefix — only the entity output port
+    # carries the `data_` prefix).
+    update_lines: list[str] = [
+        "                state_q <= state_next;",
+    ]
+    for sig in datamodel_signals:
+        reg_name = f"{sig.name}_q"
+        cap_list = captures_by_location.get(sig.name, [])
+        if not cap_list:
+            update_lines.append(
+                f"                {reg_name} <= {reg_name};"
+            )
+            continue
+        # Wave-3-f if/elsif chain: per-capture entry-edge override.
+        for idx, cap in enumerate(cap_list):
+            ev_ident = _safe_event_ident_vhdl(cap.event_name)
+            state_const = _state_constant_name(cap.state_id)
+            cond = (
+                f"state_q /= {state_const} and "
+                f"state_next = {state_const} and "
+                f"event_{ev_ident}_recv_valid = '1'"
+            )
+            keyword = (
+                "                if" if idx == 0 else "                elsif"
+            )
+            update_lines.append(f"{keyword} {cond} then")
+            # Wave-3-f: event_<EV>_recv_data is a std_logic_vector of
+            # _PAYLOAD_WIDTH bits; the datamodel register is signed
+            # (per emit_signal_decl). Convert via signed(...) so the
+            # assignment is well-typed.
+            update_lines.append(
+                f"                    {reg_name} <= signed("
+                f"event_{ev_ident}_recv_data);"
+            )
+        update_lines.append("                else")
+        update_lines.append(
+            f"                    {reg_name} <= {reg_name};"
         )
-    except TypeError:
-        reset_body = "\n".join(
-            f"                {line}" for line in datamodel_resets
-        )
-        return (
-            "    process(clk) is\n"
-            "    begin\n"
-            "        if rising_edge(clk) then\n"
-            "            if rst = '1' then\n"
-            f"                state_q <= {_state_constant_name(region.initial_state)};\n"
-            + (reset_body + "\n" if reset_body else "")
-            + "            else\n"
-            "                state_q <= state_next;\n"
-            "            end if;\n"
-            "        end if;\n"
-            "    end process;"
-        )
+        update_lines.append("                end if;")
+
+    return (
+        "    process(clk) is\n"
+        "    begin\n"
+        "        if rising_edge(clk) then\n"
+        "            if rst = '1' then\n"
+        + "\n".join(reset_lines)
+        + "\n"
+        + "            else\n"
+        + "\n".join(update_lines)
+        + "\n"
+        + "            end if;\n"
+        + "        end if;\n"
+        + "    end process;"
+    )
 
 
 def _emit_combinational_block(region: HdlRegion, depth_budget: int) -> str:
@@ -1987,7 +2132,17 @@ def _render_region(
         payload_recv_events=payload_recv_events,
     )
     state_constants = _emit_state_constants(region)
-    register_process = _emit_register_process(region, dm_resets)
+    # SOS-08-C wave-3-f (2026-05-24 §15): collect <onentry><assign
+    # location="X" expr="event.<EV>.value"/> captures so the register
+    # process can route the event payload data into the datamodel
+    # register on the entry-edge into the target state.
+    event_payload_captures = _collect_region_event_payload_captures(region)
+    register_process = _emit_register_process(
+        region,
+        dm_resets,
+        event_payload_captures=event_payload_captures,
+        datamodel_signals=region.datamodel,
+    )
     transition_block = _emit_combinational_block(region, depth_budget)
 
     header_lines = [

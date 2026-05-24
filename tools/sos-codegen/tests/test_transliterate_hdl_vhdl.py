@@ -689,3 +689,121 @@ class TestVhdlWave3Events:
         src = list(files.values())[0]
         assert "event_" not in src
         assert "send_valid" not in src
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-C wave-3-f (2026-05-24 §15) — datamodel binding on consume
+# side. VHDL mirror of the SV walker's wave-3-f.
+# ---------------------------------------------------------------------------
+
+
+class TestWave3fEventPayloadCaptureVhdl:
+    """Wave-3-f VHDL mirror: `<onentry><assign location="X"
+    expr="event.<EV>.value"/></onentry>` lowers to an if/elsif chain
+    in the register process. Tests verify the VHDL emit shape +
+    cross-walker parity with the SV walker."""
+
+    def _chart_with_capture(self):
+        return {
+            "datamodel": [{"data": [
+                {"id": "last_value", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle",
+                 "transition": [{"event": "tick", "target": "observed"}]},
+                {
+                    "id": "observed",
+                    "onentry": [{"assign": [
+                        {"location": "last_value", "expr": "event.tick.value"},
+                    ]}],
+                    "transition": [{"target": "idle"}],
+                },
+            ],
+            "initial": "idle",
+        }
+
+    def _vhd(self) -> str:
+        files = render_target(
+            self._chart_with_capture(), {"chart_name": "cap"}
+        )
+        return files["cap_fsm.vhd"]
+
+    def test_register_process_emits_capture_branch_vhdl(self):
+        vhd = self._vhd()
+        # VHDL syntax: `state_q /= X and state_next = X and event_<EV>_recv_valid = '1'`.
+        assert (
+            "state_q /= ST_OBSERVED and "
+            "state_next = ST_OBSERVED and "
+            "event_tick_recv_valid = '1'"
+        ) in vhd
+
+    def test_capture_branch_assigns_recv_data_via_signed_cast(self):
+        """VHDL emit converts `std_logic_vector` _recv_data to `signed`
+        before assigning to the datamodel register (which is declared
+        as `signed`)."""
+        vhd = self._vhd()
+        assert "last_value_q <= signed(event_tick_recv_data)" in vhd
+
+    def test_capture_default_holds_value(self):
+        vhd = self._vhd()
+        assert "last_value_q <= last_value_q" in vhd
+
+    def test_capture_target_is_consume_event_check(self):
+        chart = self._chart_with_capture()
+        chart["state"][1]["onentry"][0]["assign"][0]["expr"] = (
+            "event.nonsense.value"
+        )
+        with pytest.raises(
+            UnsupportedChartError,
+            match="NOT a consume event",
+        ):
+            render_target(chart, {"chart_name": "cap"})
+
+    def test_multiple_captures_form_elsif_chain(self):
+        chart = {
+            "datamodel": [{"data": [{"id": "buf", "expr": "0", "type": "i32"}]}],
+            "state": [
+                {"id": "s0", "transition": [
+                    {"event": "a", "target": "s_a"},
+                    {"event": "b", "target": "s_b"},
+                ]},
+                {
+                    "id": "s_a",
+                    "onentry": [{"assign": [
+                        {"location": "buf", "expr": "event.a.value"},
+                    ]}],
+                    "transition": [{"target": "s0"}],
+                },
+                {
+                    "id": "s_b",
+                    "onentry": [{"assign": [
+                        {"location": "buf", "expr": "event.b.value"},
+                    ]}],
+                    "transition": [{"target": "s0"}],
+                },
+            ],
+            "initial": "s0",
+        }
+        vhd = render_target(chart, {"chart_name": "m"})["m_fsm.vhd"]
+        assert "event_a_recv_valid = '1'" in vhd
+        assert "event_b_recv_valid = '1'" in vhd
+        assert "buf_q <= signed(event_a_recv_data)" in vhd
+        assert "buf_q <= signed(event_b_recv_data)" in vhd
+        assert "elsif" in vhd
+
+    def test_no_captures_preserves_wave1_shape(self):
+        """Charts without event-payload captures emit the wave-1
+        register-process shape (no if/elsif chain in the update branch)."""
+        chart = {
+            "datamodel": [{"data": [{"id": "x", "expr": "0", "type": "i32"}]}],
+            "state": [
+                {"id": "a", "transition": [{"target": "b"}]},
+                {"id": "b"},
+            ],
+            "initial": "a",
+        }
+        vhd = render_target(chart, {"chart_name": "p"})["p_fsm.vhd"]
+        # No event-recv reference; no entry-edge if/elsif.
+        assert "event_" not in vhd
+        # x_q reset present.
+        assert "x_q <= to_signed(0, x_q'length);" in vhd
