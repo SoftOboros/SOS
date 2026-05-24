@@ -1,0 +1,58 @@
+# Intentionally excluded from the SOS root workspace: this crate
+# targets `wasm32-unknown-unknown` for the Surfer plugin host and
+# carries its own dependency graph (serde, wit-bindgen) that has no
+# overlap with the host-target SOS workspace crates. An empty
+# `[workspace]` table opts the crate out of root-workspace
+# inheritance.
+[workspace]
+
+[package]
+name = "sos-surfer-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "SOS-08-G annotation-overlay plugin for the Surfer waveform viewer."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/SoftOboros/SOS"
+authors = ["SoftOboros <ira@softoboros.com>"]
+publish = false
+
+# Surfer's plugin host loads the crate as a `cdylib` compiled to
+# `wasm32-unknown-unknown` and exercises the wit-bindgen interface
+# exported below. Keep the crate-type narrow so cargo doesn't try to
+# emit a host-target `.dylib` that would never link in Surfer's host.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# wit-bindgen generates the host/plugin glue from the surfer-plugin.wit
+# interface description. Versions are pinned to the Surfer mainline as
+# of 2026-05; bump in lockstep when Surfer releases breaking changes.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wit-bindgen = { version = "0.30", optional = true }
+
+[features]
+# Default build (host-target) skips wit-bindgen so `cargo check` works
+# without the wasm32-unknown-unknown toolchain.
+default = []
+# Enabled by `cargo build --release --target wasm32-unknown-unknown
+#   --features wasm` for the actual Surfer plugin artifact.
+wasm = ["wit-bindgen"]
+
+# Targets the Surfer plugin host expects.
+[package.metadata.surfer]
+plugin-name = "sos-surfer-plugin"
+plugin-version = "0.1.0"
+manifest = "surfer-plugin.toml"
+schema = "sos-08-g/annotations"
+schema-version = "1.0"
+
+# Profile choices follow Surfer plugin conventions: aggressive size +
+# debug-symbols-stripped for the wasm artifact.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

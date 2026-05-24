@@ -615,3 +615,62 @@ Wave-3b closes the second of the two wave-1 deferred candidates:
 **Cited PCDNs**: PCDN-G-wave1-003 (closed); PCDN-G-wave1-001 (preserved + envelope-extensibility-at-v1.0 made explicit); INV-S-HDL-G-1/-3/-6.
 
 Status: 🟢 **wave-3b complete** — filename-prefix coordination is now by construction. Wave-3c (full GUI integration: GTKWave TCL extension + Surfer Rust/WASM plugin) remains the open wave-3 boundary.
+
+### 2026-05-24 — Impl wave-3c: full GUI integration (Ira)
+
+Wave-3c closes the wave-3 GUI-integration boundary the wave-1 + wave-2 §15 entries reserved. Both viewer integrations move from CLI-only scaffolds to runtime in-process plugins (GTKWave Tcl) / plugin-host artifacts (Surfer WASM). With wave-3c landed, **every conformance gate in SOS-08-G §6 (a)–(e) is satisfied by both viewers**; §6 (f) vector-citation drill-down is the single remaining wave-3c-future open item, gated on upstream viewer-API stability (GTKWave link-back hook + Surfer link-back API).
+
+**Wave-3c implementation surface**:
+
+- **`tools/sos-codegen/viewers/gtkwave/sos_overlay.tcl` (new, ~190 LOC)** — loadable GTKWave Tcl plugin. Reads the currently-loaded waveform path via `gtkwave::getDumpFileName`, scans the same directory for `.annotations.jsonl` overlays whose `_meta.waveform_prefix` matches (wave-3b co-locate primary; wave-1 same-prefix fallback), shells out to the sibling Python ext (`sos_gtkwave_ext.py --format gtkwave`) to convert each overlay's JSONL records into the Tcl marker-install commands GTKWave's command surface consumes, and `eval`s the result inside the running GTKWave Tcl interpreter. Environment overrides: `SOS_GTKWAVE_PYTHON` (interpreter selection), `SOS_OVERLAY_VERBOSE` (diagnostic prints), `sos_overlay_skip_auto_main` (suppress auto-invocation for GUI-load scenarios). Brace-balanced; cites all the load-bearing SOS-08-G spec sections + invariants.
+
+- **`tools/sos-codegen/viewers/gtkwave/sos_gtkwave_ext.py` extended** — `to_gtkwave_tcl` now emits THREE sections instead of one: (1) named markers A..Z (wave-1 keyboard-navigable layer, preserved), (2) per-chart_path `gtkwave::addCommentTracesFromList` overlay tracks (§6 (d) chart-path navigation; one track per unique `chart_path` value; no cap), (3) `sos:invariants` comment-trace track for invariant-fire records (§6 (e) invariant-fire highlighting; carries `mark_invariant` alias for downstream hooks). The cap-note message extended to make explicit that wave-3c records the overflow records in the comment-trace track (no record loss). CLI gains the `--format gtkwave` alias for `--format tcl` (the explicit name the Tcl plugin uses when shelling out).
+
+- **`tools/sos-codegen/viewers/gtkwave/README.md` (new)** — install + usage doc. Per-viewer §6 conformance matrix.
+
+- **`tools/sos-codegen/viewers/surfer/sos_surfer_ext.py` extended** — `to_surfer_commands` mirrored to emit per-record `add_marker` + per-chart_path `add_overlay_track`/`add_overlay_event` + `sos:invariants` track + per-record `mark_invariant` for invariant-fire records.
+
+- **`tools/sos-codegen/viewers/surfer/sos-surfer-plugin/` (new Rust crate, ~390 LOC)** — Surfer WASM plugin scaffold. Source layout: `Cargo.toml` (workspace-excluded; cdylib + rlib crate-type; serde + serde_json deps; optional wit-bindgen behind `wasm` feature so host-target `cargo check` works without the WASM toolchain), `src/lib.rs` (schema constants + `AnnotationRecord` + `ChartPath` deserialize-untagged enum + `SchemaHeader` envelope + `parse_overlay` schema-validating loader + `SurferCommand` enum + `render_commands` emit function + 4 unit tests covering parse + schema-rejection + emit shape + chart-path depth-cap), `surfer-plugin.toml` (Surfer plugin-host manifest naming schema/version/feature gates/discovery modes), `README.md` (build + install + §6 conformance matrix), `.cargo/config.toml` (per-target empty rustflags evicting user shell RUSTFLAGS; mirrors disco-analyzer pattern), `.gitignore` (target/ + IDE noise).
+
+- **`tools/sos-codegen/viewers/README.md` (new)** — unified install guide. Conformance matrix across both viewers. Discovery model (wave-3b primary + wave-1 fallback) documented. Cross-viewer source-of-truth shared-constants policy named.
+
+**§6 conformance matrix (post wave-3c)**:
+
+| Gate | GTKWave | Surfer | Notes |
+|------|---------|--------|-------|
+| (a) MUST co-locate via `_meta.waveform_prefix` | ✅ | ✅ | wave-3b discovery model honoured by both |
+| (b) MUST schema-version-aware | ✅ | ✅ | Python ext + Rust `parse_overlay` both validate |
+| (c) MUST per-record render | ✅ | ✅ | Named markers + WCP markers |
+| (d) SHOULD chart-path navigation | ✅ | ✅ | Per-chart_path comment-trace / overlay tracks |
+| (e) SHOULD invariant-fire highlighting | ✅ | ✅ | `sos:invariants` dedicated track |
+| (f) SHOULD vector-citation drill-down | ⏸ | ⏸ | wave-3c-future (viewer link-back API pending) |
+
+**Wave-3c-future boundary** (explicitly out of scope):
+
+- §6 (f) vector-citation drill-down — needs GTKWave Tcl hook for `set_pattern_filename`-equivalent link-back + Surfer's link-back API once stabilised.
+- Cross-overlay merge (a single waveform with multiple per-test overlays merged into one timeline view) — wave-3c installs each overlay independently; merge UX is a wave-4 candidate.
+- Time-scale-multiplier propagation (cycle → ns) — wave-3c emits raw cycle counts; the wave-3c-future emit threads the test's `_CLOCK_PERIOD_NS` into the marker time values.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-G-1** (three-file output coupling): preserved + utilised — the Tcl plugin discovers the overlay via wave-3b `_meta.waveform_prefix`; the Surfer manifest's `discovery.modes` names the same coordination.
+- **INV-S-HDL-G-2** (chart-vocabulary mandatory): preserved — every comment-trace badge + every overlay-track event renders the chart-state ID (NOT the raw RTL bit pattern alone).
+- **INV-S-HDL-G-3** (schema-version header at line 0): preserved — `parse_overlay` (Rust) + the Python loader (already validating per wave-1) both reject overlays whose header fails schema-name/version equality.
+- **INV-S-HDL-G-4** (build-output discipline): preserved — `target/` directory under the Rust crate is gitignored; the crate itself is tracked source.
+- **INV-S-HDL-G-5** (generation co-located with test body): unchanged — the writer side is the generation point; the wave-3c viewer side is the *consumption* point and is not in INV-S-HDL-G-5's scope.
+- **INV-S-HDL-G-6** (chart-diff + waveform-diff parity for MCP-workflow review): **closed** — wave-3c is the operational form of the hardware-side review surface the parent §9 reconciliation calls out. The end-to-end review loop (agent edits chart via SOS-11 → regen → CI emits review artifact → developer reviews chart-diff + waveform-diff in one pass with chart-state badges rendered by the wave-3c GUI integration) is now end-to-end-runnable.
+- **PCDN-G-001 / PCDN-G-002 / PCDN-G-003** (`_meta` envelope + chart-path cap + per-test file scope): preserved unchanged.
+- **PCDN-G-004** (in-subrepo viewer-extension distribution): preserved — the Rust crate lives at `tools/sos-codegen/viewers/surfer/sos-surfer-plugin/` per the resolution; both viewer subtrees gain their own README.md.
+- **PCDN-G-005** (per-event default density): preserved.
+- **PCDN-G-006** (line-buffered flush): preserved.
+
+**Test count**: 35 new tests in `tools/sos-codegen/viewers/tests/test_wave_3c_gui_integration.py` + 4 new Rust unit tests in `sos-surfer-plugin/src/lib.rs`:
+
+- Python (35): Tcl plugin structure (8 tests — file presence, proc declarations, wave-3b discovery, Python-ext shell-out, env-var honouring, spec citations, brace balance), wave-3c TCL emit (5 tests — comment-trace per chart_path, invariants track, named-markers preservation, label content, chart-path list/string normalisation), wave-3c Surfer command emit (3 tests — overlay-track per chart_path, invariants track, marker preservation), Rust crate scaffold (12 tests — Cargo.toml parse + crate-type + features + Surfer metadata; lib.rs schema constants + parse_overlay + render_commands signatures + emit variants; plugin manifest parse + schema + discovery modes + conformance features; README presence + build commands + install path docs), wave-3c READMEs (4 tests — unified, conformance matrix, GTKWave install paths).
+- Rust (4): `parses_simple_overlay`, `rejects_unknown_schema`, `renders_commands_includes_marker_and_overlay`, `chart_path_truncates_at_max_depth`.
+
+**Test suite**: Python: 504/504 passing (469 prior + 35 wave-3c). Rust: 4/4 passing (`RUSTFLAGS="" cargo test` from the crate directory; the host environment's `RUSTFLAGS=-Clink-arg=-fuse-ld=mold` is incompatible with macOS `cc` and is documented as a per-contributor workaround in the crate README).
+
+**Cited PCDNs**: PCDN-G-004 (in-subrepo distribution honoured); PCDN-G-001 (`_meta` envelope preserved); PCDN-G-002 (`chart_path_max_depth: 8` mirrored into Rust constant); PCDN-G-005 / PCDN-G-006 (unchanged); INV-S-HDL-G-1/-2/-3/-4/-6.
+
+Status: 🟢 **wave-3c complete** — full GUI integration landed. SOS-08-G §6 (a)–(e) conformance gates satisfied by both viewers; (f) vector-citation drill-down remains the wave-3c-future open item (gated on upstream viewer-API stability). The SOS-11 chart-diff + SOS-08-G waveform-diff parity claim per INV-S-HDL-G-6 is now end-to-end operational.

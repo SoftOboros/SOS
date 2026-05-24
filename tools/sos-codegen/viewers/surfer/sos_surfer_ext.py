@@ -186,31 +186,45 @@ def _surfer_escape(value: object) -> str:
 
 
 def to_surfer_commands(annotations: Sequence[dict]) -> str:
-    """Emit a Surfer command-script that installs chart-state markers.
+    """Emit a Surfer command-script that installs chart-state markers +
+    per-chart_path overlay tracks.
 
-    Surfer's command palette accepts batches of scripted commands; the
-    canonical marker-installing commands are ``add_marker`` and
-    ``add_cursor`` (parsed by ``surfer-cli`` and forwarded to the GUI
-    via WCP). Wave-1 emits one ``add_marker`` per annotation record
-    carrying the chart-state badge as the marker name. Wave-2 will
-    expand this to use Surfer's named-overlay-track API so badges live
-    in a dedicated pane.
+    Surfer's command palette (loaded via the ``--command-file`` CLI flag
+    or pasted into the F1 palette) accepts batches of scripted
+    commands. Wave-3c (2026-05-24) emits:
 
-    Unlike GTKWave (capped at 26 named markers), Surfer has no
-    practical limit on marker count, so this emitter does NOT truncate.
+      1. Per-record ``add_marker`` calls (wave-1 surface preserved as
+         the keyboard-navigable layer).
+      2. Per-chart_path ``add_overlay_track`` + ``add_overlay_event``
+         calls — one track per unique ``chart_path`` per §6 (d) chart-
+         path navigation SHOULD gate.
+      3. A dedicated ``sos:invariants`` overlay track for invariant-
+         fire records per §6 (e) invariant-fire highlighting SHOULD.
+
+    Surfer's overlay-track API is still in flux (the WCP spec evolves
+    with each Surfer release); wave-3c emits the conventional command
+    names the matching sos-surfer-plugin Rust/WASM plugin consumes
+    when running inside Surfer's plugin host. Direct Surfer-CLI users
+    may stub the unknown commands as no-ops in a ``.surfer.toml`` file
+    until the underlying Surfer release ships them.
     """
     lines: list[str] = []
     lines.append("# SOS-08-G annotation overlay — Surfer command script")
     lines.append(f"# schema={SCHEMA_NAME} version={SCHEMA_VERSION}")
     lines.append(f"# records={len(annotations)}")
-    lines.append("# Wave-1 scaffold: one add_marker per record.")
-    lines.append("# Wave-2 will switch to the named-overlay-track API.")
+    lines.append(
+        "# Wave-3c: per-record add_marker + per-chart_path overlay tracks "
+        "+ invariant-fire highlight."
+    )
     lines.append("")
 
     sorted_recs = sorted(
         annotations,
         key=lambda r: r.get("cycle", 0) if isinstance(r.get("cycle"), int) else 0,
     )
+
+    # --- Section 1: per-record markers (§6 (c)) --- #
+    lines.append("# --- per-record markers (§6 (c)) ---")
     for idx, record in enumerate(sorted_recs):
         cycle = record.get("cycle", 0)
         chart_state = _surfer_escape(record.get("chart_state", "?"))
@@ -222,15 +236,65 @@ def to_surfer_commands(annotations: Sequence[dict]) -> str:
         if invariant_id:
             label_parts.append(f"inv:{_surfer_escape(invariant_id)}")
         label = "/".join(label_parts)
-        # Surfer time units are in the dump's time scale; wave-2 will
-        # resolve the cycle→time multiplier from the test config.
         lines.append(f"# record {idx}: cycle={cycle}")
         lines.append(f'add_marker "{label}" {cycle}')
         if invariant_id is not None:
-            # Invariant-fire records get a secondary highlight per
-            # §6 (e) SHOULD; wave-1 emits the conventional name so a
-            # wave-2 color/icon hook can grep for it.
+            # Conventional name — picked up by sos-surfer-plugin's
+            # invariant-fire visual-treatment hook + grep-able by the
+            # CLI smoke tests.
             lines.append(f'mark_invariant "{label}" {cycle}')
+        lines.append("")
+
+    # --- Section 2: per-chart_path overlay tracks (§6 (d)) --- #
+    lines.append(
+        "# --- per-chart_path overlay tracks (§6 (d) chart-path navigation) ---"
+    )
+    by_path: dict[str, list[tuple[int, str]]] = {}
+    for record in sorted_recs:
+        chart_path = record.get("chart_path")
+        if isinstance(chart_path, list):
+            chart_path_str = "/" + "/".join(str(seg) for seg in chart_path)
+        elif isinstance(chart_path, str) and chart_path:
+            chart_path_str = chart_path
+        else:
+            chart_path_str = "/"
+        cycle = record.get("cycle", 0)
+        chart_state = record.get("chart_state", "?")
+        transition_id = record.get("transition_id")
+        label = chart_state
+        if transition_id:
+            label = f"{chart_state} (t:{transition_id})"
+        by_path.setdefault(chart_path_str, []).append((cycle, label))
+    for chart_path_str, entries in sorted(by_path.items()):
+        track_name = f"sos:{chart_path_str}"
+        # add_overlay_track creates the named pane; add_overlay_event
+        # populates it with (cycle, label) entries.
+        lines.append(f'add_overlay_track "{_surfer_escape(track_name)}"')
+        for cycle, label in entries:
+            lines.append(
+                f'add_overlay_event "{_surfer_escape(track_name)}" '
+                f'{cycle} "{_surfer_escape(label)}"'
+            )
+    lines.append("")
+
+    # --- Section 3: invariant-fire overlay track (§6 (e)) --- #
+    invariants = [
+        record
+        for record in sorted_recs
+        if record.get("invariant_id") is not None
+    ]
+    if invariants:
+        lines.append("# --- invariant-fire overlay track (§6 (e)) ---")
+        lines.append('add_overlay_track "sos:invariants"')
+        for record in invariants:
+            cycle = record.get("cycle", 0)
+            invariant_id = record.get("invariant_id", "?")
+            chart_state = record.get("chart_state", "?")
+            label = f"{invariant_id} @ {chart_state}"
+            lines.append(
+                f'add_overlay_event "sos:invariants" {cycle} '
+                f'"{_surfer_escape(label)}"'
+            )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

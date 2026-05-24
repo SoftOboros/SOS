@@ -1,0 +1,12 @@
+# Cargo build artifacts — never tracked.
+/target/
+
+# Local override of Cargo.lock when contributors want a fresher
+# dependency tree; the committed Cargo.lock is the canonical pin.
+*.bk
+
+# IDE noise.
+.idea/
+.vscode/
+*.swp
+*.swo

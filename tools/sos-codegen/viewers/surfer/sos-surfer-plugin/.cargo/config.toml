@@ -1,0 +1,33 @@
+# Project-local Cargo configuration.
+#
+# Evicts user-level shell RUSTFLAGS that target embedded boards
+# (`-Clink-arg=-fuse-ld=mold` etc.) from this crate's host + WASM
+# builds. The Surfer plugin is build-target-agnostic at the source
+# layer; user-level RUSTFLAGS that name a host-incompatible linker
+# break `cargo check` / `cargo test` on macOS.
+#
+# Mirrors the pattern documented in the parent SOS memory note
+# `project_daa_codec_2c_post_audio_01c` (project-local Cargo config
+# evicting user-level coverage rustflags from embedded builds).
+#
+# Per-target overrides:
+#   - host (whatever `rustc -vV` picks): empty rustflags.
+#   - wasm32-unknown-unknown: opt-level=s + LTO via [profile.release]
+#     in Cargo.toml; no extra rustflags here.
+
+[build]
+# Empty rustflags at the build level so the user's shell RUSTFLAGS
+# doesn't leak through.
+rustflags = []
+
+[target.aarch64-apple-darwin]
+rustflags = []
+
+[target.x86_64-apple-darwin]
+rustflags = []
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = []
+
+[target.wasm32-unknown-unknown]
+rustflags = []

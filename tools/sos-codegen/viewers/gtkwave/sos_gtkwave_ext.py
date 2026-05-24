@@ -300,32 +300,58 @@ def _tcl_escape(value: object) -> str:
 
 
 def to_gtkwave_tcl(annotations: Sequence[dict]) -> str:
-    """Emit a GTKWave Tcl script that installs chart-state markers.
+    """Emit a GTKWave Tcl script that installs chart-state markers +
+    comment-trace overlay tracks.
 
     GTKWave's Tcl extension API exposes ``gtkwave::addCommentTracesFromList``
-    and a numbered ``set_marker_name`` / ``set_named_marker_value``
-    family for installing named markers on the timeline. Wave-1 emits
-    ``set_marker_name`` + ``set_named_marker`` calls — one per
-    annotation record — carrying the chart-state badge as the marker
-    label. Wave-2 will expand this to a full ``addCommentTracesFromList``
-    overlay track so badges live in their own pane.
+    for inserting comment-trace rows in the waveform pane (where each
+    row holds a list of (time, label) pairs rendered as text badges on
+    the timeline) and a numbered ``set_marker_name`` /
+    ``set_named_marker_value`` family for installing up-to-26 named
+    markers (A..Z).
 
-    GTKWave accepts up to 26 named markers (A..Z); if the annotation
-    set exceeds 26 records the emitter truncates with a Tcl comment
-    explaining the limit (wave-1 limitation; wave-2 will batch markers
-    via the comment-trace track which has no count limit).
+    Wave-1 emitted only named markers; wave-3c (2026-05-24) adds the
+    comment-trace overlay tracks so the badge layer has no per-test
+    record cap and chart-path navigation per §6 (d) is rendered as a
+    dedicated track named ``sos:<chart_path>``. Invariant-fire records
+    (§6 (e)) get a separate ``sos:invariants`` track so the visual
+    treatment is distinct from ordinary chart-state transitions.
+
+    Output shape:
+
+      1. Named markers A..P (or fewer when the record count is below
+         26 — wave-1 cap preserved as the *quick-jump* layer GTKWave
+         keyboard shortcuts navigate).
+      2. ``gtkwave::addCommentTracesFromList`` calls — one per
+         unique ``chart_path`` value — installing a comment-trace
+         track in the waveform pane.
+      3. A dedicated ``sos:invariants`` comment-trace track when the
+         overlay carries any ``invariant_id``-bearing records.
+
+    The cycle column maps to the dump's time scale; the wave-3c emit
+    uses the raw cycle value as the time. Vector authors who require
+    a cycle→ns multiplier (e.g., a 10ns clock) MAY set the
+    ``SOS_GTKWAVE_TIME_SCALE`` env var consumed by ``sos_overlay.tcl``;
+    wave-3c-future will thread the multiplier through the emit step.
     """
     lines: list[str] = []
-    lines.append("# SOS-08-G annotation overlay — GTKWave Tcl markers")
+    lines.append("# SOS-08-G annotation overlay — GTKWave Tcl script")
     lines.append(f"# schema={SCHEMA_NAME} version={SCHEMA_VERSION}")
     lines.append(f"# records={len(annotations)}")
-    lines.append("# Wave-1 scaffold: markers A..Z (max 26). Wave-2 lifts the cap")
-    lines.append("# via gtkwave::addCommentTracesFromList overlay track.")
+    lines.append(
+        "# Wave-3c: named markers A..Z + comment-trace overlay tracks "
+        "(per-chart-path + invariants)."
+    )
     lines.append("")
 
     sorted_recs = sorted(
         annotations,
         key=lambda r: r.get("cycle", 0) if isinstance(r.get("cycle"), int) else 0,
+    )
+
+    # --- Section 1: named markers (§6 (c) per-record render) --- #
+    lines.append(
+        "# --- named markers (max 26 per GTKWave; keyboard-navigable A..Z) ---"
     )
     cap = min(len(sorted_recs), 26)
     for idx in range(cap):
@@ -341,27 +367,82 @@ def to_gtkwave_tcl(annotations: Sequence[dict]) -> str:
         if invariant_id:
             label_parts.append(f"inv:{_tcl_escape(invariant_id)}")
         label = "/".join(label_parts)
-        # GTKWave time units are in the dump's time scale; the cycle
-        # column maps to "cycle * clock_period" in the .fst/.vcd. The
-        # wave-2 integration resolves the multiplier from the test
-        # config; wave-1 emits the raw cycle and lets the user adjust
-        # the marker scale interactively (documented in the README).
         lines.append(f"# record {idx}: cycle={cycle}")
         lines.append(f"gtkwave::/Edit/Set_Named_Marker {marker_letter} {cycle}")
         lines.append(
             f"gtkwave::/Edit/Set_Marker_Name {marker_letter} \"{label}\""
         )
-        # Add an explicit add_marker line so test fixtures (and future
-        # wave-2 implementations that switch to a different GTKWave
-        # command surface) can grep for the conventional name.
+        # Conventional alias surface — test fixtures + downstream
+        # wave-3c-future viewer hooks grep for the unprefixed forms.
         lines.append(f"add_marker {marker_letter} {cycle} \"{label}\"")
         lines.append("")
     if len(sorted_recs) > 26:
         lines.append(
-            f"# NOTE: {len(sorted_recs) - 26} additional records suppressed "
-            "(GTKWave named-marker cap = 26). Wave-2 will use the "
-            "comment-trace overlay track which has no cap."
+            f"# NOTE: {len(sorted_recs) - 26} record(s) beyond the named-"
+            "marker cap; rendered via comment-trace tracks below."
         )
+        lines.append("")
+
+    # --- Section 2: per-chart_path comment-trace overlay tracks (§6 (d)) --- #
+    lines.append("# --- per-chart_path comment-trace overlay tracks (§6 (d)) ---")
+    by_path: dict[str, list[tuple[int, str]]] = {}
+    for record in sorted_recs:
+        chart_path = record.get("chart_path")
+        if isinstance(chart_path, list):
+            chart_path_str = "/" + "/".join(str(seg) for seg in chart_path)
+        elif isinstance(chart_path, str) and chart_path:
+            chart_path_str = chart_path
+        else:
+            chart_path_str = "/"
+        cycle = record.get("cycle", 0)
+        chart_state = record.get("chart_state", "?")
+        transition_id = record.get("transition_id")
+        label = chart_state
+        if transition_id:
+            label = f"{chart_state} (t:{transition_id})"
+        by_path.setdefault(chart_path_str, []).append((cycle, label))
+    for chart_path_str, entries in sorted(by_path.items()):
+        track_name = f"sos:{chart_path_str}"
+        # GTKWave's `addCommentTracesFromList` consumes a Tcl list of
+        # alternating time/comment elements; the wave-3c emit wraps the
+        # list in curly braces and escapes the labels.
+        pairs: list[str] = []
+        for cycle, label in entries:
+            pairs.append(f"{cycle} \"{_tcl_escape(label)}\"")
+        flat = " ".join(pairs)
+        lines.append(
+            f"gtkwave::addCommentTracesFromList \"{_tcl_escape(track_name)}\" "
+            f"{{{flat}}}"
+        )
+    lines.append("")
+
+    # --- Section 3: invariant-fire comment-trace track (§6 (e)) --- #
+    invariants = [
+        record
+        for record in sorted_recs
+        if record.get("invariant_id") is not None
+    ]
+    if invariants:
+        lines.append("# --- invariant-fire overlay track (§6 (e)) ---")
+        pairs = []
+        for record in invariants:
+            cycle = record.get("cycle", 0)
+            invariant_id = record.get("invariant_id", "?")
+            chart_state = record.get("chart_state", "?")
+            label = f"{invariant_id} @ {chart_state}"
+            pairs.append(f"{cycle} \"{_tcl_escape(label)}\"")
+            # Conventional alias — sos_overlay.tcl + downstream wave-
+            # 3c-future hooks grep this for visual-treatment overrides.
+            lines.append(
+                f"mark_invariant \"{_tcl_escape(label)}\" {cycle}"
+            )
+        flat = " ".join(pairs)
+        lines.append(
+            f"gtkwave::addCommentTracesFromList \"sos:invariants\" "
+            f"{{{flat}}}"
+        )
+        lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -385,16 +466,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--format",
-        choices=("stdout", "tcl"),
+        choices=("stdout", "tcl", "gtkwave"),
         default="stdout",
-        help="Output shape: 'stdout' human preview (default), 'tcl' GTKWave script.",
+        help="Output shape: 'stdout' human preview (default), 'tcl' or "
+        "'gtkwave' (aliases) GTKWave Tcl marker script invoked from "
+        "sos_overlay.tcl during wave-3c GUI integration.",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="When --format=tcl, write the Tcl script to this path "
-        "instead of stdout.",
+        help="When --format=tcl|gtkwave, write the Tcl script to this "
+        "path instead of stdout.",
     )
     return parser
 
@@ -409,6 +492,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     if args.format == "stdout":
         render_to_stdout(records)
         return 0
+    # `tcl` and `gtkwave` are equivalent aliases — the latter is the
+    # explicit name the wave-3c sos_overlay.tcl loader uses when
+    # shelling out from inside the GTKWave Tcl interpreter.
     tcl = to_gtkwave_tcl(records)
     if args.output is None:
         sys.stdout.write(tcl)

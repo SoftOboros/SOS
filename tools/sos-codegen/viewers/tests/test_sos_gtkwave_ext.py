@@ -170,8 +170,12 @@ def test_to_gtkwave_tcl_emits_markers() -> None:
     assert tcl.endswith("\n")
 
 
-def test_to_gtkwave_tcl_caps_at_26_records() -> None:
-    """When > 26 records, emitter truncates with a cap-note comment."""
+def test_to_gtkwave_tcl_caps_named_markers_at_26() -> None:
+    """When > 26 records, the named-marker section caps at A..Z but
+    wave-3c (2026-05-24) carries the overflow into the comment-trace
+    overlay track per SOS-08-G §6 (d). Verifies BOTH: the cap note
+    surfaces for orientation AND all records remain accessible via the
+    comment-trace track (no record loss)."""
     records = []
     for cycle in range(30):
         records.append(
@@ -185,6 +189,13 @@ def test_to_gtkwave_tcl_caps_at_26_records() -> None:
             }
         )
     tcl = to_gtkwave_tcl(records)
-    assert "GTKWave named-marker cap = 26" in tcl
-    # 4 records suppressed (30 - 26).
-    assert "4 additional records suppressed" in tcl
+    # Named-marker cap-note surfaces.
+    assert "named-marker cap" in tcl
+    # 4 record(s) overflow (30 - 26) — surfaced as wave-3c overflow
+    # message naming the count.
+    assert "4 record(s) beyond the named-marker cap" in tcl
+    # Wave-3c: all records are carried in the comment-trace overlay
+    # track even though only the first 26 get named markers.
+    assert tcl.count('"s29"') >= 1
+    assert "gtkwave::addCommentTracesFromList" in tcl
+    assert "sos:/c" in tcl

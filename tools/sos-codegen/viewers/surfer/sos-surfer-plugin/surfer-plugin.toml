@@ -1,0 +1,70 @@
+# SOS-08-G Surfer plugin manifest (wave-3c GUI integration).
+#
+# Surfer's plugin host reads this manifest at plugin discovery time
+# (typically `~/.config/surfer/plugins/<plugin-name>/surfer-plugin.toml`
+# or alongside the .wasm artifact in the same directory). The fields
+# below describe the plugin to the host so the host knows:
+#
+#   - Which schema(s) the plugin handles (so Surfer can route
+#     .annotations.jsonl files to this plugin without prompting).
+#   - Which Surfer release the plugin was built against (host refuses
+#     plugins with incompatible WCP/wit-bindgen versions).
+#   - Which entry points the plugin exposes (`render_overlay` is the
+#     SOS-08-G integration point per wave-3c).
+#
+# @spec  SOS-08-G-CONCEPTS.md §5.5 (PCDN-G-004: in-subrepo distribution).
+# @spec  SOS-08-G-CONCEPTS.md §6 (viewer integration contract).
+# @spec  SOS-08-G-CONCEPTS.md §15 wave-3c (2026-05-24).
+
+[plugin]
+name = "sos-surfer-plugin"
+version = "0.1.0"
+description = "SOS-08-G annotation-overlay plugin (wave-3c)."
+authors = ["SoftOboros <ira@softoboros.com>"]
+license = "MIT"
+homepage = "https://github.com/SoftOboros/SOS"
+
+# Surfer's plugin host loads this binary. Built via:
+#   cargo build --release --target wasm32-unknown-unknown --features wasm
+# Output lives at:
+#   target/wasm32-unknown-unknown/release/sos_surfer_plugin.wasm
+artifact = "target/wasm32-unknown-unknown/release/sos_surfer_plugin.wasm"
+
+# Surfer-host compatibility window. Bump on Surfer plugin-SDK
+# breaking-changes. Format: surfer plugin-api semver range.
+surfer-api = ">=0.3.0, <0.5.0"
+
+[schema]
+# SOS-08-G overlay schema this plugin consumes. Surfer routes
+# `.annotations.jsonl` files whose first-line `_meta.schema` matches
+# this value to this plugin.
+name = "sos-08-g/annotations"
+version = "1.0"
+chart-path-max-depth = 8
+
+[entry-points]
+# wit-bindgen entry points the plugin exposes to the host. Each name
+# matches a function in src/lib.rs (host-target via wit-bindgen
+# `#[export_name]`).
+render-overlay = "render_overlay"
+discover-waveform = "discover_waveform_paths"
+
+[discovery]
+# How Surfer locates overlay files for a loaded waveform. The plugin
+# implements SOS-08-G §6 (a) co-locate semantics (wave-3b amendment):
+#
+#   1. Read overlay's _meta.waveform_prefix.
+#   2. Match against the loaded waveform's filename stem.
+#   3. Fall back to wave-1 same-prefix-as-overlay convention.
+modes = ["meta-waveform-prefix", "same-prefix-fallback"]
+overlay-glob = "*.annotations.jsonl"
+
+[features]
+# Wave-3c implementation surface. SHOULD-gate features that depend on
+# Surfer host APIs not yet stable are documented as "wave-3c-future".
+per-record-markers = true              # §6 (c) MUST
+chart-path-overlay-tracks = true       # §6 (d) SHOULD
+invariant-fire-highlighting = true     # §6 (e) SHOULD
+vector-citation-drilldown = false      # §6 (f) SHOULD — wave-3c-future
+                                        # (requires Surfer link-back API)
+schema-version-validation = true       # §6 (b) MUST
