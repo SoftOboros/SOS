@@ -454,6 +454,149 @@ class TestCrossEmissionStateConstants:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# PCDN-SOS-08-D-wave1-cli-unified — unified `--target sos-08-d` emits BOTH
+# the cocotb testbench AND the SVA bind file in one invocation.
+# ---------------------------------------------------------------------------
+
+
+class TestUnifiedSos08DTarget:
+    """PCDN-SOS-08-D-wave1-cli-unified (resolved 2026-05-23 §15
+    walkthrough): the split ``--target cocotb`` / ``--target sva``
+    forms iterate one artifact at a time; ``--target sos-08-d`` is the
+    unified form that emits both artifact sets in one invocation.
+
+    Per the brief, the two walkers' filename keys are file-disjoint
+    under SOS-08-D §6.1 layout, so the merged dict's path set MUST
+    equal the union of the two split-target path sets, byte-identical.
+    """
+
+    def test_unified_target_emits_both_cocotb_and_sva(self, tmp_path):
+        """Drive `main.main(['--target', 'sos-08-d', ...])`; assert the
+        emit contains cocotb-owned files AND SVA-owned files."""
+        rc = _run_main("sos-08-d", tmp_path)
+        assert rc == 0, f"main.main(--target=sos-08-d) returned {rc}"
+
+        emitted = sorted(
+            p.relative_to(tmp_path).as_posix()
+            for p in tmp_path.rglob("*")
+            if p.is_file()
+        )
+        emitted_str = "\n".join(emitted)
+
+        # Cocotb-owned artifacts per §6.1 (cocotb walker owns these
+        # filenames; the unified target MUST surface every one).
+        for expected in (
+            f"test_{CHART_NAME}_fsm.py",
+            "_cocotb_helpers.py",
+            "Makefile",
+            "pytest.ini",
+            "README.md",
+        ):
+            assert any(e.endswith(expected) for e in emitted), (
+                f"PCDN-SOS-08-D-wave1-cli-unified: unified emit missing "
+                f"cocotb artifact `{expected}`; emitted:\n{emitted_str}"
+            )
+
+        # SVA-owned artifacts per §6.3 / PCDN-D-004.
+        for expected in (
+            f"{CHART_NAME}_fsm_sva.sv",
+            f"{CHART_NAME}_fsm_bind.sv",
+        ):
+            assert any(e.endswith(expected) for e in emitted), (
+                f"PCDN-SOS-08-D-wave1-cli-unified: unified emit missing "
+                f"SVA artifact `{expected}`; emitted:\n{emitted_str}"
+            )
+
+        # Vector seed (PCDN-D-003) — cocotb side contributes at least
+        # one vectors/*.json|jsonl file.
+        assert any(
+            ("vectors/" in e)
+            and (e.endswith(".json") or e.endswith(".jsonl"))
+            for e in emitted
+        ), (
+            f"PCDN-SOS-08-D-wave1-cli-unified: unified emit missing a "
+            f"vectors/*.json|jsonl seed example (PCDN-D-003); "
+            f"emitted:\n{emitted_str}"
+        )
+
+    def test_unified_target_file_count_is_union(self, tmp_path):
+        """The merged file count MUST equal cocotb count + SVA count
+        (no key collisions; PCDN-SOS-08-D-wave1-cli-unified file-
+        disjoint contract)."""
+        cocotb_out = tmp_path / "cocotb"
+        sva_out = tmp_path / "sva"
+        unified_out = tmp_path / "unified"
+
+        rc_c = _run_main("cocotb", cocotb_out)
+        rc_s = _run_main("sva", sva_out)
+        rc_u = _run_main("sos-08-d", unified_out)
+        assert rc_c == 0 and rc_s == 0 and rc_u == 0, (
+            f"split + unified returns: cocotb={rc_c}, sva={rc_s}, "
+            f"sos-08-d={rc_u}"
+        )
+
+        def _count(root: Path) -> int:
+            return sum(1 for p in root.rglob("*") if p.is_file())
+
+        n_cocotb = _count(cocotb_out)
+        n_sva = _count(sva_out)
+        n_unified = _count(unified_out)
+        assert n_unified == n_cocotb + n_sva, (
+            f"PCDN-SOS-08-D-wave1-cli-unified file-disjoint contract: "
+            f"unified count ({n_unified}) != cocotb ({n_cocotb}) + sva "
+            f"({n_sva}). Sibling walker key-collision drift detected."
+        )
+
+    def test_unified_target_file_paths_match_split_targets(self, tmp_path):
+        """The set of relative paths emitted by ``--target sos-08-d``
+        MUST equal the union of the paths emitted by ``--target
+        cocotb`` and ``--target sva`` (byte-identical paths). This
+        pins the file-layout contract so that downstream simulator-
+        invocation conventions (§6.4 Makefile + pytest.ini) keep
+        working unchanged whether the operator iterated split-target
+        or unified-target during emit."""
+        cocotb_out = tmp_path / "cocotb"
+        sva_out = tmp_path / "sva"
+        unified_out = tmp_path / "unified"
+
+        rc_c = _run_main("cocotb", cocotb_out)
+        rc_s = _run_main("sva", sva_out)
+        rc_u = _run_main("sos-08-d", unified_out)
+        assert rc_c == 0 and rc_s == 0 and rc_u == 0
+
+        def _paths(root: Path) -> set[str]:
+            return {
+                p.relative_to(root).as_posix()
+                for p in root.rglob("*")
+                if p.is_file()
+            }
+
+        cocotb_paths = _paths(cocotb_out)
+        sva_paths = _paths(sva_out)
+        unified_paths = _paths(unified_out)
+        expected_union = cocotb_paths | sva_paths
+
+        assert unified_paths == expected_union, (
+            f"PCDN-SOS-08-D-wave1-cli-unified: unified path set diverges "
+            f"from union of split targets.\n"
+            f"  cocotb paths: {sorted(cocotb_paths)!r}\n"
+            f"  sva paths:    {sorted(sva_paths)!r}\n"
+            f"  union:        {sorted(expected_union)!r}\n"
+            f"  unified:      {sorted(unified_paths)!r}\n"
+            f"  missing from unified: "
+            f"{sorted(expected_union - unified_paths)!r}\n"
+            f"  extra in unified:    "
+            f"{sorted(unified_paths - expected_union)!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Smoke test for the fixture vector JSON itself — guards against
+# accidental damage to the seed vector.
+# ---------------------------------------------------------------------------
+
+
 def test_fixture_vector_json_is_well_formed():
     """The companion vector fixture parses as JSON and carries the
     SOS-03 §7.1 / SOS-08-D §6.2 fields the cocotb test will assert

@@ -838,3 +838,26 @@ Cross-phase invariants INV-SOS-A through H + the AuthorityRelationship matrix pr
 Bootstrap-vs-general framing (SOS-07 §8): the kernel chart `rtos_kernel.scxml` is reframed as the v1 demonstration the methodology generalises from, not "the chart". The bench-validated state recorded across SOS-03's prior amendments carries forward unchanged.
 
 No frozen-enum value modified. No PCDN re-ratified. No port-spec impact.
+
+### 2026-05-23 — Vector `steps[]` schema extension (co-landing with SOS-08-D)
+
+SOS-08-D's wave-1 cocotb + SVA walkers consume a per-step record that the SOS-03 §7 / §6.2 vector schema does not currently name. This amendment extends the vector file format with an **optional** `steps[]` array recording per-step DUT-driven inputs, expected chart states, and the firing transition id. The extension is additive — vectors without `steps` continue to validate, and the SOS-03 §6.2 kernel-state-snapshot form (`expected_trace` + `input` + `config`) remains the canonical shape for software-target conformance tests.
+
+**Schema extension (additive to §6.2 / §7)**:
+
+- `vector["steps"]: list[dict]` (optional) — sequence of per-step records describing how a DUT under SOS-08-D-style RTL conformance is driven, what state it is expected to settle into after each step, and which chart transition fires on the step.
+- Per-step record shape: `{index: int, inputs: {<port_name>: <value>}, expected_state: <state_id>, transition_id: <transition_id>}`.
+  - `index` — 0-based sequential position of the step within the vector.
+  - `inputs` — `{port_name: value}` dict naming the DUT input ports driven on this step and the value driven on each.
+  - `expected_state` — the chart-state ID the DUT is expected to settle into after this step.
+  - `transition_id` — references the chart's transition list (the SCXML `<transition>` element that fires on this step).
+
+**Compatibility**:
+
+- Vectors without `steps` are valid; the SOS-03 §6.2 kernel-state-snapshot form remains canonical for software-target conformance (SOS-04 / SOS-05 / SOS-06 ports). `steps` is the RTL-target extension consumed by SOS-08-D (and forward consumers SOS-08-E / -F / -G that share the same vector-IR boundary).
+- Future RTL-target fields (`cycle`, `dut_port`, `signal_width`, `chart_region`) layer on top of the `{index, inputs, expected_state, transition_id}` record non-breakingly. Additions ratify via further §15 amendments naming the additional fields.
+- The SOS-03 §6.5 structural-diff policy applies per-step when `steps` is present — each step record diffs structurally against the as-executed step trace at the field level (same `field_path` reporting shape as `expected_trace` records).
+
+**Consuming use case**: [SOS-08-D §15 — Impl wave-1 PCDN amendments (Ira)](./SOS-08-D-CONCEPTS.md#15-change-log) ratifies PCDN-SOS-08-D-wave1-step-schema as the consumer of this extension. The wave-1 cocotb walker tolerates this shape directly; the SVA walker references `transition_id` for per-transition `INV-D-N` assertion mapping.
+
+Status: 🟢 ratified (continuing) — SOS-03 extension is additive. No frozen-enum value modified. No prior PCDN re-ratified. Existing fixtures (`conformance/vectors/smoke/0001-...0006-...`) remain valid; they predate and do not carry `steps`.

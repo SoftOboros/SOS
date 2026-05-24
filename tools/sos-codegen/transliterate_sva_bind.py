@@ -24,17 +24,21 @@ region chart, both landing in ``tests/<chart_name>/`` per PCDN-D-004.
 * Single-region chart → two files:
   - ``tests/<chart>/<chart>_fsm_sva.sv`` — assertion module containing
     chart-derived invariants:
-      - INV-D-1: one-hot invariant on ``state_q``.
+      - INV-D-1: one-hot invariant on ``current_state``.
       - INV-D-2: reset → initial state.
       - INV-D-3..: per-transition correctness (source && guard |=> target).
   - ``tests/<chart>/<chart>_fsm_bind.sv`` — module-type bind directive
     attaching the assertion module to every elaborated DUT instance.
 
 * The assertion module's input port set mirrors the chart-FSM module's
-  observable surface:
+  observable surface. Per PCDN-SOS-08-D-wave1-sva-port-name (resolved
+  2026-05-23), the state-vector input port is named ``current_state``
+  verbatim — matching the DUT's output port — because module-type bind
+  connects external ports to external ports, not to the DUT's internal
+  ``state_q`` register:
       input wire                 clk
       input wire                 rst
-      input wire [N_STATES-1:0]  state_q  (driven from DUT's current_state)
+      input wire [N_STATES-1:0]  current_state  (driven from DUT's current_state)
   plus one ``input wire [W-1:0] data_<name>_q`` per datamodel signal
   referenced by any transition guard, so the chart's ``cond`` expressions
   compile against in-scope register signals.
@@ -509,11 +513,17 @@ def _emit_sva_module(chart: _SvaChart, depth_budget: int) -> str:
     """Emit the assertion module file body.
 
     Properties:
-      * INV-D-1: ``$countones(state_q) <= 1`` — one-hot invariant
+      * INV-D-1: ``$countones(current_state) <= 1`` — one-hot invariant
         mirroring the SOS-08-C §5.1 default encoding.
-      * INV-D-2: ``rst |=> state_q == ST_<initial>`` — reset clears
+      * INV-D-2: ``rst |=> current_state == ST_<initial>`` — reset clears
         state to the chart ``initial`` per SOS-08-C §5.6 / PCDN-C-003.
-      * INV-D-3..: per-transition ``state == src && guard |=> state == tgt``.
+      * INV-D-3..: per-transition
+        ``current_state == src && guard |=> current_state == tgt``.
+
+    Port-name note (PCDN-SOS-08-D-wave1-sva-port-name, 2026-05-23):
+    the state-vector input port is ``current_state`` — matching the
+    DUT's external output port — not ``state_q`` (the DUT-internal
+    register name). Module-type bind wires external→external.
     """
     n_states = len(chart.states)
     sva_module = _sva_module_name(chart.chart_name)
@@ -537,7 +547,11 @@ def _emit_sva_module(chart: _SvaChart, depth_budget: int) -> str:
     port_lines: list[str] = []
     port_lines.append("input wire clk")
     port_lines.append("input wire rst")
-    port_lines.append(f"input wire [{n_states - 1}:0] state_q")
+    # PCDN-SOS-08-D-wave1-sva-port-name (2026-05-23): the SVA module's
+    # state-vector input port name MUST match the DUT's external output
+    # port name (`current_state`), not the DUT-internal register name
+    # (`state_q`). Module-type bind connects external→external.
+    port_lines.append(f"input wire [{n_states - 1}:0] current_state")
     for sig in guard_signals:
         if sig.width == 1:
             port_lines.append(f"input wire {sig.sv_name}")
@@ -575,7 +589,7 @@ def _emit_sva_module(chart: _SvaChart, depth_budget: int) -> str:
         "",
         "    // ----- INV-D-1: one-hot state vector (SOS-08-C §5.1 encoding) -----",
         "    a_one_hot: assert property (",
-        "            @(posedge clk) disable iff (rst) ($countones(state_q) <= 1)",
+        "            @(posedge clk) disable iff (rst) ($countones(current_state) <= 1)",
         "        )",
         "        else $fatal(1,",
         f'            "SOS-08-D INV-D-1: chart {chart.chart_name} state vector '
@@ -587,7 +601,7 @@ def _emit_sva_module(chart: _SvaChart, depth_budget: int) -> str:
         "",
         "    // ----- INV-D-2: reset clears state to chart <initial> (SOS-08-C §5.6) -----",
         "    a_reset_initial: assert property (",
-        f"            @(posedge clk) rst |=> (state_q == {initial_const})",
+        f"            @(posedge clk) rst |=> (current_state == {initial_const})",
         "        )",
         "        else $fatal(1,",
         f'            "SOS-08-D INV-D-2: chart {chart.chart_name} reset did not '
@@ -612,16 +626,16 @@ def _emit_sva_module(chart: _SvaChart, depth_budget: int) -> str:
         # Compose antecedent: state match && guard (omit `&& 1'b1` for
         # unguarded transitions to keep the emit minimal).
         if tr.cond:
-            antecedent = f"(state_q == {src_const}) && ({guard_sv})"
+            antecedent = f"(current_state == {src_const}) && ({guard_sv})"
         else:
-            antecedent = f"(state_q == {src_const})"
+            antecedent = f"(current_state == {src_const})"
         trans_blocks.extend(
             [
                 "",
                 f"    // {inv_id}: {tr.source} --[cond={tr.cond or '-'}/event={tr.event or '-'}]--> {tr.target}",
                 f"    {ident}: assert property (",
                 "            @(posedge clk) disable iff (rst)",
-                f"            {antecedent} |=> (state_q == {tgt_const})",
+                f"            {antecedent} |=> (current_state == {tgt_const})",
                 "        )",
                 "        else $fatal(1,",
                 f'            "SOS-08-D {inv_id}: chart {chart.chart_name} '
@@ -651,10 +665,14 @@ def _emit_bind_directive(chart: _SvaChart) -> str:
     chart-FSM module's observable ports through to it.
 
     The chart-FSM module's outputs include ``clk``, ``rst``, and
-    ``current_state`` (per SOS-08-C §6.2 / INV-S-HDL-C-2). The assertion
-    module consumes ``current_state`` as its ``state_q`` input. Guard-
-    referenced datamodel signals are connected by name (``data_<id>``
-    on the DUT → ``data_<id>_q`` on the SVA module).
+    ``current_state`` (per SOS-08-C §6.2 / INV-S-HDL-C-2). Per
+    PCDN-SOS-08-D-wave1-sva-port-name (2026-05-23), the SVA module's
+    matching input port is also named ``current_state`` — module-type
+    bind connects external→external, so the port name on the SVA side
+    matches the DUT's output port name verbatim (not the DUT's
+    internal ``state_q`` register). Guard-referenced datamodel signals
+    are connected by name (``data_<id>`` on the DUT → ``data_<id>_q``
+    on the SVA module).
     """
     dut_module = _module_name(chart.chart_name)
     sva_module = _sva_module_name(chart.chart_name)
@@ -662,14 +680,14 @@ def _emit_bind_directive(chart: _SvaChart) -> str:
     guard_signals = _datamodel_signals_referenced_in_guards(chart)
 
     conn_lines: list[str] = [
-        "    .clk      (clk),",
-        "    .rst      (rst),",
-        "    .state_q  (current_state)",
+        "    .clk           (clk),",
+        "    .rst           (rst),",
+        "    .current_state (current_state)",
     ]
     if guard_signals:
         # Append a comma to the previous final connection and add the
         # datamodel signal hookups.
-        conn_lines[-1] = "    .state_q  (current_state),"
+        conn_lines[-1] = "    .current_state (current_state),"
         for i, sig in enumerate(guard_signals):
             dut_signal = f"data_{_sanitize_sv_identifier(sig.chart_id)}"
             suffix = "," if i < len(guard_signals) - 1 else ""

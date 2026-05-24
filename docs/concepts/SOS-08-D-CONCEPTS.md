@@ -450,3 +450,34 @@ All seven PCDNs from §14 resolved with recommendations accepted.
 **Coordinated co-landing**: SOS-03 §15 amendment extending the vector-IR schema to HDL targets lands alongside SOS-08-D implementation (per §10 reconciliation).
 
 **Status**: 🟢 **ratified**. Implementation of the cocotb + SVA bind emission path in `tools/sos-codegen/` is now unblocked. SOS-08-E / SOS-08-F / SOS-08-G that share the vector-IR boundary with SOS-08-D have a frozen co-emission shape to reference.
+
+### 2026-05-23 — Impl wave-1 PCDN amendments (Ira)
+
+Wave-1 implementation of the cocotb + SVA walkers in `tools/sos-codegen/` surfaced eight sub-PCDN decision points whose shape was under-specified by the prior ratification entry. The wave-1 walker code makes one defensible call per point; this amendment ratifies those calls into the SOS-08-D normative surface so subsequent waves (and SOS-08-E / -F / -G consumers of the same emit-layout) reference a frozen contract.
+
+**Sub-PCDN resolutions**:
+
+- **PCDN-SOS-08-D-wave1-step-schema → RESOLVED**: vector `steps[]` schema is `{index, inputs, expected_state, transition_id}` per step — the wave-1 cocotb walker-tolerated shape. `index` is the step's sequential position (0-based). `inputs` is a `{port_name: value}` dict naming the DUT input ports driven on this step. `expected_state` is the chart-state ID the DUT is expected to settle into after this step. `transition_id` references the chart's transition list (the SCXML `<transition>` element that fires on this step). Co-landing SOS-03 §15 amendment ratifies this as a SOS-03 extension on the vector schema. Future RTL-target extensions (cycle, dut_port, signal_width, chart_region) layer on top non-breakingly.
+
+- **PCDN-SOS-08-D-wave1-cli-unified → RESOLVED**: CLI offers BOTH the split `--target cocotb` / `--target sva` forms AND a unified `--target sos-08-d` that emits both artifacts in one invocation. The unified target dispatches through both walkers and merges the result dicts (which now share the `tests/<chart>/` prefix per PCDN-SOS-08-D-wave1-file-layout, so no key collision). Users pick split for iterative emit of one artifact (e.g. re-running just the cocotb half while iterating on the test driver); unified for fresh end-to-end emission.
+
+- **PCDN-SOS-08-D-wave1-sva-port-name → RESOLVED**: the SVA assertion module's input port is named `current_state` (matching the DUT's output port name). The wave-1 walker initially used `state_q` (the DUT's internal register name); module-type bind connects external port to external port, so the SVA input MUST match the DUT output name verbatim. The bind directive emits as `.current_state(current_state)`.
+
+- **PCDN-SOS-08-D-wave1-file-layout → RESOLVED**: BOTH cocotb and SVA walkers emit ALL filenames under the `tests/<chart>/` prefix. This unifies the wave-1 asymmetry (cocotb walker initially emitted flat into `tests/`, SVA walker prefixed into `tests/<chart>/`). `<chart>` is the lowercased + filesystem-sanitised chart name. main.py's intermediate-dir-creation logic is now uniform — handled by the prefix in both walkers' emit step, no per-walker branch.
+
+**Agent-default ratifications** (decisions the wave-1 walkers made by default; promoting to normative):
+
+- **INV-D numbering scheme**: per-transition assertions get monotonic IDs `INV-D-3`, `INV-D-4`, ..., `INV-D-N` in document order. INV-D-1 is the one-hot state-encoding assertion; INV-D-2 is the reset→initial-state assertion; INV-D-3 onwards are per-transition assertions. Each `assert property` has a unique `else $fatal(1, "SOS-08-D INV-D-N: ...")` clause so individual assertion failures are bisectable per INV-S-HDL-D-5.
+- **Per-DUT directory case**: the chart name is lowercased + filesystem-sanitised for the directory name (`MyChart` → `tests/mychart/`). This matches both walkers' wave-1 implementation. Case-preserving directory names are NOT ratified; lowercased is canonical.
+- **Scaffold vector naming convention**: `000-reset` is the canonical wave-1 scaffold vector ID (filename `vectors/000-reset.json`). Follows the SOS-03 §6.3 `<NNNN>-<slug>.json` shape with `0001` reserved as the first author-assigned id. The scaffold occupies the `000` 3-digit form for filesystem brevity (the leading-zero count is dropped from 4 to 3 for the scaffold-only slot).
+- **post_results.py JUnit XML post-processor**: §6.7 names this artifact but it is DEFERRED to wave-2. Wave-1 emits cocotb-native `results.xml` (which most CI systems parse correctly); the post-processor refines that to pure JUnit XML at `build/junit.xml` (per PCDN-D-002). Deferred to wave-2 to keep wave-1 scaffold scope narrow.
+
+**§-amendments by reference**:
+
+- §6.1 (emit directory layout): unified `tests/<chart>/` prefix across both walkers per PCDN-SOS-08-D-wave1-file-layout.
+- §6.2 (cocotb test shape): step schema pinned per PCDN-SOS-08-D-wave1-step-schema.
+- §6.3 (SVA bind file shape): SVA module input port named `current_state` per PCDN-SOS-08-D-wave1-sva-port-name; INV-D numbering monotonic per the agent-default ratification above.
+- §6.7 (JUnit XML emission): post_results.py deferred to wave-2; wave-1 emits cocotb-native `results.xml` only.
+- CLI surface (informative): adds `--target sos-08-d` unified alongside the split `--target cocotb` / `--target sva` forms.
+
+Status: 🟢 ratified (continuing) — impl wave-1 PCDN amendments fold the emit-layout + CLI surface + SVA port naming + vector step schema decisions into the SOS-08-D normative surface. Wave-2 candidates: parallel chart support, post_results.py emission, SVA bind file co-emission with the cocotb half (currently unified via --target sos-08-d), vector schema extension for full SOS-03 trace fidelity.

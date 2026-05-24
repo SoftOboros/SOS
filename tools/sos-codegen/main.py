@@ -90,7 +90,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--target",
-        choices=("rust", "c", "both", "hdl-vhdl", "hdl-sv", "cocotb", "sva"),
+        choices=(
+            "rust", "c", "both", "hdl-vhdl", "hdl-sv",
+            "cocotb", "sva", "sos-08-d",
+        ),
         required=True,
         help=(
             "Emission target. ``rust`` / ``c`` / ``both`` emit the SOS-04 / "
@@ -98,9 +101,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "SOS-08-C Layer-2 region FSMs against the SOS-08-A / SOS-08-B "
             "L0/L1 substrate (ratified 2026-05-23, SOS-08-C §15). "
             "``cocotb`` / ``sva`` emit the SOS-08-D primary vector path "
-            "(cocotb testbench + SVA bind file) — ratified 2026-05-23, "
-            "SOS-08-D §15. See SOS-08-D §6.1 for the emitted directory "
-            "layout."
+            "split artifacts (cocotb testbench OR SVA bind file). "
+            "``sos-08-d`` is the SOS-08-D unified target — emits BOTH "
+            "the cocotb testbench AND the SVA bind file in one "
+            "invocation under the same ``--out`` directory "
+            "(PCDN-SOS-08-D-wave1-cli-unified, resolved 2026-05-23). "
+            "Ratified 2026-05-23, SOS-08-D §15. See SOS-08-D §6.1 for "
+            "the emitted directory layout."
         ),
     )
     p.add_argument(
@@ -212,7 +219,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def validate_args(args: argparse.Namespace) -> None:
     """Validate --out vs --target consistency. Exits with code 3 on mismatch."""
-    if args.target in ("rust", "c", "hdl-vhdl", "hdl-sv", "cocotb", "sva"):
+    if args.target in (
+        "rust", "c", "hdl-vhdl", "hdl-sv", "cocotb", "sva", "sos-08-d",
+    ):
         if args.out is None and not args.dry_run:
             sys.stderr.write(
                 f"sos-codegen: --target={args.target} requires --out=PATH "
@@ -456,6 +465,51 @@ def _render_sva_target(
     return render_sva(ast.raw_scjson, config)
 
 
+def _render_sos_08_d_target(
+    ast: ChartAst,
+    config: dict,
+) -> dict[str, str]:
+    """Unified SOS-08-D dispatch — emit BOTH cocotb + SVA artifacts.
+
+    Per PCDN-SOS-08-D-wave1-cli-unified (resolved 2026-05-23 §15
+    walkthrough): the split ``--target cocotb`` and ``--target sva``
+    forms iterate one artifact at a time; this unified ``--target
+    sos-08-d`` form emits both in a single invocation by chaining the
+    sibling walkers and merging the returned ``{filename: source}``
+    dicts under the shared ``tests/<chart_name>/`` prefix.
+
+    Both walkers' filename keys are file-disjoint under §6.1 layout —
+    cocotb owns ``test_<chart>_fsm.py``, ``_cocotb_helpers.py``,
+    ``Makefile``, ``pytest.ini``, ``README.md``, ``vectors/...``; SVA
+    owns ``<chart>_fsm_sva.sv`` and ``<chart>_fsm_bind.sv``. If a
+    sibling walker drift introduces a key collision the merge raises
+    ``RuntimeError`` rather than silently dropping content (defense
+    against the orchestrator's stealth-revert failure mode).
+
+    Cites: SOS-08-D §15 ratification (2026-05-23); SOS-08-D §6.1
+    (emit directory layout); PCDN-SOS-08-D-wave1-cli-unified.
+    """
+    cocotb_files = _render_cocotb_target(ast, config)
+    sva_files = _render_sva_target(ast, config)
+    merged: dict[str, str] = dict(cocotb_files)
+    collisions: list[str] = []
+    for fname, body in sva_files.items():
+        if fname in merged:
+            collisions.append(fname)
+        else:
+            merged[fname] = body
+    if collisions:
+        raise RuntimeError(
+            "sos-codegen: --target=sos-08-d encountered file-key "
+            "collision between the cocotb and SVA walkers — per "
+            "SOS-08-D §6.1 the two emit sets are file-disjoint; "
+            f"colliding paths: {sorted(collisions)!r}. This is a "
+            "sibling-walker contract drift (PCDN-SOS-08-D-wave1-cli-"
+            "unified)."
+        )
+    return merged
+
+
 def render_target(
     target: str,
     ast: ChartAst,
@@ -481,6 +535,12 @@ def render_target(
     :func:`_render_cocotb_target` / :func:`_render_sva_target` and
     `cocotb_sva_config` is forwarded as the walker's ``config`` arg;
     the Jinja2 path below is bypassed. See SOS-08-D §6.1 / §6.3.
+
+    For `target == "sos-08-d"` (SOS-08-D unified emit per
+    PCDN-SOS-08-D-wave1-cli-unified, resolved 2026-05-23), both
+    walkers are invoked in one pass via
+    :func:`_render_sos_08_d_target` and their results merged into a
+    single ``{filename: source}`` dict.
     """
     if target in ("hdl-vhdl", "hdl-sv"):
         if hdl_config is None:
@@ -490,6 +550,8 @@ def render_target(
         return _render_cocotb_target(ast, cocotb_sva_config or {})
     if target == "sva":
         return _render_sva_target(ast, cocotb_sva_config or {})
+    if target == "sos-08-d":
+        return _render_sos_08_d_target(ast, cocotb_sva_config or {})
     env = _env()
     template_name = {"rust": "scripts.rs.j2", "c": "scripts.c.j2"}[target]
     tpl = env.get_template(template_name)
@@ -660,12 +722,17 @@ def main(argv: list[str]) -> int:
     if args.target == "both":
         args.out_rust.write_text(rendered["rust"], encoding="utf-8")
         args.out_c.write_text(rendered["c"], encoding="utf-8")
-    elif args.target in ("hdl-vhdl", "hdl-sv", "cocotb", "sva"):
+    elif args.target in (
+        "hdl-vhdl", "hdl-sv", "cocotb", "sva", "sos-08-d",
+    ):
         # HDL + SOS-08-D walkers return {filename: source}; write each
-        # into args.out (treated as a directory). For cocotb / sva the
-        # emitted filenames are relative paths (e.g.
+        # into args.out (treated as a directory). For cocotb / sva /
+        # sos-08-d the emitted filenames are relative paths (e.g.
         # `tests/<chart_name>/test_<chart_name>_fsm.py`) per SOS-08-D
-        # §6.1 — create intermediate parent dirs as needed.
+        # §6.1 — create intermediate parent dirs as needed. The
+        # ``sos-08-d`` unified target's dict is the union of the
+        # cocotb + SVA walker outputs (PCDN-SOS-08-D-wave1-cli-unified,
+        # resolved 2026-05-23).
         payload = rendered[args.target]
         if not isinstance(payload, dict):
             raise RuntimeError(

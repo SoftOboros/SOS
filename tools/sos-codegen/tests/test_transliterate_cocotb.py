@@ -119,28 +119,30 @@ def test_render_emits_expected_files():
 
     Per SOS-08-D §6.1 emit directory layout + PCDN-D-006 / §5.6
     (one test_<dut>.py + shared helpers) + PCDN-D-007 (Makefile +
-    pytest.ini both emitted):
+    pytest.ini both emitted) + PCDN-SOS-08-D-wave1-file-layout
+    (2026-05-23 ratification — every key prefixed with
+    ``tests/<chart>/``):
 
-      tests/<chart>/
-        test_<chart>_fsm.py
-        _cocotb_helpers.py
-        Makefile
-        pytest.ini
-        README.md
-        vectors/<vector_id>.json   # scaffold so wave-1 dir is runnable
+      tests/<chart>/test_<chart>_fsm.py
+      tests/<chart>/_cocotb_helpers.py
+      tests/<chart>/Makefile
+      tests/<chart>/pytest.ini
+      tests/<chart>/README.md
+      tests/<chart>/vectors/<vector_id>.json   # scaffold so wave-1 dir runnable
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
 
-    # The five normative emitter artifacts.
-    assert "test_demo_fsm.py" in files
-    assert "_cocotb_helpers.py" in files
-    assert "Makefile" in files
-    assert "pytest.ini" in files
-    assert "README.md" in files
+    # The five normative emitter artifacts under tests/<chart>/.
+    assert "tests/demo/test_demo_fsm.py" in files
+    assert "tests/demo/_cocotb_helpers.py" in files
+    assert "tests/demo/Makefile" in files
+    assert "tests/demo/pytest.ini" in files
+    assert "tests/demo/README.md" in files
 
-    # Plus one scaffold vector under vectors/ — the wave-1 default is
-    # `000-reset` per the emitter's `_DEFAULT_SCAFFOLD_VECTOR` constant.
-    assert "vectors/000-reset.json" in files
+    # Plus one scaffold vector under tests/<chart>/vectors/ — the
+    # wave-1 default is `000-reset` per the emitter's
+    # `_DEFAULT_SCAFFOLD_VECTOR` constant.
+    assert "tests/demo/vectors/000-reset.json" in files
     assert len(files) == 6
 
 
@@ -152,15 +154,15 @@ def test_makefile_and_pytest_ini_both_emitted():
     negligible vs. user-base fragmentation if only one path ships.
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
-    assert "Makefile" in files
-    assert "pytest.ini" in files
+    assert "tests/demo/Makefile" in files
+    assert "tests/demo/pytest.ini" in files
 
     # Verilator default per PCDN-D-001 / §5.1 — `SIM ?= verilator` in
     # the Makefile.
-    assert "SIM ?= verilator" in files["Makefile"]
+    assert "SIM ?= verilator" in files["tests/demo/Makefile"]
 
     # Pytest.ini wires to the same test module.
-    assert "test_demo_fsm.py" in files["pytest.ini"]
+    assert "test_demo_fsm.py" in files["tests/demo/pytest.ini"]
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +182,7 @@ def test_cocotb_test_has_one_test_per_vector():
         _simple_chart(),
         {"chart_name": "demo", "vector_ids": vector_ids},
     )
-    test_module = files["test_demo_fsm.py"]
+    test_module = files["tests/demo/test_demo_fsm.py"]
 
     # One @cocotb.test() decorator per vector. We count via AST so the
     # docstring's textual mention of `@cocotb.test()` doesn't inflate
@@ -207,9 +209,10 @@ def test_cocotb_test_has_one_test_per_vector():
     for vid in vector_ids:
         assert f'load_vector(_VECTORS_DIR / "{vid}.json")' in test_module
 
-    # And the emitter writes one scaffold vector per bound id.
+    # And the emitter writes one scaffold vector per bound id under
+    # tests/<chart>/vectors/ per PCDN-SOS-08-D-wave1-file-layout.
     for vid in vector_ids:
-        assert f"vectors/{vid}.json" in files
+        assert f"tests/demo/vectors/{vid}.json" in files
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +230,7 @@ def test_state_encoding_matches_one_hot():
     `dut.current_state.value` equality holds without re-decoding.
     """
     files = render_target(_four_state_chart(), {"chart_name": "fourstates"})
-    helpers = files["_cocotb_helpers.py"]
+    helpers = files["tests/fourstates/_cocotb_helpers.py"]
 
     # The embedded encoding map declares each state with its one-hot
     # binary literal. State 0 → 0b0001, state 1 → 0b0010, etc.
@@ -273,7 +276,7 @@ def test_chart_vocabulary_failure_message():
     signal traces is a verification-emission bug, not a passing test.
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
-    helpers = files["_cocotb_helpers.py"]
+    helpers = files["tests/demo/_cocotb_helpers.py"]
 
     # AST-parse the helper module + extract the format_failure body
     # (the helper is dependency-free against cocotb so we can exec it).
@@ -334,7 +337,7 @@ def test_assert_state_passes_on_match():
     encoding matches the observed one-hot value."""
     files = render_target(_simple_chart(), {"chart_name": "demo"})
     namespace: dict = {}
-    exec(compile(files["_cocotb_helpers.py"], "_cocotb_helpers.py", "exec"), namespace)
+    exec(compile(files["tests/demo/_cocotb_helpers.py"], "_cocotb_helpers.py", "exec"), namespace)
     assert_state = namespace["assert_state"]
 
     class _FakeSignal:
@@ -395,7 +398,7 @@ def test_python_3_10_pinned_in_readme():
     proofs against cocotb 2.x adoption.
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
-    readme = files["README.md"]
+    readme = files["tests/demo/README.md"]
     assert "Python 3.10" in readme
     # PCDN citation present so the version policy is traceable to a
     # ratified decision.
@@ -410,7 +413,7 @@ def test_readme_documents_simulator_selection():
     coverage at v1.
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
-    readme = files["README.md"]
+    readme = files["tests/demo/README.md"]
     assert "Verilator" in readme
     assert "Icarus" in readme
     assert "GHDL" in readme
@@ -432,8 +435,8 @@ def test_emitted_test_module_parses():
     consider executing the test.
     """
     files = render_target(_four_state_chart(), {"chart_name": "fourstates"})
-    ast.parse(files["test_fourstates_fsm.py"])
-    ast.parse(files["_cocotb_helpers.py"])
+    ast.parse(files["tests/fourstates/test_fourstates_fsm.py"])
+    ast.parse(files["tests/fourstates/_cocotb_helpers.py"])
 
 
 def test_emitted_scaffold_vector_is_valid_json():
@@ -442,7 +445,7 @@ def test_emitted_scaffold_vector_is_valid_json():
     emitted directory.
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
-    payload = json.loads(files["vectors/000-reset.json"])
+    payload = json.loads(files["tests/demo/vectors/000-reset.json"])
     # Scaffold carries minimal SOS-03 fields.
     assert payload["id"] == "000-reset"
     assert payload["expected_terminal_state"] == "initial" or \
@@ -494,7 +497,7 @@ def test_reset_and_clock_match_spec_defaults():
     bench operator can grep + adjust without re-running the codegen.
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
-    test_module = files["test_demo_fsm.py"]
+    test_module = files["tests/demo/test_demo_fsm.py"]
     assert "_CLOCK_PERIOD_NS = 10" in test_module
     assert "_RESET_CYCLES = 5" in test_module
     # Clock is started via cocotb.start_soon(Clock(...)).
@@ -512,7 +515,7 @@ def test_clock_period_and_reset_cycles_overridable():
         _simple_chart(),
         {"chart_name": "demo", "clock_period_ns": 20, "reset_cycles": 10},
     )
-    test_module = files["test_demo_fsm.py"]
+    test_module = files["tests/demo/test_demo_fsm.py"]
     assert "_CLOCK_PERIOD_NS = 20" in test_module
     assert "_RESET_CYCLES = 10" in test_module
 
@@ -529,7 +532,7 @@ def test_emitted_artifacts_cite_sos_08_d():
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
     for fname, body in files.items():
-        if fname.startswith("vectors/"):
+        if "/vectors/" in fname or fname.startswith("vectors/"):
             # Vector files are author-replaceable; they don't need
             # spec citations.
             continue

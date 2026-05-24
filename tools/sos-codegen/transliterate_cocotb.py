@@ -73,12 +73,16 @@ Wave-1 scope (intentionally narrow — PCDN-D-003 / §5.5):
 # Integration contract
 
 The codegen tool's CLI dispatcher (`main.py`) is intended to extend
-with `--target cocotb` (sibling-agent's work):
+with `--target cocotb` (sibling-agent's work). Per PCDN-SOS-08-D-
+wave1-file-layout (ratified 2026-05-23) every returned key is
+already prefixed with ``tests/<chart>/``, so the dispatcher writes
+each file at ``out_dir / fname`` without re-prefixing:
 
     from transliterate_cocotb import render_target
     files = render_target(chart_ir, config)
     for fname, body in files.items():
-        (out_dir / "tests" / chart_name / fname).write_text(body)
+        (out_dir / fname).parent.mkdir(parents=True, exist_ok=True)
+        (out_dir / fname).write_text(body)
 
 `chart_ir` is the raw scjson dict — the shape `loader.load_chart` reads
 from disk before normalising into `ChartAst`, identical to the input
@@ -864,21 +868,32 @@ _DEFAULT_SCAFFOLD_VECTOR = "000-reset"
 def render_target(chart_ir: dict, config: Any = None) -> dict[str, str]:
     """Emit cocotb test files for the chart.
 
-    Returns a ``{filename: source}`` dict containing:
-      - ``test_<chart_name>_fsm.py``  the cocotb driver (one
-        @cocotb.test per vector per PCDN-D-003 / §5.5).
-      - ``_cocotb_helpers.py``        shared helpers (load_vector,
-        assert_state, format_failure) per PCDN-D-006 / §5.6.
-      - ``Makefile``                  cocotb-classic invocation
+    Returns a ``{filename: source}`` dict whose keys are all prefixed
+    with ``tests/<chart>/`` (mirroring the SVA walker's convention per
+    PCDN-SOS-08-D-wave1-file-layout, ratified 2026-05-23):
+
+      - ``tests/<chart>/test_<chart>_fsm.py``  the cocotb driver
+        (one @cocotb.test per vector per PCDN-D-003 / §5.5).
+      - ``tests/<chart>/_cocotb_helpers.py``   shared helpers
+        (load_vector, assert_state, format_failure) per
+        PCDN-D-006 / §5.6.
+      - ``tests/<chart>/Makefile``             cocotb-classic invocation
         (PCDN-D-001 default `SIM ?= verilator`; PCDN-D-007).
-      - ``pytest.ini``                cocotb-test invocation
+      - ``tests/<chart>/pytest.ini``           cocotb-test invocation
         (PCDN-D-007).
-      - ``README.md``                 chart-side traceability +
+      - ``tests/<chart>/README.md``            chart-side traceability +
         Python 3.10+ minimum (PCDN-D-005 / §5.3) + simulator-selection
         notes (PCDN-D-001 / §5.1).
-      - ``vectors/<vector_id>.json``  one minimal scaffold vector per
-        bound vector id, so the wave-1 directory is end-to-end
-        runnable on emit.
+      - ``tests/<chart>/vectors/<vector_id>.json``  one minimal
+        scaffold vector per bound vector id, so the wave-1 directory
+        is end-to-end runnable on emit.
+
+    The ``tests/<chart>/`` prefix unifies the cocotb emit shape with
+    the SVA walker (which already emits
+    ``tests/<chart>/<chart>_fsm_sva.sv`` + ``..._bind.sv``) so both
+    the cocotb test directory and its co-located SVA bind pair land
+    in the same per-DUT subtree. See PCDN-SOS-08-D-wave1-file-layout
+    (2026-05-23 wave-1 PCDN walkthrough resolution).
 
     Per INV-S-HDL-D-3 (vector-IR read-only at the emitter boundary)
     this function NEVER mutates the input ``chart_ir`` dict. Per INV-
@@ -910,18 +925,27 @@ def render_target(chart_ir: dict, config: Any = None) -> dict[str, str]:
     encoding = _one_hot_encoding(chart.state_ids)
     dut_module = cfg.dut_module or _dut_module_name(chart.name)
 
+    # Per PCDN-SOS-08-D-wave1-file-layout (ratified 2026-05-23): every
+    # emitted artifact lands under ``tests/<chart>/`` so the cocotb
+    # test directory co-locates with the SVA walker's bind pair (which
+    # already emits ``tests/<chart>/<chart>_fsm_sva.sv``). The
+    # ``<chart>`` slug uses ``_safe_ident`` for cross-dialect parity
+    # with the SVA walker's ``_sanitize_sv_identifier(...).lower()``.
+    chart_slug = _safe_ident(chart.name)
+    prefix = f"tests/{chart_slug}/"
+
     out: dict[str, str] = {}
-    out[f"test_{_safe_ident(chart.name)}_fsm.py"] = _emit_test_py(chart, cfg)
-    out["_cocotb_helpers.py"] = _emit_helpers_py(chart, encoding)
-    out["Makefile"] = _emit_makefile(chart, dut_module)
-    out["pytest.ini"] = _emit_pytest_ini(chart)
-    out["README.md"] = _emit_readme(chart, dut_module, cfg)
+    out[f"{prefix}test_{chart_slug}_fsm.py"] = _emit_test_py(chart, cfg)
+    out[f"{prefix}_cocotb_helpers.py"] = _emit_helpers_py(chart, encoding)
+    out[f"{prefix}Makefile"] = _emit_makefile(chart, dut_module)
+    out[f"{prefix}pytest.ini"] = _emit_pytest_ini(chart)
+    out[f"{prefix}README.md"] = _emit_readme(chart, dut_module, cfg)
 
     # Scaffold vector files (one per bound vector id) so the emitted
     # directory is end-to-end runnable. Authors replace these with
     # real SOS-03 §7.1 vectors at suite-population time.
     for vid in chart.vector_ids:
-        out[f"vectors/{vid}.json"] = _emit_scaffold_vector(chart, vid)
+        out[f"{prefix}vectors/{vid}.json"] = _emit_scaffold_vector(chart, vid)
 
     return out
 

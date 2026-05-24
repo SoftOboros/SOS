@@ -191,30 +191,59 @@ def test_assertion_module_declares_state_constants():
     assert re.search(r"3'b[01]{3}", src), src
 
 
-def test_assertion_module_has_clk_rst_state_q_ports():
+def test_assertion_module_has_clk_rst_current_state_ports():
+    """PCDN-SOS-08-D-wave1-sva-port-name (2026-05-23): the SVA module's
+    state-vector input port is named ``current_state`` (matching the
+    DUT's external output port), NOT ``state_q`` (the DUT-internal
+    register name). Module-type bind wires external→external."""
     src = _sva_source(_simple_chart())
     assert "module simple_fsm_sva" in src
     assert re.search(r"input\s+wire\s+clk\b", src)
     assert re.search(r"input\s+wire\s+rst\b", src)
-    assert re.search(r"input\s+wire\s+\[2:0\]\s+state_q\b", src)
+    assert re.search(r"input\s+wire\s+\[2:0\]\s+current_state\b", src)
+
+
+def test_sva_module_input_port_is_current_state_not_state_q():
+    """Regression guard for PCDN-SOS-08-D-wave1-sva-port-name (2026-05-23).
+
+    The SVA assertion module's state-vector input port MUST be named
+    ``current_state`` (the DUT's external output port name), NOT
+    ``state_q`` (the DUT-internal register name). Module-type bind
+    connects external ports to external ports, so a mismatched port
+    name on the SVA side would refuse to elaborate."""
+    src = _sva_source(_simple_chart())
+
+    # Positive: current_state appears as the input port declaration.
+    assert re.search(
+        r"input\s+wire\s+\[\d+:\d+\]\s+current_state\b", src
+    ), f"SVA module must declare `current_state` as input port:\n{src}"
+
+    # Negative: no `state_q` input-port declaration should appear in
+    # the emitted SV. (Docstring/comment mentions of `state_q` live in
+    # the .py source, not the .sv emit.)
+    assert not re.search(
+        r"input\s+wire\s+\[?\d*:?\d*\]?\s*state_q\b", src
+    ), f"SVA module must NOT declare `state_q` input port:\n{src}"
 
 
 def test_one_hot_assertion_present():
-    """INV-D-1: assertion checks ``$countones(state_q) <= 1`` on every
-    posedge clk (one-hot encoding invariant)."""
+    """INV-D-1: assertion checks ``$countones(current_state) <= 1`` on
+    every posedge clk (one-hot encoding invariant)."""
     src = _sva_source(_simple_chart())
-    assert "$countones(state_q) <= 1" in src
+    assert "$countones(current_state) <= 1" in src
     assert "a_one_hot" in src
     assert "SOS-08-D INV-D-1" in src
 
 
 def test_reset_initial_assertion_present():
-    """INV-D-2: ``rst |=> state_q == ST_<initial>``. Chart initial='A'
-    → assertion targets ST_A."""
+    """INV-D-2: ``rst |=> current_state == ST_<initial>``. Chart
+    initial='A' → assertion targets ST_A."""
     src = _sva_source(_simple_chart())
     assert "a_reset_initial" in src
     # Look for the |=> form with the initial state constant.
-    assert re.search(r"rst\s*\|=>\s*\(state_q\s*==\s*ST_A\)", src), src
+    assert re.search(
+        r"rst\s*\|=>\s*\(current_state\s*==\s*ST_A\)", src
+    ), src
     assert "SOS-08-D INV-D-2" in src
 
 
@@ -230,12 +259,12 @@ def test_guarded_transition_includes_cond():
     """A chart with ``cond="a == 1"`` → the assertion antecedent
     contains the guard with the registered-signal name (``data_a_q``)."""
     src = _sva_source(_chart_with_guarded_transition(), chart_name="g")
-    # Compiled antecedent: (state_q == ST_A) && (data_a_q == 1)
+    # Compiled antecedent: (current_state == ST_A) && (data_a_q == 1)
     # The exact spacing / parens depend on hdl_common.emit_guard_expr;
     # accept any whitespace and parens around the comparison.
     assert "data_a_q" in src, src
     assert re.search(
-        r"\(state_q\s*==\s*ST_A\)\s*&&\s*\(.*data_a_q.*==.*1.*\)",
+        r"\(current_state\s*==\s*ST_A\)\s*&&\s*\(.*data_a_q.*==.*1.*\)",
         src,
     ), src
 
@@ -303,14 +332,23 @@ def test_bind_directive_module_type():
     ), src
 
 
-def test_bind_directive_wires_dut_current_state_to_sva_state_q():
-    """The assertion module's ``state_q`` input is driven from the
-    chart-FSM module's ``current_state`` output (SOS-08-C §6.2)."""
+def test_bind_directive_wires_dut_current_state_to_sva_current_state():
+    """PCDN-SOS-08-D-wave1-sva-port-name (2026-05-23): the assertion
+    module's ``current_state`` input is driven from the chart-FSM
+    module's ``current_state`` output (SOS-08-C §6.2). Module-type
+    bind connects external→external; the SVA-side port name matches
+    the DUT-side output port name verbatim."""
     src = _bind_source(_simple_chart())
     assert re.search(
-        r"\.state_q\s*\(\s*current_state\s*\)",
+        r"\.current_state\s*\(\s*current_state\s*\)",
         src,
     ), src
+    # Regression guard: bind directive must NOT use the legacy
+    # `.state_q(current_state)` form (the DUT-internal name).
+    assert not re.search(r"\.state_q\s*\(", src), (
+        f"bind directive must not reference the DUT-internal "
+        f"`state_q` name:\n{src}"
+    )
 
 
 def test_bind_directive_routes_clk_rst():
