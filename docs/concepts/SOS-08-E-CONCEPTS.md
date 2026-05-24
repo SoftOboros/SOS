@@ -398,3 +398,46 @@ All five PCDNs from §11 resolved with recommendations accepted.
 - INV-S-HDL-E-5 (per-simulator build wrapper) wording extended: "five wrappers emitted per chart region: Questa `.do`, VCS `.sh`, Xcelium argument file, Riviera `.tcl`, Verilator `Makefile`".
 
 **Status**: 🟢 **ratified**. Implementation of the SV testbench emission path in `tools/sos-codegen/` is now unblocked. SOS-08-E composes with SOS-08-D (cocotb path) via the shared vector-IR boundary frozen in SOS-08-D ratification; SVA bind files are mirrored byte-identical from SOS-08-D per §4 source-of-truth.
+
+### 2026-05-23 — Impl wave-1 scaffold (Ira)
+
+Wave-1 implementation surface landed under the 2026-05-23 ratification of §15 above. This entry records what shipped, what remains scaffold, and what is wave-2 work.
+
+**Wave-1 implementation surface**:
+
+- **`transliterate_hdl_sv_tb.py` walker** (~720 LOC) emits eight artifacts per single-region chart, all rooted under `tb/sv/<chart>/`:
+    - `tb_<chart>.sv` — top-level testbench module per §6.3 (instantiates DUT + virtual interface + driver + checker; fork-joins; emits `[PASS]` / `[FAIL count=N]` summary).
+    - `sos_driver_<chart>.sv` — stimulus driver class per §6.1 (consumes JSONL trace via `$fopen` / `$fgets`; drives only DUT inputs through the `driver_mp` modport; emits `[DRIVE] V<n>` log lines in chart vocabulary).
+    - `sos_checker_<chart>.sv` — response checker class per §6.2 (observes via `checker_mp` modport; emits `[FAIL] vector V<n>: chart `<chart>`` chart-vocabulary failure messages per §5.5 + INV-S-HDL-E-4; exposes `get_fail_count()` for the top-level exit-status decision).
+    - `dut_if_<chart>.sv` — virtual interface with `driver_mp` + `checker_mp` modports.
+    - `<chart>_fsm_sva.sv` — SVA assertion module **byte-identical** to the SOS-08-D emit per §5.2 + INV-S-HDL-D-4 (the walker imports `transliterate_sva_bind.render_target` and re-keys the resulting filenames under `tb/sv/<chart>/`).
+    - `<chart>_fsm_bind.sv` — SVA bind directive, also byte-identical to SOS-08-D.
+    - `run_verilator.mk` — Verilator build wrapper per §6.4 + INV-S-HDL-E-5 (the open-source-runnable target; `--assert --timing` flags enabled; compiles all six SV files in dependency order).
+    - `run.do` — Questa / Riviera build wrapper, reference shape per PCDN-SOS-08-E-005. The commercial-reference path; vsim + vlog invocation skeleton with `-assertdebug`. Smoke-tested but not full CI.
+- **Invariant audit by construction** (`_audit_all`): every emitted file is post-pass scanned for INV-S-HDL-E-1 (no `randomize` / `constraint` / `rand` / `randc`), INV-S-HDL-E-2 (no UVM imports or macros), and INV-S-HDL-E-3 (no inline `assert property` in non-bind files). Any hit raises `InvariantAuditError` — signals an internal walker bug, not a chart-author error. Bind files are exempt from INV-S-HDL-E-3 by design.
+- **CLI integration** in `main.py`: new `--target sos-08-e` choice + `_render_sos_08_e_target` dispatcher; the `cocotb_sva_config` dict (already carrying `chart_name`) is forwarded to the walker. The dry-run and `--out` directory write paths already handle dict-output targets; `sos-08-e` slots into the existing `("hdl-vhdl", "hdl-sv", "cocotb", "sva", "sos-08-d")` list.
+- **End-to-end tests** at `tools/sos-codegen/tests/test_transliterate_hdl_sv_tb.py` (60 tests, all passing). Coverage: file-set + naming conventions; top-level testbench module shape; driver class contract; checker class contract; virtual interface modports; SVA bind file byte-identical mirror with SOS-08-D; Verilator + Questa build wrapper contents; invariant satisfaction audit (E-1, E-2, E-3, E-4, E-5); parallel-chart rejection; audit error path (positive + negative); non-dict input rejection.
+
+**Wave-1 scope (what landed vs. what is deferred)**:
+
+- Single-region charts emit a working test-bench artifact set; parallel charts are rejected with a clear `UnsupportedChartError` citing the wave-2 boundary (per-region split co-deferred with the SOS-08-D wave-2 parallel-chart support).
+- JSONL trace consumption uses a minimal `{"event": N, "cycles": N, "expected_state": N}` shape parsed by a hand-rolled in-class JSON-Lines integer-field extractor. Per §5.4 the full SOS-03 vector-schema parser (a precompiled SV utility module) lands in wave-2 alongside SOS-08-D's `post_results.py` JUnit emission. The hand-rolled extractor is INV-S-HDL-E-1-conforming (no `randomize` helpers) and supports the wave-1 walker's emitted contract.
+- Two build wrappers shipped (`run_verilator.mk` + `run.do`); VCS `Makefile.sv`, Xcelium `run_xrun.sh`, and a fully-functional Riviera-PRO `.tcl` wrapper distinct from the Questa form land in wave-2 per PCDN-SOS-08-E-005's "separate wrappers per simulator" resolution. INV-S-HDL-E-5 wave-1 satisfaction is "at least one wrapper per the two supported-at-CI simulator families"; full five-wrapper coverage is INV-S-HDL-E-5's wave-2 ratification gate.
+- The driver's `parse_int_field` SV function is a wave-1 LCD-form integer-field extractor; floating-point and string-valued JSON fields are not yet supported because the wave-1 vector schema is integer-keyed. Wave-2 swaps in a full JSON parser when the SOS-03 schema gains non-integer fields.
+- Class hierarchy depth is **flat** per PCDN-SOS-08-E-001 (one driver + one checker class per region). Layered emission (stimulus generator / scoreboard / transaction abstraction) is a SOS-08-E follow-on if a customer requests it.
+- `covergroup`-based functional coverage is **deferred** per PCDN-SOS-08-E-003. The bounded-reachability verification claim already provides exhaustive coverage within the bound.
+
+**Wave-2 candidates** (recorded explicitly so the boundary is unambiguous):
+
+- **VCS `Makefile.sv` + Xcelium `run_xrun.sh` + Riviera `.tcl` wrappers** per PCDN-SOS-08-E-005 separate-wrappers-per-simulator. Wave-1 ships Verilator + Questa; wave-2 closes the five-wrapper INV-S-HDL-E-5 gate.
+- **Parallel-chart support**: per-region testbench split alongside SOS-08-D wave-2's per-region SVA bind shape. Currently the walker raises `UnsupportedChartError` on any `<parallel>` block.
+- **Full SOS-03 vector-schema consumption**: precompiled SV utility module (e.g. `sos_jsonl_parser_pkg`) that decodes the full vector schema rather than the wave-1 LCD integer-field shape. Lands alongside SOS-08-D `post_results.py` JUnit emission.
+- **Cross-path equivalence test** with SOS-08-D per §12 (h): a CI gate that runs the same vector set against both the cocotb path and the SV testbench path and confirms byte-identical pass/fail verdict. This is the load-bearing claim of the dual-emission design.
+- **Layered class hierarchy opt-in** per PCDN-SOS-08-E-001 if a customer requests it (intermediate stimulus generator / scoreboard / transaction abstractions). Wave-1 ships the flat shape.
+- **Verilator deferred-failure stub** per INV-S-HDL-E-6 for SV-2017 features outside Verilator's supported subset. Wave-1's emitted SV uses classes + virtual interfaces + file I/O — all supported. Wave-2 enriches if/when chart authors annotate guards / properties that require constructs outside Verilator's subset.
+
+**Cited invariants** (all upheld by wave-1 surface): INV-S-HDL-E-1 (no constrained-random — audit passes), INV-S-HDL-E-2 (no UVM imports — audit passes), INV-S-HDL-E-3 (SVA only via bind files — audit passes, bind files exempted by design), INV-S-HDL-E-4 (chart-vocabulary failure messages — checker's `[FAIL] vector V<n>: chart `<chart>`` prefix), INV-S-HDL-E-5 (per-simulator build wrapper — Verilator + Questa wave-1; full five wave-2), INV-S-HDL-E-6 (Verilator-subset compliance — wave-1 stays within Verilator's supported SV-2017 subset).
+
+**Cited PCDNs** (all resolved 2026-05-23 §15 ratification entry above, implementation now in place): PCDN-SOS-08-E-001 (flat class hierarchy at v1), PCDN-SOS-08-E-002 (Verilator-subset compliance via deferred-failure-stub policy), PCDN-SOS-08-E-003 (coverage emission deferred), PCDN-SOS-08-E-004 (per-region testbench shape at v1), PCDN-SOS-08-E-005 (separate simulator wrappers — wave-1 ships two of five; wave-2 closes the remaining three).
+
+**Status**: 🟢 **ratified (continuing)** — wave-1 scaffold lands the SV-testbench emission path with single-region chart coverage; parallel-chart split, full five-simulator wrapper coverage, and cross-path equivalence with SOS-08-D are wave-2 work.

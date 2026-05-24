@@ -92,7 +92,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--target",
         choices=(
             "rust", "c", "both", "hdl-vhdl", "hdl-sv",
-            "cocotb", "sva", "sos-08-d",
+            "cocotb", "sva", "sos-08-d", "sos-08-e",
         ),
         required=True,
         help=(
@@ -106,8 +106,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "the cocotb testbench AND the SVA bind file in one "
             "invocation under the same ``--out`` directory "
             "(PCDN-SOS-08-D-wave1-cli-unified, resolved 2026-05-23). "
-            "Ratified 2026-05-23, SOS-08-D §15. See SOS-08-D §6.1 for "
-            "the emitted directory layout."
+            "``sos-08-e`` emits the SOS-08-E SystemVerilog testbench "
+            "artifact set (class-based, self-checking, "
+            "constrained-random-free, UVM-free) under ``tb/sv/<chart>/``, "
+            "mirroring the SOS-08-D SVA bind file byte-identically "
+            "(ratified 2026-05-23, SOS-08-E §15). "
+            "See SOS-08-D §6.1 / SOS-08-E §6 for the emitted directory "
+            "layouts."
         ),
     )
     p.add_argument(
@@ -220,7 +225,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def validate_args(args: argparse.Namespace) -> None:
     """Validate --out vs --target consistency. Exits with code 3 on mismatch."""
     if args.target in (
-        "rust", "c", "hdl-vhdl", "hdl-sv", "cocotb", "sva", "sos-08-d",
+        "rust", "c", "hdl-vhdl", "hdl-sv", "cocotb", "sva",
+        "sos-08-d", "sos-08-e",
     ):
         if args.out is None and not args.dry_run:
             sys.stderr.write(
@@ -510,6 +516,36 @@ def _render_sos_08_d_target(
     return merged
 
 
+def _render_sos_08_e_target(
+    ast: ChartAst,
+    config: dict,
+) -> dict[str, str]:
+    """Dispatch SOS-08-E SystemVerilog testbench emission to the walker.
+
+    Per SOS-08-E §6 (emission contract): the walker returns a dict of
+    eight artifacts per single-region chart — top-level testbench
+    module, driver class, checker class, virtual interface, SVA
+    assertion module (mirrored from SOS-08-D), SVA bind directive
+    (mirrored from SOS-08-D), Verilator Makefile, Questa/Riviera ``.do``
+    reference — all rooted under ``tb/sv/<chart>/``. The SVA mirror is
+    byte-identical to the SOS-08-D emit (§5.2 + INV-S-HDL-D-4).
+
+    Cites: SOS-08-E §15 ratification (2026-05-23); SOS-08-E §6
+    (emission contract); SOS-08-E §5.2 (SVA bind file mirror).
+    """
+    try:
+        from transliterate_hdl_sv_tb import (  # noqa: E402
+            render_target as render_sv_tb,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "sos-codegen: --target=sos-08-e requires "
+            "`transliterate_hdl_sv_tb.py` next to main.py (SOS-08-E "
+            f"wave-1 module). Import error: {exc}"
+        ) from exc
+    return render_sv_tb(ast.raw_scjson, config)
+
+
 def render_target(
     target: str,
     ast: ChartAst,
@@ -552,6 +588,8 @@ def render_target(
         return _render_sva_target(ast, cocotb_sva_config or {})
     if target == "sos-08-d":
         return _render_sos_08_d_target(ast, cocotb_sva_config or {})
+    if target == "sos-08-e":
+        return _render_sos_08_e_target(ast, cocotb_sva_config or {})
     env = _env()
     template_name = {"rust": "scripts.rs.j2", "c": "scripts.c.j2"}[target]
     tpl = env.get_template(template_name)
@@ -723,13 +761,14 @@ def main(argv: list[str]) -> int:
         args.out_rust.write_text(rendered["rust"], encoding="utf-8")
         args.out_c.write_text(rendered["c"], encoding="utf-8")
     elif args.target in (
-        "hdl-vhdl", "hdl-sv", "cocotb", "sva", "sos-08-d",
+        "hdl-vhdl", "hdl-sv", "cocotb", "sva", "sos-08-d", "sos-08-e",
     ):
-        # HDL + SOS-08-D walkers return {filename: source}; write each
+        # HDL + SOS-08-D/E walkers return {filename: source}; write each
         # into args.out (treated as a directory). For cocotb / sva /
-        # sos-08-d the emitted filenames are relative paths (e.g.
-        # `tests/<chart_name>/test_<chart_name>_fsm.py`) per SOS-08-D
-        # §6.1 — create intermediate parent dirs as needed. The
+        # sos-08-d / sos-08-e the emitted filenames are relative paths
+        # (e.g. `tests/<chart_name>/test_<chart_name>_fsm.py` for
+        # SOS-08-D; `tb/sv/<chart_name>/tb_<chart_name>.sv` for
+        # SOS-08-E) — create intermediate parent dirs as needed. The
         # ``sos-08-d`` unified target's dict is the union of the
         # cocotb + SVA walker outputs (PCDN-SOS-08-D-wave1-cli-unified,
         # resolved 2026-05-23).
