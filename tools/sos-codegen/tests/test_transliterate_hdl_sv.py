@@ -793,17 +793,21 @@ class TestWave3Events:
         assert "event_sem_give_send_valid" in src
         assert "`sem.give`" in src
 
-    def test_single_region_chart_without_raise_unchanged(self):
-        """Wave-3 MUST NOT change emit for charts without <raise>."""
+    def test_single_region_chart_without_raise_no_egress(self):
+        """Wave-3 MUST NOT emit egress (send) ports for charts without
+        `<raise>`. Wave-3-d-3 added consume-event ingress ports
+        (_recv_*) for transitions with `event="..."` attributes —
+        those ARE present on `_simple_chart` because it has
+        `event="go"` / `event="finish"` transitions, but `_send_*`
+        ports require `<raise>` which `_simple_chart` doesn't carry.
+        """
         files_a = transliterate_hdl_sv.render_target(
             _simple_chart(), {"chart_name": "x"}
         )
-        # No event_* ports emitted; existing tests in this file all
-        # still pass without modification (regression-guarded by the
-        # full-suite green at this commit).
         src = files_a["x_fsm.sv"]
-        assert "event_" not in src
+        # No raise side ports.
         assert "send_valid" not in src
+        assert "send_ready" not in src
 
 
 class TestWave3cChartTopChannels:
@@ -993,12 +997,14 @@ class TestWave3dProducerBackpressure:
 
     def test_non_raising_transition_not_wrapped(self):
         """Transitions WITHOUT `<raise>` retain the wave-1/2 emission
-        shape — no send_ready wrap."""
+        shape for the egress side — no send_ready wrap. Wave-3-d-3
+        does add ingress `_recv_*` ports for `event="..."` transitions,
+        but those don't affect the egress side."""
         files = transliterate_hdl_sv.render_target(
             _simple_chart(), {"chart_name": "x"}
         )
         src = files["x_fsm.sv"]
-        # No event ports at all on a chart without `<raise>`.
+        # No raise-side ports on a chart without `<raise>`.
         assert "send_ready" not in src
         assert "send_valid" not in src
 
@@ -1091,3 +1097,204 @@ class TestWave3dProducerBackpressure:
         assert len(ready_drives) == 2, (
             "expected 2 send_ready fanouts (one per producer region)"
         )
+
+
+class TestWave3d3EventIngressRefactor:
+    """SOS-08-C wave-3-d-3 (2026-05-24 §15): event ingress refactor.
+
+    Transitions with `event="..."` are now gated on `_recv_valid` (until
+    this wave, the event attribute was captured but unused at emit
+    time — transitions fired combinationally on state + cond alone).
+    Per consumed event, the region FSM emits a (_recv_valid input,
+    _recv_ready output) port pair. The chart-top wrapper fans channel
+    `m_axis_tvalid` to every consuming region + OR-aggregates the
+    consumers' _recv_ready outputs into channel `m_axis_tready`.
+    """
+
+    def test_region_emits_recv_valid_input_port(self):
+        chart = {
+            "initial": "A",
+            "state": [
+                _state("A", transitions=[{"event": "go", "target": "B"}]),
+                _state("B"),
+            ],
+        }
+        files = transliterate_hdl_sv.render_target(chart, {"chart_name": "r"})
+        src = files["r_fsm.sv"]
+        assert "input  wire event_go_recv_valid" in src
+        assert "output wire event_go_recv_ready" in src
+
+    def test_event_transition_gated_on_recv_valid(self):
+        """A transition with `event="go"` (no cond) is gated on
+        `event_go_recv_valid` in the case-arm — NOT emitted as an
+        unguarded `state_next = target;`."""
+        chart = {
+            "initial": "A",
+            "state": [
+                _state("A", transitions=[{"event": "go", "target": "B"}]),
+                _state("B"),
+            ],
+        }
+        files = transliterate_hdl_sv.render_target(chart, {"chart_name": "r"})
+        src = files["r_fsm.sv"]
+        assert "if (event_go_recv_valid) state_next = ST_B;" in src
+
+    def test_event_and_cond_combined_in_predicate(self):
+        """A transition with both `event` and `cond` AND-combines them
+        in the predicate."""
+        chart = {
+            "initial": "idle",
+            "datamodel": [{"data": [{"id": "ready", "expr": "0"}]}],
+            "state": [
+                {
+                    "id": "idle",
+                    "transition": [
+                        {"event": "tick", "cond": "ready == 1",
+                         "target": "active"},
+                    ],
+                },
+                {"id": "active"},
+            ],
+        }
+        files = transliterate_hdl_sv.render_target(chart, {"chart_name": "c"})
+        src = files["c_fsm.sv"]
+        # Combined predicate: event_recv_valid && cond.
+        assert (
+            "if (event_tick_recv_valid && ((data_ready_q == 1)))" in src
+        )
+
+    def test_recv_ready_drive_asserts_in_source_state(self):
+        """`event_<name>_recv_ready` asserts when this region is in a
+        state with a non-elided transition consuming the event. recv_ready
+        does NOT include the event's own _recv_valid term (would create
+        a combinational dependency through the channel)."""
+        chart = {
+            "initial": "A",
+            "state": [
+                _state("A", transitions=[{"event": "go", "target": "B"}]),
+                _state("B"),
+            ],
+        }
+        files = transliterate_hdl_sv.render_target(chart, {"chart_name": "r"})
+        src = files["r_fsm.sv"]
+        assert "assign event_go_recv_ready = (state_q == ST_A);" in src
+
+    def test_doc_order_priority_with_events(self):
+        """Multiple transitions with different events from same source
+        form an if/elsif chain — first event arriving wins (PCDN-C-006
+        doc-order priority preserved)."""
+        chart = {
+            "initial": "pick",
+            "state": [
+                _state("pick", transitions=[
+                    {"event": "first", "target": "to_first"},
+                    {"event": "second", "target": "to_second"},
+                ]),
+                _state("to_first"),
+                _state("to_second"),
+            ],
+        }
+        files = transliterate_hdl_sv.render_target(chart, {"chart_name": "x"})
+        src = files["x_fsm.sv"]
+        # First transition emits in if/elsif chain — first matching
+        # event-valid wins per PCDN-C-006.
+        assert "if (event_first_recv_valid) state_next = ST_TO_FIRST;" in src
+        # Second transition is in elsif — only fires when first event
+        # NOT valid this cycle.
+        assert (
+            "else if (event_second_recv_valid) state_next = ST_TO_SECOND;"
+            in src
+        )
+
+    def test_chart_top_fans_recv_valid_to_consumers(self):
+        """Chart-top wrapper: channel `m_axis_tvalid` connects to an
+        internal `ev_<name>_recv_valid_w` wire which is driven OUT to
+        the boundary AND fanned to every consuming region's
+        `event_<name>_recv_valid` input."""
+        chart = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[
+                            {"target": "L2", "raise_value": [{"event": "tick"}]},
+                        ]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1", "state": [
+                        _state("R1", transitions=[
+                            {"event": "tick", "target": "R2"},
+                        ]),
+                        _state("R2"),
+                    ]},
+                ],
+            }],
+        }
+        files = transliterate_hdl_sv.render_target(chart, {"chart_name": "k"})
+        top = files["k_top.sv"]
+        # Per-event recv_valid fanout wire declared.
+        assert "wire ev_tick_recv_valid_w;" in top
+        # Channel drives the fanout wire.
+        assert ".m_axis_tvalid(ev_tick_recv_valid_w)" in top
+        # Boundary observer port driven by the fanout wire.
+        assert "assign event_tick_recv_valid = ev_tick_recv_valid_w;" in top
+        # Consumer region wired to the fanout.
+        assert (
+            ".event_tick_recv_valid(ev_tick_recv_valid_w)" in top
+        )
+
+    def test_chart_top_aggregates_recv_ready(self):
+        """`m_axis_tready` is OR of boundary _recv_ready input AND
+        every consumer region's _recv_ready output."""
+        chart = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[
+                            {"target": "L2", "raise_value": [{"event": "tick"}]},
+                        ]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1", "state": [
+                        _state("R1", transitions=[
+                            {"event": "tick", "target": "R2"},
+                        ]),
+                        _state("R2"),
+                    ]},
+                ],
+            }],
+        }
+        files = transliterate_hdl_sv.render_target(chart, {"chart_name": "k"})
+        top = files["k_top.sv"]
+        # Per-consumer ready wire.
+        assert "wire w_ev_right_tick_ready;" in top
+        # OR-aggregation: boundary | each consumer.
+        assert (
+            "wire ev_tick_recv_ready_w = event_tick_recv_ready | "
+            "w_ev_right_tick_ready;" in top
+        )
+        # Channel drives from aggregated ready.
+        assert ".m_axis_tready(ev_tick_recv_ready_w)" in top
+
+    def test_event_attribute_no_longer_ignored(self):
+        """Regression guard for the §6.4 fix: prior to wave-3-d-3,
+        transitions with `event="..."` had the event attribute IGNORED
+        at emit time — they fired combinationally on state + cond
+        alone. Wave-3-d-3 correctly gates them on `_recv_valid`."""
+        # `_simple_chart` has `event="go"` and `event="finish"` — pre
+        # wave-3-d-3, the state advances were emitted directly:
+        #   ST_A: state_next = ST_B;
+        # Post wave-3-d-3:
+        #   ST_A: if (event_go_recv_valid) state_next = ST_B; ...
+        files = transliterate_hdl_sv.render_target(
+            _simple_chart(), {"chart_name": "x"}
+        )
+        src = files["x_fsm.sv"]
+        # The bare unconditional advance MUST NOT appear inside the
+        # ST_A case-arm — it must be gated on recv_valid.
+        # We look for the bare assign WITHOUT the wrapping if/else.
+        assert "if (event_go_recv_valid) state_next = ST_B;" in src
+        assert "if (event_finish_recv_valid) state_next = ST_C;" in src

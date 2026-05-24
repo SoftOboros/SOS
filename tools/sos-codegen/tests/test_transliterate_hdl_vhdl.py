@@ -347,21 +347,44 @@ def test_initial_state_is_reset_state():
 
 
 def test_document_order_priority_in_transition_mux():
+    """PCDN-C-006 doc-order priority semantics under wave-3-d-3.
+
+    Pre-wave-3-d-3, transitions with `event="..."` no `cond` were
+    treated as unguarded, so the doc-order-first transition was the
+    sole emission and the rest were elided as dead. Wave-3-d-3
+    correctly treats `event="..."` as a predicate term — all three
+    transitions emit into an if/elsif chain, and the first matching
+    event-valid wins. Doc-order priority is preserved by the elsif
+    structure (event_first arrives → winner; only when event_first is
+    NOT valid does event_second get a chance → loser_a; etc.).
+    """
     chart = _multi_transition_chart()
     files = render_target(chart, {"chart_name": "prio"})
     body = files["prio_fsm.vhd"]
     winner = state_constant_name("winner")
     loser_a = state_constant_name("loser_a")
     loser_b = state_constant_name("loser_b")
+    # All three targets reachable under their own event-valid.
     assert f"state_next <= {winner}" in body
-    direct_loser_a = f"state_next <= {loser_a}"
-    direct_loser_b = f"state_next <= {loser_b}"
-    for line in body.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("--"):
-            continue
-        assert direct_loser_a not in stripped
-        assert direct_loser_b not in stripped
+    assert f"state_next <= {loser_a}" in body
+    assert f"state_next <= {loser_b}" in body
+    # Priority order in the chain: winner first, then loser_a, then
+    # loser_b. The line indices establish doc-order priority — first
+    # match wins.
+    lines = body.splitlines()
+    winner_line = next(
+        i for i, l in enumerate(lines) if f"state_next <= {winner}" in l
+    )
+    loser_a_line = next(
+        i for i, l in enumerate(lines) if f"state_next <= {loser_a}" in l
+    )
+    loser_b_line = next(
+        i for i, l in enumerate(lines) if f"state_next <= {loser_b}" in l
+    )
+    assert winner_line < loser_a_line < loser_b_line, (
+        f"doc-order priority broken: winner@{winner_line} "
+        f"loser_a@{loser_a_line} loser_b@{loser_b_line}"
+    )
 
 
 def test_script_bodies_rejected_at_v2_scaffold():

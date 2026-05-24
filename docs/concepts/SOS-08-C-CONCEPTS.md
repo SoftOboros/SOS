@@ -690,3 +690,59 @@ Wave-3-d originally bundled three concerns: (a) producer backpressure on the `<r
 **Cited PCDNs**: SOS-08-B §6.5 (channel contract — `s_axis_tready` was already specified); INV-S-HDL-4 (priority-claim across stalls); SOS-08-A §6 (AXI-Stream valid-stable-until-ready convention).
 
 Status: 🟢 **wave-3-d-1 complete**. Wave-3-d-2 adds the multi-clock-domain channel variant (`sos_message_channel_async`) — requires a SOS-08-B amendment first. Wave-3-d-3 adds the event ingress refactor (per-event `_recv_*` ports on region FSMs + transition gating on `_recv_valid`).
+
+### 2026-05-24 — Impl wave-3-d-3: event ingress refactor (Ira)
+
+The load-bearing §6.4 fix. Until this wave, transitions with `event="..."` had the event attribute captured but **UNUSED** at emit time — they fired combinationally on state + cond alone, regardless of whether the chart-side event had actually been raised. This wave correctly gates them on `event_<name>_recv_valid`.
+
+**Wave-3-d-3 implementation surface**:
+
+- **`_collect_region_consume_events` (SV + VHDL)**: new helper. Walks region transitions, returns sorted-deduped list of event names referenced via `tr.event`. Mirror of `_collect_region_raise_events`.
+- **`_emit_module_header` (SV) / `_emit_entity` (VHDL)**: per consumed event, emit `(event_<name>_recv_valid input, event_<name>_recv_ready output)` port pair after the raise-side quad. The trailing-comment annotation discipline extends to cover the new ports (`// chart event \`<ev>\` (wave-3-d-3 ingress)` + `// chart event \`<ev>\` (wave-3-d-3 consume-ready)`).
+- **`_emit_transition_case_arm` (SV + VHDL)**: the predicate partition changes. A transition is now "predicated" if it has event OR cond (previously only cond). The predicate is built as `event_<name>_recv_valid && (cond)` when both are present, the event-only form when no cond, or the cond-only form when no event. Only transitions with **neither** event nor cond end the priority chain (final `else` arm). Doc-order priority (PCDN-C-006) is preserved through the if/elsif structure.
+- **`_emit_event_egress_drives` (SV + VHDL) refactor**: the firing predicate now includes the transition's own `event_<name>_recv_valid` term when consuming. Without this, the egress would pulse even when the chart-side event hasn't arrived — breaking §6.4 semantics. Higher-priority transitions' "must not fire" terms also include their event-valid terms (full firing predicate).
+- **`_emit_event_ingress_recv_ready_drives` (SV + VHDL)**: new emitter. Per consumed event, drives `event_<name>_recv_ready` as the OR over per-state predicates "state matches AND no higher-priority transition's full firing predicate holds AND own cond holds". Critically, the recv_ready predicate does **NOT** include the event's own `_recv_valid` term — that would create a combinational dependency through the channel. The channel's `m_axis_tvalid` is derived from a registered FIFO empty flag (`sos_fifo_sync`), so the dependency wouldn't actually close in one cycle, but omitting the self-event term keeps the recv_ready predicate state-local and easier to reason about ("I'm ready to consume X NOW if you offer it" is independent of "you ARE offering X").
+- **`_transition_fire_predicate_terms` + `_walk_state_for_event` helpers (SV + VHDL)**: shared between egress and ingress drives. Builds the AND-terms of a transition's firing predicate within a state, with knobs for state-match (omitted when caller gates externally) and own-event (omitted for recv_ready drives).
+- **`_build_region_modules_canonical` (SV walker) / equivalent (VHDL walker)**: surface `consume_events` field in the `region_modules` dict alongside `raise_events`.
+- **`hdl_common.py` chart-top wrapper**: 
+  - Collects `chart_event_consumers` parallel to `chart_event_producers`. Events present in either set get a channel instance + boundary `event_<name>_recv_valid/ready` ports.
+  - Per consume edge, declares `wire w_ev_<region>_<name>_ready;` (SV) / `signal w_ev_<region>_<name>_ready : std_logic;` (VHDL) carrying the consumer's recv_ready output.
+  - Per event, declares `wire ev_<name>_recv_valid_w;` carrying channel `m_axis_tvalid` (fanned to boundary observer + each consumer region's input).
+  - Per event, declares `wire ev_<name>_recv_ready_w = event_<name>_recv_ready | <each consumer's ready signal>;` aggregating boundary observer's ready + every consumer region's ready. Channel `m_axis_tready` connects to this aggregated wire.
+  - Per consumer region instance, wires `.event_<name>_recv_valid(ev_<name>_recv_valid_w)` + `.event_<name>_recv_ready(w_ev_<region>_<name>_ready)`.
+
+**Cycle-level behaviour** (single consumer, channel offers data):
+
+| Cycle | `state_q` | `recv_valid` | `recv_ready` (computed) | `state_next` | Notes |
+|-------|-----------|--------------|--------------------------|--------------|-------|
+| N     | source    | 0            | 1                        | source       | ready but no data offered |
+| N+1   | source    | 1            | 1                        | target       | handshake completes, channel pops |
+| N+2   | target    | (channel re-evaluates) | 0 (no longer in source) | (next) | state has advanced |
+
+**Boundary observer semantics**: the chart-top `event_<name>_recv_valid` output AND every internal consumer's `event_<name>_recv_valid` input see the same channel `m_axis_tvalid`. The channel pops once when `m_axis_tready` goes high — which happens when ANY of (boundary observer ready, internal consumer ready) is high. Under cooperative INV-S-HDL-4, at most one consumer is ready per cycle in the typical case, so the OR-aggregate behaves as point-to-point. Two simultaneous consumers in the same cycle both "see" the data via fanout (`m_axis_tvalid` is broadcast), and the channel pops once — semantically equivalent to broadcast consumption. The chart-author's design constraint per cooperative SCXML semantics is that two regions consuming the same event in the same cycle is not typically intended, but the emission produces correct under-cooperative behaviour either way.
+
+**Wave-3-d-3 scope explicitly excludes**:
+
+- Multi-clock-domain channel variant (`sos_message_channel_async`) — needs SOS-08-B amendment + new L1 primitive. Wave-3-d-2.
+- Payload data routing on `_tpayload` ports + chart `<param>`/`<content>` extension. Wave-3-e.
+- Per-event consumer arbitration for the cross-region simultaneous-consume case (defer to v2 or a future amendment that ratifies cross-region event distribution semantics).
+
+**Invariants upheld**:
+
+- **§6.4 LOAD-BEARING FIX** (event ingress wiring): operational. Transitions with `event="..."` are now correctly gated on the chart-side event arrival. This was previously a known-incorrect emission — the wave-1 / wave-2 / wave-3-{a,b,c,d-1} versions emitted transitions as combinational on state+cond.
+- **INV-S-HDL-1** (handshake-compatible ports): the new `(_recv_valid in, _recv_ready out)` quad completes the AXI-Stream slave-side handshake at the region boundary.
+- **INV-S-HDL-C-1** (deterministic emission): per-event recv_ready drives, consume-edge wires, fanout wires emit in sorted order.
+- **INV-S-HDL-C-3** (cross-domain event consumption uses `sos_message_channel`): now fully operational — chart-top fans channel m_axis to consumers, OR-aggregates ready back. INV-S-HDL-3's "every cross-domain transition uses a synchronizer" is satisfied by the channel's internal `sos_fifo_sync` (single-clock variant) or `sos_fifo_async` (deferred to wave-3-d-2).
+- **INV-S-HDL-4** (cooperative-only): preserved. Higher-priority transitions' full firing predicates are subtracted from lower-priority transitions' recv_ready terms so the channel doesn't pop data that nobody consumes.
+- **PCDN-C-006** (doc-order priority): preserved through the if/elsif chain structure in the case-arm.
+- **INV-SOS-H** (chart-vocabulary traceability): the `_recv_valid` and `_recv_ready` ports carry chart event names verbatim with trailing-comment annotations.
+
+**Breaking change**: pre-wave-3-d-3, a transition like `<transition event="go" target="B"/>` on state `A` emitted `ST_A: state_next = ST_B;` (unconditional advance, event attribute ignored). Wave-3-d-3 emits `ST_A: begin if (event_go_recv_valid) state_next = ST_B; else state_next = ST_A; end`. Downstream consumers wiring directly to the region FSM's state_next or relying on the prior unconditional behaviour will see a SEMANTIC change. The new behaviour is correct per §6.4; the prior behaviour was a known gap.
+
+**Test count**: net +8 — `TestWave3d3EventIngressRefactor` (8 tests): region module pairs recv_valid input + recv_ready output; unguarded event transition gated on recv_valid; combined event + cond predicate; recv_ready drive asserts in source state; doc-order priority chain with multiple events; chart-top fans recv_valid to consumers; chart-top aggregates recv_ready (boundary | consumers); regression-guard confirming event attribute is no longer ignored (§6.4 fix).
+
+**Test suite**: 389/389 passing (381 baseline + 8 net wave-3-d-3). One pre-existing test updated to reflect the corrected §6.4 semantics: `test_document_order_priority_in_transition_mux` (VHDL) previously asserted that lower-priority transitions' targets NEVER appeared in the body (held under the wave-1 buggy "first-wins-unconditionally" emission); now asserts they appear in doc-order in the elsif chain (correct PCDN-C-006 semantics under per-event predicates). One SV regression-guard updated: `test_single_region_chart_without_raise_unchanged` (the `_simple_chart` fixture has `event="..."` transitions that now correctly produce recv_* ports — the test was renamed to `_no_egress` and now asserts only the egress side is absent).
+
+**Cited PCDNs**: §6.4 (event ingress wiring); PCDN-C-006 (doc-order priority); INV-S-HDL-C-3 (channel-mediated event consumption); INV-S-HDL-4 (cooperative-only priority-claim).
+
+Status: 🟢 **wave-3-d-3 complete**. With wave-3-d-1 (producer backpressure) + wave-3-d-3 (consumer ingress) + wave-3-c (channel instantiation) + wave-3-a/b (raise emission), the SCXML event-routing pipeline is end-to-end functional for the single-clock-domain case. Wave-3-d-2 (multi-clock-domain `sos_message_channel_async`) + wave-3-e (payload data) remain deferred.

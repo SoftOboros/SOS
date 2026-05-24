@@ -1124,6 +1124,36 @@ def _collect_region_raise_events(region: HdlRegion) -> list[str]:
     return sorted(seen)
 
 
+def _collect_region_consume_events(region: HdlRegion) -> list[str]:
+    """Return the sorted, de-duplicated list of event names this
+    region's transitions CONSUME via ``event="..."`` attributes.
+
+    SOS-08-C wave-3-d-3 (2026-05-24 §15): each unique consume-event
+    name becomes a ``(event_<name>_recv_valid, event_<name>_recv_ready)``
+    port pair on the per-region FSM per §6.4. The chart-top wrapper
+    fans the channel's ``m_axis_tvalid`` to every consuming region's
+    ``_recv_valid`` input + OR-aggregates the consuming regions'
+    ``_recv_ready`` outputs into the channel's ``m_axis_tready`` input.
+
+    Transitions with ``event="..."`` attributes are gated on
+    ``event_<name>_recv_valid`` in the case-arm — until now (wave-1
+    through wave-3-d-1) the ``event`` attribute was captured but
+    UNUSED at emission time, so transitions fired combinationally on
+    state + guard regardless of whether the chart-side event had
+    actually been raised. Wave-3-d-3 is the load-bearing §6.4 fix
+    closing that gap.
+
+    Ordering is sorted-alphabetical for deterministic emission per
+    INV-S-HDL-C-1.
+    """
+    seen: set[str] = set()
+    for state in region.states:
+        for tr in state.transitions:
+            if tr.event:
+                seen.add(tr.event)
+    return sorted(seen)
+
+
 def _safe_event_ident(name: str) -> str:
     """Sanitise an SCXML event name for use in a Verilog identifier.
 
@@ -1140,17 +1170,18 @@ def _emit_module_header(
     datamodel_signals: list[_DatamodelSignal],
     n_states: int,
     raise_events: list[str] | None = None,
+    consume_events: list[str] | None = None,
 ) -> str:
     """Emit the SV module port list for a region FSM.
 
-    SOS-08-C wave-3 events (2026-05-23 §15): when ``raise_events`` is
-    non-empty, emits one ``output wire event_<name>_send_valid`` per
-    raise-event name. The port is driven combinationally for one
-    clock cycle when a transition with the matching ``<raise>``
-    fires; the chart-top wrapper (wave-3-b) routes the pulse into
-    the global ``sos_message_channel`` send face for that event.
+    SOS-08-C wave-3 events: per raise-event AND per consume-event,
+    emits the matching port quad — `(_send_valid, _send_ready)` for
+    raise (egress) and `(_recv_valid, _recv_ready)` for consume
+    (ingress). Both quads share the trailing-comment annotation
+    discipline.
     """
     raise_events = raise_events or []
+    consume_events = consume_events or []
     port_lines: list[str] = []
     port_lines.append("input  wire clk")
     port_lines.append("input  wire rst")
@@ -1165,23 +1196,31 @@ def _emit_module_header(
         f"output wire [{n_states - 1}:0] current_state"
     )
     # Wave-3 events: per raise-event, emit a (_send_valid, _send_ready)
-    # port pair.
+    # port pair. Per consume-event (wave-3-d-3), emit a
+    # (_recv_valid, _recv_ready) port pair.
     #
-    #   - `event_<name>_send_valid` (output) — wave-3-a; the
-    #     combinational pulse driven from the transition-firing
-    #     predicate.
-    #   - `event_<name>_send_ready` (input) — wave-3-d; backpressure
+    #   - `event_<name>_send_valid` (output) — wave-3-a; combinational
+    #     pulse driven from the raise-transition-firing predicate.
+    #   - `event_<name>_send_ready` (input) — wave-3-d-1; backpressure
     #     surface from the chart-top channel's `s_axis_tready`. The
     #     transition mux gates state-advance on this so the FSM holds
     #     in the source state when the channel is full (cooperative
     #     INV-S-HDL-4: priority-claim is preserved across backpressure
     #     stalls; lower-priority transitions MUST NOT take over).
+    #   - `event_<name>_recv_valid` (input) — wave-3-d-3; the chart-top
+    #     channel's `m_axis_tvalid` fanned out to this region. The
+    #     transition mux gates `event="..."`-bearing transitions on
+    #     `_recv_valid` so the FSM advances only when the chart-side
+    #     event has been raised.
+    #   - `event_<name>_recv_ready` (output) — wave-3-d-3; the
+    #     combinational predicate "I'm in a state with a non-elided
+    #     transition consuming this event". OR-aggregated with other
+    #     consumers' readies at the chart-top to drive the channel's
+    #     `m_axis_tready`.
     #
     # The trailing-comment form puts the chart-event-name annotation on
     # a separate line from the port declaration so the comma-suffix
-    # logic doesn't end up inside the comment. Each event contributes
-    # TWO annotation lines (one per port) to keep the pairing visible
-    # in the emitted text.
+    # logic doesn't end up inside the comment.
     egress_annotations: list[str] = []
     for ev in raise_events:
         ev_ident = _safe_event_ident(ev)
@@ -1191,14 +1230,24 @@ def _emit_module_header(
         egress_annotations.append(
             f"        // chart event `{ev}` (wave-3-d backpressure)"
         )
+    for ev in consume_events:
+        ev_ident = _safe_event_ident(ev)
+        port_lines.append(f"input  wire event_{ev_ident}_recv_valid")
+        egress_annotations.append(
+            f"        // chart event `{ev}` (wave-3-d-3 ingress)"
+        )
+        port_lines.append(f"output wire event_{ev_ident}_recv_ready")
+        egress_annotations.append(
+            f"        // chart event `{ev}` (wave-3-d-3 consume-ready)"
+        )
 
     lines: list[str] = []
     lines.append(f"module {module_name} (")
     # Track which port declarations have a trailing-comment annotation
-    # so the comma lands BEFORE the comment, not at end-of-line. Each
-    # raise event contributes 2 ports (valid+ready), so the egress span
-    # is 2 × len(raise_events).
-    n_egress_ports = 2 * len(raise_events)
+    # so the comma lands BEFORE the comment, not at end-of-line. Raise
+    # events contribute 2 ports each; consume events contribute 2
+    # ports each.
+    n_egress_ports = 2 * len(raise_events) + 2 * len(consume_events)
     n_pre_egress = len(port_lines) - n_egress_ports
     egress_idx = 0
     for i, pl in enumerate(port_lines):
@@ -1269,12 +1318,39 @@ def _emit_transition_case_arm(
         chain cuts there per first-match-wins semantics.
       * If no unguarded transition is present, the chain ends with
         `else state_next = state_q;` (hold-state default).
+
+    Wave-3-d-3 (2026-05-24 §15) — event ingress refactor: a transition
+    with ``event="..."`` is no longer treated as "unguarded" — the
+    event-validity (``event_<name>_recv_valid``) is part of its
+    predicate. Combined gating shapes:
+      - ``event="X" cond="Y"``  → ``event_X_recv_valid && Y``
+      - ``event="X"`` no cond   → ``event_X_recv_valid``
+      - no event ``cond="Y"``   → ``Y``
+      - no event no cond        → unguarded (final else arm)
+    Only the last shape ends the priority chain. Prior shapes form
+    ``if/else if`` arms preserving PCDN-C-006 doc-order priority.
     """
     cname = _state_constant_name(state.state_id)
     if not state.transitions:
         return [f"            {cname}: state_next = {cname};"]
 
+    def _predicate(tr: HdlTransition) -> str | None:
+        """Combined SV-Boolean for `tr`. Returns None for the truly
+        unguarded shape (no event, no cond) — the caller treats those
+        as the final else arm."""
+        parts: list[str] = []
+        if tr.event:
+            ev_ident = _safe_event_ident(tr.event)
+            parts.append(f"event_{ev_ident}_recv_valid")
+        if tr.cond:
+            parts.append(f"({_compile_guard_expr(tr.cond, depth_budget)})")
+        if not parts:
+            return None
+        return " && ".join(parts)
+
     # Split: guarded prefix (any number) → first unguarded → tail.
+    # Wave-3-d-3: "guarded" now includes any transition with a
+    # non-None predicate (event OR cond OR both).
     guarded: list[HdlTransition] = []
     unguarded: HdlTransition | None = None
     dead_tail: list[HdlTransition] = []
@@ -1282,7 +1358,7 @@ def _emit_transition_case_arm(
         if unguarded is not None:
             dead_tail.append(tr)
             continue
-        if tr.cond:
+        if _predicate(tr) is not None:
             guarded.append(tr)
         else:
             unguarded = tr
@@ -1290,7 +1366,7 @@ def _emit_transition_case_arm(
     def _advance(tr: HdlTransition) -> str:
         """Render the state-advance statement for transition `tr`.
 
-        SOS-08-C wave-3-d (2026-05-24 §15): if `tr` carries
+        SOS-08-C wave-3-d-1 (2026-05-24 §15): if `tr` carries
         `<raise event="..."/>` elements, wrap the advance in a
         send-ready gate. When any of the channels the transition
         publishes to is not ready, the FSM HOLDS in the source state
@@ -1318,8 +1394,9 @@ def _emit_transition_case_arm(
 
     lines: list[str] = [f"            {cname}: begin"]
     if not guarded:
-        # No guards — fast path matches wave-1 emission shape, plus
-        # wave-3-d send_ready wrap when unguarded transition raises.
+        # No guards (no event + no cond) — fast path matches wave-1
+        # emission shape, plus wave-3-d-1 send_ready wrap when
+        # unguarded transition raises.
         if unguarded is not None:
             lines.append(
                 f"                {_advance(unguarded)}"
@@ -1329,11 +1406,11 @@ def _emit_transition_case_arm(
     else:
         first = True
         for tr in guarded:
-            guard_sv = _compile_guard_expr(tr.cond or "", depth_budget)
+            pred = _predicate(tr)
             kw = "if" if first else "else if"
             first = False
             lines.append(
-                f"                {kw} ({guard_sv}) {_advance(tr)}"
+                f"                {kw} ({pred}) {_advance(tr)}"
             )
         if unguarded is not None:
             lines.append(
@@ -1418,6 +1495,83 @@ def _emit_output_drives(
     return "\n".join(lines)
 
 
+def _transition_fire_predicate_terms(
+    state: HdlState,
+    tr: HdlTransition,
+    depth_budget: int,
+    *,
+    include_state_match: bool,
+    include_own_event: bool,
+) -> list[str]:
+    """Build the AND-terms of ``tr``'s firing predicate within ``state``.
+
+    Returns a list of SV-Boolean terms ready to join with ``&&``.
+
+    Wave-3-d-3: a transition's predicate is the conjunction of:
+      - ``state_q == <source>`` (optional via ``include_state_match``;
+        omitted when the caller already gates the entire expression on
+        state match);
+      - for every higher-priority transition in document order,
+        ``!(higher full predicate)`` — higher's event-recv-valid (if
+        consumed) AND higher's cond (if present);
+      - the own ``event_<name>_recv_valid`` term (optional via
+        ``include_own_event``; the consume-side recv_ready drive
+        OMITS this term to avoid asserting consume-ready in response
+        to the channel's own data offer);
+      - the own ``cond`` term (always included if present).
+    """
+    out: list[str] = []
+    if include_state_match:
+        cname = _state_constant_name(state.state_id)
+        out.append(f"state_q == {cname}")
+    # Higher-priority transitions must not actually fire this cycle.
+    for higher in state.transitions:
+        if higher is tr:
+            break
+        higher_parts: list[str] = []
+        if higher.event:
+            higher_parts.append(
+                f"event_{_safe_event_ident(higher.event)}_recv_valid"
+            )
+        if higher.cond:
+            higher_parts.append(
+                f"({_compile_guard_expr(higher.cond, depth_budget)})"
+            )
+        if higher_parts:
+            higher_pred = " && ".join(higher_parts)
+            out.append(f"!({higher_pred})")
+        # Truly-unguarded (no event, no cond) higher — would always
+        # fire — but we'd never reach `tr` past it, so the document-
+        # order walker stops before adding `tr` to the chain.
+    # Own predicate components.
+    if include_own_event and tr.event:
+        out.append(
+            f"event_{_safe_event_ident(tr.event)}_recv_valid"
+        )
+    if tr.cond:
+        out.append(f"({_compile_guard_expr(tr.cond, depth_budget)})")
+    return out
+
+
+def _walk_state_for_event(
+    state: HdlState,
+    matches: callable,
+) -> list[HdlTransition]:
+    """Walk state's transitions in document order, returning the list
+    of transitions where ``matches(tr)`` is True, stopping at the first
+    truly-unguarded transition (no event, no cond) — those end the
+    priority chain per PCDN-C-006.
+    """
+    out: list[HdlTransition] = []
+    for tr in state.transitions:
+        if matches(tr):
+            out.append(tr)
+        if not tr.event and not tr.cond:
+            # Chain-ender — subsequent transitions are dead.
+            break
+    return out
+
+
 def _emit_event_egress_drives(
     region: HdlRegion,
     raise_events: list[str],
@@ -1430,17 +1584,21 @@ def _emit_event_egress_drives(
     for one clock cycle when ANY transition with `<raise event="<name>"/>`
     in this region fires. "Fires" is defined as: the current state
     register holds the transition's source state AND the transition's
-    guard (if any) evaluates true AND no preceding higher-priority
-    transition with the same source state has already taken
-    precedence per PCDN-C-006 document-order.
+    full firing predicate (event_recv_valid if consuming + cond if
+    present) evaluates true AND no preceding higher-priority
+    transition has fired per PCDN-C-006 document-order.
 
-    Wave-3-a emits the per-region drive only; the chart-top wrapper
-    (wave-3-b) collects the per-region pulses into the global
-    `sos_message_channel` send face for the named event.
+    Wave-3-d-3: the firing predicate now includes the transition's
+    own ``event_<name>_recv_valid`` term when the transition has an
+    ``event="..."`` attribute. Without that, the egress would pulse
+    even when the chart-side event hasn't arrived — breaking the
+    semantics §6.4 establishes.
 
-    Pure combinational: depends only on `state_q` + the same guard
-    expressions the transition mux already evaluates. Safe to drive
-    alongside `state_next`.
+    Pure combinational: depends only on `state_q` + guard expressions +
+    `event_<name>_recv_valid` inputs. Safe to drive alongside
+    `state_next`. No combinational loop through the channel because
+    `m_axis_tvalid` (the channel's source for ``_recv_valid``) is
+    derived from a registered FIFO empty flag.
     """
     if not raise_events:
         return ""
@@ -1449,41 +1607,18 @@ def _emit_event_egress_drives(
         ev_ident = _safe_event_ident(ev)
         terms: list[str] = []
         for state in region.states:
-            cname = _state_constant_name(state.state_id)
-            # Walk the state's transitions in document order tracking
-            # priority — only transitions BEFORE the first unguarded
-            # one can fire (the unguarded transition itself fires when
-            # no preceding guard matches, so it counts too).
-            seen_unguarded = False
-            for tr in state.transitions:
-                if seen_unguarded:
-                    # PCDN-C-006: transitions after an unguarded one
-                    # are dead per document-order priority.
-                    break
-                if ev not in tr.raise_events:
-                    if not tr.cond:
-                        seen_unguarded = True
-                    continue
-                # This transition raises `ev`. Build its firing
-                # predicate: state matches AND no higher-priority
-                # transition out of this state has already won.
-                preds: list[str] = [f"state_q == {cname}"]
-                # Higher-priority guarded transitions out of the same
-                # state must NOT match (otherwise THEY fire, not us).
-                for higher in state.transitions:
-                    if higher is tr:
-                        break
-                    if higher.cond:
-                        higher_guard = _compile_guard_expr(
-                            higher.cond, depth_budget
-                        )
-                        preds.append(f"!({higher_guard})")
-                if tr.cond:
-                    own_guard = _compile_guard_expr(tr.cond, depth_budget)
-                    preds.append(f"({own_guard})")
+            # Walk state's transitions stopping at chain-ender; collect
+            # those that raise `ev`.
+            for tr in _walk_state_for_event(
+                state,
+                lambda t, ev=ev: ev in t.raise_events,
+            ):
+                preds = _transition_fire_predicate_terms(
+                    state, tr, depth_budget,
+                    include_state_match=True,
+                    include_own_event=True,
+                )
                 terms.append("(" + " && ".join(preds) + ")")
-                if not tr.cond:
-                    seen_unguarded = True
         if terms:
             rhs = " || ".join(terms)
         else:
@@ -1491,6 +1626,66 @@ def _emit_event_egress_drives(
         lines.append(
             f"    assign event_{ev_ident}_send_valid = {rhs};"
             f"  // chart event `{ev}`"
+        )
+    return "\n".join(lines)
+
+
+def _emit_event_ingress_recv_ready_drives(
+    region: HdlRegion,
+    consume_events: list[str],
+    depth_budget: int,
+) -> str:
+    """Combinational drives for ``event_<name>_recv_ready`` ingress ports.
+
+    SOS-08-C wave-3-d-3 (2026-05-24 §15 / §6.4): for each unique
+    consume-event name, assert the corresponding `_recv_ready` output
+    when this region is in a state with a non-elided transition that
+    would consume the event THIS cycle IF the event were offered. The
+    chart-top wrapper OR-aggregates ``_recv_ready`` across all
+    consuming regions (and the external observer's boundary
+    ``event_<name>_recv_ready`` input) into the channel's
+    ``m_axis_tready``.
+
+    Critically, ``_recv_ready`` does NOT include the event's own
+    ``_recv_valid`` term in its predicate. Doing so would create a
+    combinational dependency through the channel (recv_ready →
+    m_axis_tready → channel pop → m_axis_tvalid → recv_valid →
+    recv_ready). The channel's tvalid is derived from a registered
+    FIFO empty flag, so a small dependency is safe in practice, but
+    omitting the self-event term keeps the recv_ready predicate
+    state-local and easier to reason about: "I'm ready to consume X
+    NOW if you offer it" is independent of "you ARE offering X".
+
+    Higher-priority transitions' predicates DO include their full
+    firing condition (event_recv_valid + cond) — if a higher-priority
+    transition would actually fire this cycle, recv_ready for THIS
+    transition is suppressed so the channel doesn't pop data that
+    nobody consumes.
+    """
+    if not consume_events:
+        return ""
+    lines: list[str] = []
+    for ev in consume_events:
+        ev_ident = _safe_event_ident(ev)
+        terms: list[str] = []
+        for state in region.states:
+            for tr in _walk_state_for_event(
+                state,
+                lambda t, ev=ev: t.event == ev,
+            ):
+                preds = _transition_fire_predicate_terms(
+                    state, tr, depth_budget,
+                    include_state_match=True,
+                    include_own_event=False,
+                )
+                terms.append("(" + " && ".join(preds) + ")")
+        if terms:
+            rhs = " || ".join(terms)
+        else:
+            rhs = "1'b0"
+        lines.append(
+            f"    assign event_{ev_ident}_recv_ready = {rhs};"
+            f"  // chart event `{ev}` (wave-3-d-3 consume-ready)"
         )
     return "\n".join(lines)
 
@@ -1514,10 +1709,12 @@ def _render_region_module(
     datamodel_signals = [_infer_datamodel_signal(d) for d in region.datamodel]
 
     raise_events = _collect_region_raise_events(region)
+    consume_events = _collect_region_consume_events(region)
 
     header = _emit_header(chart_name, kind=f"region-fsm:{region.name}")
     module_header = _emit_module_header(
-        module_name, datamodel_signals, n_states, raise_events
+        module_name, datamodel_signals, n_states,
+        raise_events, consume_events,
     )
     state_constants = _emit_state_constants(region)
     register_decls = _emit_register_decls(region, datamodel_signals, n_states)
@@ -1537,6 +1734,18 @@ def _render_region_module(
         f"\n    // ----- event egress (SOS-08-C §6.5 wave-3) -----\n"
         f"{egress_drives}\n"
         if raise_events
+        else ""
+    )
+    # SOS-08-C wave-3-d-3 (2026-05-24 §15 / §6.4): combinational
+    # `event_<name>_recv_ready` drives — assert when this region is in
+    # a state with a non-elided transition consuming the event.
+    ingress_drives = _emit_event_ingress_recv_ready_drives(
+        region, consume_events, depth_budget
+    )
+    ingress_block = (
+        f"\n    // ----- event ingress (SOS-08-C §6.4 wave-3-d-3) -----\n"
+        f"{ingress_drives}\n"
+        if consume_events
         else ""
     )
 
@@ -1562,6 +1771,7 @@ def _render_region_module(
         f"    // ----- output assigns -----\n"
         f"{output_drives}\n"
         f"{egress_block}"
+        f"{ingress_block}"
         f"\n"
         f"endmodule\n"
         f"\n"
@@ -1753,7 +1963,13 @@ def _build_region_modules_canonical(
         # surfaced into the chart-top wrapper's region_modules entry so
         # the wrapper exposes `event_<region>_<name>_send_valid` per
         # boundary port.
+        # SOS-08-C wave-3-d-3 (2026-05-24 §15): per-region consume
+        # events surfaced so the wrapper fans out the channel's
+        # `m_axis_tvalid` to each consuming region + OR-aggregates the
+        # consumers' `_recv_ready` outputs into the channel's
+        # `m_axis_tready`.
         raise_events_list = _collect_region_raise_events(region)
+        consume_events_list = _collect_region_consume_events(region)
         region_modules.append(
             {
                 "name": _sanitize_sv_identifier(region.name),
@@ -1762,6 +1978,7 @@ def _build_region_modules_canonical(
                 "datamodel_signals": signals,
                 "state_width": max(1, len(region.states)),
                 "raise_events": raise_events_list,
+                "consume_events": consume_events_list,
             }
         )
     return region_modules

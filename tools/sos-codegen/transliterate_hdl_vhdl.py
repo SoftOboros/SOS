@@ -921,6 +921,22 @@ def _datamodel_signal_lines(
     return decls, resets, ports, widths
 
 
+def _collect_region_consume_events(region: HdlRegion) -> list[str]:
+    """Return the sorted, de-duplicated list of event names this
+    region's transitions CONSUME via ``event="..."`` attributes.
+
+    SOS-08-C wave-3-d-3 (2026-05-24 §15): mirror of the SV walker's
+    function — see ``transliterate_hdl_sv._collect_region_consume_events``
+    for full normative reference.
+    """
+    seen: set[str] = set()
+    for state in region.states:
+        for tr in state.transitions:
+            if tr.event:
+                seen.add(tr.event)
+    return sorted(seen)
+
+
 def _collect_region_raise_events(region: HdlRegion) -> list[str]:
     """Sorted, de-duplicated event names this region raises via <raise>.
 
@@ -960,6 +976,7 @@ def _emit_entity(
     datamodel_ports: list[str],
     n_states: int,
     raise_events: list[str] | None = None,
+    consume_events: list[str] | None = None,
 ) -> str:
     """Emit the VHDL entity port list for a region FSM module.
 
@@ -968,6 +985,7 @@ def _emit_entity(
     per unique raise-event name per §6.5.
     """
     raise_events = raise_events or []
+    consume_events = consume_events or []
     entity_id = _entity_name(chart_name, region.name)
     lines: list[str] = []
     lines.append(f"entity {entity_id} is")
@@ -1040,7 +1058,39 @@ def _emit_entity(
         egress_annotations.append(
             f"        -- chart event `{ev}` (wave-3-d backpressure)"
         )
-    n_egress_ports = 2 * len(raise_events)
+    # Wave-3-d-3 ingress: per consume-event, emit (_recv_valid in,
+    # _recv_ready out) port pair.
+    for ev in consume_events:
+        ev_ident = _safe_event_ident_vhdl(ev)
+        port_lines.append(
+            emit_port_decl(
+                HdlPort(
+                    name=f"event_{ev_ident}_recv_valid",
+                    direction="in",
+                    width=1,
+                    width_expr="std_logic",
+                ),
+                dialect=Dialect.VHDL,
+            )
+        )
+        egress_annotations.append(
+            f"        -- chart event `{ev}` (wave-3-d-3 ingress)"
+        )
+        port_lines.append(
+            emit_port_decl(
+                HdlPort(
+                    name=f"event_{ev_ident}_recv_ready",
+                    direction="out",
+                    width=1,
+                    width_expr="std_logic",
+                ),
+                dialect=Dialect.VHDL,
+            )
+        )
+        egress_annotations.append(
+            f"        -- chart event `{ev}` (wave-3-d-3 consume-ready)"
+        )
+    n_egress_ports = 2 * len(raise_events) + 2 * len(consume_events)
     n_pre_egress = len(port_lines) - n_egress_ports
     egress_idx = 0
     for i, pl in enumerate(port_lines):
@@ -1098,10 +1148,26 @@ def _emit_transition_case_arm(
     if not state.transitions:
         return f"            state_next <= state_q;"
 
+    def _predicate(t: HdlTransition) -> str | None:
+        """Combined VHDL-Boolean for `t`. Returns None for the truly
+        unguarded shape (no event, no cond)."""
+        parts: list[str] = []
+        if t.event:
+            ev_ident = _safe_event_ident_vhdl(t.event)
+            parts.append(f"event_{ev_ident}_recv_valid = '1'")
+        if t.cond:
+            parts.append(
+                _compile_guard(t.cond, depth_budget=depth_budget,
+                               source_state=t.source)
+            )
+        if not parts:
+            return None
+        return " and ".join(parts)
+
     def _advance_lines(t: HdlTransition, indent: str) -> list[str]:
         """Emit the state-advance lines for transition `t`.
 
-        SOS-08-C wave-3-d (2026-05-24 §15): if `t` carries
+        SOS-08-C wave-3-d-1 (2026-05-24 §15): if `t` carries
         `<raise event="..."/>` elements, wrap the advance in a
         send-ready gate. When any of the channels the transition
         publishes to is not ready, the FSM HOLDS in source
@@ -1126,10 +1192,11 @@ def _emit_transition_case_arm(
             f"{indent}end if;",
         ]
 
-    # Partition into a doc-ordered list; identify whether any have
-    # `cond` set.
-    has_any_guard = any(t.cond for t in state.transitions)
-    if not has_any_guard:
+    # Wave-3-d-3: a transition is "predicated" if it has event OR cond.
+    # Only transitions with neither end the priority chain (final else
+    # branch). All predicated transitions form if/elsif arms.
+    has_any_predicate = any(_predicate(t) is not None for t in state.transitions)
+    if not has_any_predicate:
         chosen = state.transitions[0]
         lines: list[str] = _advance_lines(chosen, "            ")
         for extra in state.transitions[1:]:
@@ -1140,23 +1207,22 @@ def _emit_transition_case_arm(
             )
         return "\n".join(lines)
 
-    # Mixed/all-guarded path — emit if/elsif/else chain.
+    # Mixed/all-predicated path — emit if/elsif/else chain.
     lines = []
     first = True
     fallthrough_tr: Optional[HdlTransition] = None
     for t in state.transitions:
-        if t.cond:
-            compiled = _compile_guard(
-                t.cond, depth_budget=depth_budget, source_state=t.source
-            )
+        pred = _predicate(t)
+        if pred is not None:
             kw = "if" if first else "elsif"
             first = False
             lines.append(
-                f"            {kw} {compiled} then  -- doc-order {t.doc_order} → {t.target}"
+                f"            {kw} {pred} then  -- doc-order {t.doc_order} → {t.target}"
             )
             lines.extend(_advance_lines(t, "                "))
         else:
-            # First unguarded after some guards = closing else branch.
+            # First truly-unguarded after predicated = closing else
+            # branch.
             fallthrough_tr = t
             break
 
@@ -1363,7 +1429,11 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
                 # SOS-08-C wave-3-b: surface per-region raise events to
                 # the chart-top wrapper so it exposes
                 # `event_<region>_<name>_send_valid` boundary ports.
+                # Wave-3-d-3: also surface consume events so the wrapper
+                # fans channel m_axis_tvalid out to consuming regions +
+                # OR-aggregates consumers' recv_ready into m_axis_tready.
                 raise_events_list = _collect_region_raise_events(r)
+                consume_events_list = _collect_region_consume_events(r)
                 region_modules.append(
                     {
                         "name": _safe_ident(r.name),
@@ -1372,6 +1442,7 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
                         "datamodel_signals": signals,
                         "state_width": len(r.states),
                         "raise_events": raise_events_list,
+                        "consume_events": consume_events_list,
                     }
                 )
             cross_domain_signals = [
@@ -1582,6 +1653,59 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _transition_fire_predicate_terms_vhdl(
+    state: HdlState,
+    tr: HdlTransition,
+    depth_budget: int,
+    *,
+    include_state_match: bool,
+    include_own_event: bool,
+) -> list[str]:
+    """VHDL mirror of the SV walker's
+    ``_transition_fire_predicate_terms``. See the SV docstring for
+    full normative reference (wave-3-d-3 § §6.4)."""
+    out: list[str] = []
+    if include_state_match:
+        cname = _state_constant_name(state.state_id)
+        out.append(f"(state_q = {cname})")
+    for higher in state.transitions:
+        if higher is tr:
+            break
+        higher_parts: list[str] = []
+        if higher.event:
+            higher_parts.append(
+                f"event_{_safe_event_ident_vhdl(higher.event)}_recv_valid = '1'"
+            )
+        if higher.cond:
+            higher_parts.append(
+                f"({_compile_guard(higher.cond, depth_budget, state.state_id)})"
+            )
+        if higher_parts:
+            higher_pred = " and ".join(higher_parts)
+            out.append(f"not ({higher_pred})")
+    if include_own_event and tr.event:
+        out.append(
+            f"event_{_safe_event_ident_vhdl(tr.event)}_recv_valid = '1'"
+        )
+    if tr.cond:
+        out.append(f"({_compile_guard(tr.cond, depth_budget, state.state_id)})")
+    return out
+
+
+def _walk_state_for_event_vhdl(
+    state: HdlState,
+    matches,
+) -> list[HdlTransition]:
+    """VHDL mirror of the SV walker's ``_walk_state_for_event``."""
+    out: list[HdlTransition] = []
+    for tr in state.transitions:
+        if matches(tr):
+            out.append(tr)
+        if not tr.event and not tr.cond:
+            break
+    return out
+
+
 def _emit_event_egress_drives_vhdl(
     region: HdlRegion,
     raise_events: list[str],
@@ -1594,17 +1718,14 @@ def _emit_event_egress_drives_vhdl(
     for one clock cycle when ANY transition with the matching
     `<raise event="<name>"/>` fires. Firing rule (per PCDN-C-006
     document-order priority): the current state register matches the
-    transition's source AND the transition's guard (if any) holds AND
-    no preceding higher-priority transition out of the same source
-    has fired.
+    transition's source AND the transition's full firing predicate
+    (event_recv_valid if consuming + cond if present) holds AND no
+    preceding higher-priority transition out of the same source has
+    fired.
 
-    VHDL syntax mirrors the SV walker's logic — concurrent boolean
-    expression collapsed into a `when … else '0'` form per std_logic
-    convention.
-
-    Wave-3-a emits the per-region drive only; the chart-top wrapper
-    (wave-3-b) collects the per-region pulses into the global
-    `sos_message_channel` send face for each named event.
+    Wave-3-d-3: the firing predicate now includes the transition's
+    own ``event_<name>_recv_valid`` term when ``event="..."`` is
+    present (mirror of the SV walker's wave-3-d-3 fix).
     """
     if not raise_events:
         return ""
@@ -1613,32 +1734,16 @@ def _emit_event_egress_drives_vhdl(
         ev_ident = _safe_event_ident_vhdl(ev)
         terms: list[str] = []
         for state in region.states:
-            cname = _state_constant_name(state.state_id)
-            seen_unguarded = False
-            for tr in state.transitions:
-                if seen_unguarded:
-                    break
-                if ev not in tr.raise_events:
-                    if not tr.cond:
-                        seen_unguarded = True
-                    continue
-                preds: list[str] = [f"(state_q = {cname})"]
-                for higher in state.transitions:
-                    if higher is tr:
-                        break
-                    if higher.cond:
-                        higher_guard = _compile_guard(
-                            higher.cond, depth_budget, state.state_id
-                        )
-                        preds.append(f"not ({higher_guard})")
-                if tr.cond:
-                    own_guard = _compile_guard(
-                        tr.cond, depth_budget, state.state_id
-                    )
-                    preds.append(f"({own_guard})")
+            for tr in _walk_state_for_event_vhdl(
+                state,
+                lambda t, ev=ev: ev in t.raise_events,
+            ):
+                preds = _transition_fire_predicate_terms_vhdl(
+                    state, tr, depth_budget,
+                    include_state_match=True,
+                    include_own_event=True,
+                )
                 terms.append("(" + " and ".join(preds) + ")")
-                if not tr.cond:
-                    seen_unguarded = True
         if terms:
             rhs_bool = " or ".join(terms)
             line = (
@@ -1655,6 +1760,51 @@ def _emit_event_egress_drives_vhdl(
     return "\n".join(lines)
 
 
+def _emit_event_ingress_recv_ready_drives_vhdl(
+    region: HdlRegion,
+    consume_events: list[str],
+    depth_budget: int,
+) -> str:
+    """Concurrent VHDL assigns for `event_<name>_recv_ready` ingress.
+
+    SOS-08-C wave-3-d-3 (2026-05-24 §15 / §6.4): mirror of the SV
+    walker's ``_emit_event_ingress_recv_ready_drives``. See the SV
+    docstring for normative reference. recv_ready does NOT include
+    the event's own recv_valid term in its predicate.
+    """
+    if not consume_events:
+        return ""
+    lines: list[str] = []
+    for ev in consume_events:
+        ev_ident = _safe_event_ident_vhdl(ev)
+        terms: list[str] = []
+        for state in region.states:
+            for tr in _walk_state_for_event_vhdl(
+                state,
+                lambda t, ev=ev: t.event == ev,
+            ):
+                preds = _transition_fire_predicate_terms_vhdl(
+                    state, tr, depth_budget,
+                    include_state_match=True,
+                    include_own_event=False,
+                )
+                terms.append("(" + " and ".join(preds) + ")")
+        if terms:
+            rhs_bool = " or ".join(terms)
+            line = (
+                f"    event_{ev_ident}_recv_ready <= '1' when "
+                f"{rhs_bool} else '0';"
+                f"  -- chart event `{ev}` (wave-3-d-3 consume-ready)"
+            )
+        else:
+            line = (
+                f"    event_{ev_ident}_recv_ready <= '0';"
+                f"  -- chart event `{ev}` (no consuming transition reachable)"
+            )
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _render_region(
     region: HdlRegion,
     chart_name: str,
@@ -1666,8 +1816,10 @@ def _render_region(
     dm_decls, dm_resets, dm_ports, _widths = _datamodel_signal_lines(region.datamodel)
     n_states = len(region.states)
     raise_events = _collect_region_raise_events(region)
+    consume_events = _collect_region_consume_events(region)
     entity_block = _emit_entity(
-        region, chart_name, dm_ports, n_states, raise_events
+        region, chart_name, dm_ports, n_states,
+        raise_events, consume_events,
     )
     state_constants = _emit_state_constants(region)
     register_process = _emit_register_process(region, dm_resets)
@@ -1720,6 +1872,9 @@ def _render_region(
     egress_block = _emit_event_egress_drives_vhdl(
         region, raise_events, depth_budget
     )
+    ingress_block = _emit_event_ingress_recv_ready_drives_vhdl(
+        region, consume_events, depth_budget
+    )
     architecture = (
         f"architecture rtl of {entity_id} is\n"
         f"{arch_decls_block}\n"
@@ -1732,6 +1887,12 @@ def _render_region(
             f"\n    -- ----- event egress (SOS-08-C §6.5 wave-3) -----\n"
             f"{egress_block}\n"
             if egress_block
+            else ""
+        )
+        + (
+            f"\n    -- ----- event ingress (SOS-08-C §6.4 wave-3-d-3) -----\n"
+            f"{ingress_block}\n"
+            if ingress_block
             else ""
         )
         + f"end architecture rtl;\n"

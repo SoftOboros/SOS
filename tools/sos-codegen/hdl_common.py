@@ -1832,12 +1832,22 @@ def _emit_chart_top_wrapper_new(
     # backpressure, land in wave-3-d / -3-e per the wave-3-a roadmap.
     chart_event_set: list[str] = []
     chart_event_producers: dict[str, list[str]] = {}
+    chart_event_consumers: dict[str, list[str]] = {}
     for rm in region_modules:
         for ev in rm.get("raise_events", []) or []:
             if ev not in chart_event_producers:
-                chart_event_set.append(ev)
+                if ev not in chart_event_set:
+                    chart_event_set.append(ev)
                 chart_event_producers[ev] = []
             chart_event_producers[ev].append(rm["name"])
+        # SOS-08-C wave-3-d-3 (2026-05-24 §15): collect per-region
+        # consume events for chart-top fanout + recv_ready aggregation.
+        for ev in rm.get("consume_events", []) or []:
+            if ev not in chart_event_consumers:
+                if ev not in chart_event_set:
+                    chart_event_set.append(ev)
+                chart_event_consumers[ev] = []
+            chart_event_consumers[ev].append(rm["name"])
     for ev in chart_event_set:
         ev_ident = _safe_event_ident_top(ev)
         boundary_ports.append(
@@ -1863,6 +1873,7 @@ def _emit_chart_top_wrapper_new(
             _wrapper_port_name,
             chart_event_set=chart_event_set,
             chart_event_producers=chart_event_producers,
+            chart_event_consumers=chart_event_consumers,
         )
     return _emit_chart_top_wrapper_sv_new(
         top_name, boundary_ports, region_modules,
@@ -1870,6 +1881,7 @@ def _emit_chart_top_wrapper_new(
         _wrapper_port_name,
         chart_event_set=chart_event_set,
         chart_event_producers=chart_event_producers,
+        chart_event_consumers=chart_event_consumers,
     )
 
 
@@ -1939,9 +1951,11 @@ def _emit_chart_top_wrapper_vhdl_new(
     wrapper_port_name,
     chart_event_set: list[str] | None = None,
     chart_event_producers: dict[str, list[str]] | None = None,
+    chart_event_consumers: dict[str, list[str]] | None = None,
 ) -> str:
     """VHDL realisation of the new wave-2 wrapper shape
     (`PCDN-SOS-08-C-wave2-wrapper-shape`)."""
+    chart_event_consumers = chart_event_consumers or {}
     lines: list[str] = []
     # Header comment per SOS-08-C §6.10 + §15 wave-2 ratification.
     lines.append(
@@ -2039,6 +2053,18 @@ def _emit_chart_top_wrapper_vhdl_new(
                 f"event_{ev_ident}_send_ready => "
                 f"ev_{ev_ident}_send_ready"
             )
+        # SOS-08-C wave-3-d-3: consume-event ingress fanout +
+        # per-consumer recv_ready wire.
+        for ev in rm.get("consume_events", []) or []:
+            ev_ident = _safe_event_ident_top(ev)
+            port_lines.append(
+                f"event_{ev_ident}_recv_valid => "
+                f"ev_{ev_ident}_recv_valid_w"
+            )
+            port_lines.append(
+                f"event_{ev_ident}_recv_ready => "
+                f"w_ev_{rm['name']}_{ev_ident}_ready"
+            )
         for j, pl in enumerate(port_lines):
             suffix = "," if j < len(port_lines) - 1 else ""
             lines.append(f"            {pl}{suffix}")
@@ -2054,6 +2080,7 @@ def _emit_chart_top_wrapper_vhdl_new(
         for idx, ev in enumerate(sorted(chart_event_set)):
             ev_ident = _safe_event_ident_top(ev)
             producers = chart_event_producers.get(ev, [])
+            consumers = chart_event_consumers.get(ev, [])
             agg_terms = " or ".join(
                 f"w_ev_{r}_{ev_ident}_pulse" for r in producers
             ) or "'0'"
@@ -2061,9 +2088,25 @@ def _emit_chart_top_wrapper_vhdl_new(
                 f"    ev_{ev_ident}_send_valid <= {agg_terms};"
                 f"  -- chart event `{ev}`"
             )
+            # Wave-3-d-3: recv_valid_w drives boundary observer port.
+            lines.append(
+                f"    event_{ev_ident}_recv_valid <= "
+                f"ev_{ev_ident}_recv_valid_w;"
+                f"  -- chart event `{ev}` boundary observer"
+            )
+            ready_terms = [f"event_{ev_ident}_recv_ready"] + [
+                f"w_ev_{r}_{ev_ident}_ready" for r in consumers
+            ]
+            lines.append(
+                f"    ev_{ev_ident}_recv_ready_w <= "
+                f"{' or '.join(ready_terms)};"
+                f"  -- chart event `{ev}` recv_ready aggregate"
+            )
             first_dom = clock_order[0] if clock_order else "main"
             if producers and producers[0] in region_index:
                 first_dom = region_index[producers[0]]["clock_domain"]
+            elif consumers and consumers[0] in region_index:
+                first_dom = region_index[consumers[0]]["clock_domain"]
             lines.append(
                 f"    u_chan_{ev_ident} : entity work.sos_message_channel\n"
                 f"        generic map (\n"
@@ -2084,8 +2127,8 @@ def _emit_chart_top_wrapper_vhdl_new(
                 f"            m_axis_tdata     => open,\n"
                 f"            m_axis_tevent_id => open,\n"
                 f"            m_axis_tpayload  => open,\n"
-                f"            m_axis_tvalid    => event_{ev_ident}_recv_valid,\n"
-                f"            m_axis_tready    => event_{ev_ident}_recv_ready,\n"
+                f"            m_axis_tvalid    => ev_{ev_ident}_recv_valid_w,\n"
+                f"            m_axis_tready    => ev_{ev_ident}_recv_ready_w,\n"
                 f"            full             => open,\n"
                 f"            empty            => open,\n"
                 f"            count            => open\n"
@@ -2120,6 +2163,18 @@ def _emit_chart_top_wrapper_vhdl_new(
             decl_block.append(
                 f"    signal ev_{ev_ident}_send_ready : std_logic;"
             )
+            # SOS-08-C wave-3-d-3: per-consumer recv_ready signals +
+            # per-event recv_valid fanout + aggregated recv_ready.
+            for region_name in chart_event_consumers.get(ev, []):
+                decl_block.append(
+                    f"    signal w_ev_{region_name}_{ev_ident}_ready : std_logic;"
+                )
+            decl_block.append(
+                f"    signal ev_{ev_ident}_recv_valid_w : std_logic;"
+            )
+            decl_block.append(
+                f"    signal ev_{ev_ident}_recv_ready_w : std_logic;"
+            )
         decl_text = "\n".join(decl_block)
         # Locate the architecture-decl marker (the line right after the
         # `architecture rtl of <top_name> is` line) and inject.
@@ -2140,6 +2195,7 @@ def _emit_chart_top_wrapper_sv_new(
     wrapper_port_name,
     chart_event_set: list[str] | None = None,
     chart_event_producers: dict[str, list[str]] | None = None,
+    chart_event_consumers: dict[str, list[str]] | None = None,
 ) -> str:
     """SystemVerilog realisation of the new wave-2 wrapper shape
     (`PCDN-SOS-08-C-wave2-wrapper-shape`).
@@ -2154,6 +2210,7 @@ def _emit_chart_top_wrapper_sv_new(
     """
     chart_event_set = chart_event_set or []
     chart_event_producers = chart_event_producers or {}
+    chart_event_consumers = chart_event_consumers or {}
     lines: list[str] = []
     lines.append(
         "// SOS-08-C §6.10 chart-top wrapper "
@@ -2243,6 +2300,20 @@ def _emit_chart_top_wrapper_sv_new(
                 f".event_{ev_ident}_send_ready"
                 f"(ev_{ev_ident}_send_ready)"
             )
+        # SOS-08-C wave-3-d-3: connect per-consumed-event ingress.
+        # `_recv_valid` is fanout of channel's m_axis_tvalid (shared
+        # broadcast); `_recv_ready` is per-consumer wire OR-aggregated
+        # into channel's m_axis_tready below.
+        for ev in rm.get("consume_events", []) or []:
+            ev_ident = _safe_event_ident_top(ev)
+            port_lines.append(
+                f".event_{ev_ident}_recv_valid"
+                f"(ev_{ev_ident}_recv_valid_w)"
+            )
+            port_lines.append(
+                f".event_{ev_ident}_recv_ready"
+                f"(w_ev_{rm['name']}_{ev_ident}_ready)"
+            )
         for j, pl in enumerate(port_lines):
             suffix = "," if j < len(port_lines) - 1 else ""
             lines.append(f"        {pl}{suffix}")
@@ -2276,17 +2347,60 @@ def _emit_chart_top_wrapper_sv_new(
                 f"    wire ev_{ev_ident}_send_ready;"
                 f"  // chart event `{ev}` (wave-3-d backpressure)"
             )
+        # SOS-08-C wave-3-d-3: per-consumer recv_ready wires (declared
+        # once per (region, event) consume edge), per-event
+        # recv_valid_w fanout wires, and per-event aggregated
+        # recv_ready_w into the channel's m_axis_tready.
+        consumer_wires_emitted: set[str] = set()
+        for ev in sorted(chart_event_set):
+            ev_ident = _safe_event_ident_top(ev)
+            for region_name in chart_event_consumers.get(ev, []):
+                wire_name = f"w_ev_{region_name}_{ev_ident}_ready"
+                if wire_name in consumer_wires_emitted:
+                    continue
+                consumer_wires_emitted.add(wire_name)
+                lines.append(
+                    f"    wire {wire_name};"
+                    f"  // chart event `{ev}` consumer-ready (region `{region_name}`)"
+                )
+            # recv_valid_w: internal fanout wire carrying channel
+            # m_axis_tvalid; assigned to boundary port + region inputs.
+            lines.append(
+                f"    wire ev_{ev_ident}_recv_valid_w;"
+                f"  // chart event `{ev}` recv_valid fanout"
+            )
         # One channel + OR-aggregated valid + hardcoded event_id per
         # unique event. Channel params per SOS-08-B §5 v1 baseline.
         for idx, ev in enumerate(sorted(chart_event_set)):
             ev_ident = _safe_event_ident_top(ev)
             producers = chart_event_producers.get(ev, [])
+            consumers = chart_event_consumers.get(ev, [])
             agg_terms = " | ".join(
                 f"w_ev_{r}_{ev_ident}_pulse" for r in producers
             ) or "1'b0"
             lines.append(
                 f"    wire ev_{ev_ident}_send_valid = {agg_terms};"
                 f"  // chart event `{ev}`"
+            )
+            # SOS-08-C wave-3-d-3: recv_valid_w drives both the
+            # boundary `event_<name>_recv_valid` output AND each
+            # consuming region's `event_<name>_recv_valid` input.
+            lines.append(
+                f"    assign event_{ev_ident}_recv_valid = "
+                f"ev_{ev_ident}_recv_valid_w;"
+                f"  // chart event `{ev}` boundary observer"
+            )
+            # recv_ready_w aggregates the boundary `_recv_ready`
+            # input AND every consuming region's _recv_ready output.
+            # Broadcast under INV-S-HDL-4 cooperative-only — at most
+            # one consumer is ready per cycle in the typical case.
+            ready_terms = [f"event_{ev_ident}_recv_ready"] + [
+                f"w_ev_{r}_{ev_ident}_ready" for r in consumers
+            ]
+            lines.append(
+                f"    wire ev_{ev_ident}_recv_ready_w = "
+                f"{' | '.join(ready_terms)};"
+                f"  // chart event `{ev}` recv_ready aggregate"
             )
             # Choose clock domain: first producer's clock domain.
             # Multi-domain producers requires the async channel
@@ -2296,12 +2410,17 @@ def _emit_chart_top_wrapper_sv_new(
             first_dom = clock_order[0] if clock_order else "main"
             if producers and producers[0] in region_index:
                 first_dom = region_index[producers[0]]["clock_domain"]
+            elif consumers and consumers[0] in region_index:
+                first_dom = region_index[consumers[0]]["clock_domain"]
             lines.append(
                 f"    // SOS-08-C wave-3-c channel for event `{ev}` — "
                 f"event_id={idx}\n"
-                f"    // Wave-3-d: s_axis_tready is now wired to the\n"
-                f"    // per-event `ev_<name>_send_ready` wire that\n"
-                f"    // broadcasts back to each producer region.\n"
+                f"    // Wave-3-d-1: s_axis_tready → ev_<name>_send_ready\n"
+                f"    // (broadcast to producer regions).\n"
+                f"    // Wave-3-d-3: m_axis_tvalid → ev_<name>_recv_valid_w\n"
+                f"    // (fanout to boundary + consumer regions);\n"
+                f"    //              m_axis_tready ← OR of boundary +\n"
+                f"    //              per-consumer recv_ready signals.\n"
                 f"    sos_message_channel #(\n"
                 f"        .EVENT_ID_WIDTH(8),\n"
                 f"        .PAYLOAD_WIDTH(8),\n"
@@ -2319,8 +2438,8 @@ def _emit_chart_top_wrapper_sv_new(
                 f"        .m_axis_tdata(),\n"
                 f"        .m_axis_tevent_id(),\n"
                 f"        .m_axis_tpayload(),\n"
-                f"        .m_axis_tvalid(event_{ev_ident}_recv_valid),\n"
-                f"        .m_axis_tready(event_{ev_ident}_recv_ready),\n"
+                f"        .m_axis_tvalid(ev_{ev_ident}_recv_valid_w),\n"
+                f"        .m_axis_tready(ev_{ev_ident}_recv_ready_w),\n"
                 f"        .full(),\n"
                 f"        .empty(),\n"
                 f"        .count()\n"
