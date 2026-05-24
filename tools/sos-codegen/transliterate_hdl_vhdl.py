@@ -1461,6 +1461,11 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
                 cross_domain_signals=cross_domain_signals,
                 dialect=Dialect.VHDL,
             )
+        except ValueError:
+            # Chart-vocabulary error from the canonical helper — see
+            # SV walker for full rationale. Re-raise so the operator
+            # sees the diagnostic.
+            raise
         except Exception:
             pass  # fall through to inline emission
 

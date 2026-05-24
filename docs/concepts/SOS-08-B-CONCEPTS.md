@@ -666,3 +666,62 @@ Wave-1 implementation of all five L1 services surfaced 17 sub-PCDNs across §6.1
 - **§7 cross-service invariants** extended: any L1 service composing an L0 arbiter primitive inherits the `GRANT_LATENCY_CYCLES` default-1 exception (no new named exception in INV-S-HDL-A-5; the exception flows through composition).
 
 **Status**: 🟢 **ratified (continuing)** — impl wave-1 PCDN amendments fold the 5 L1 service implementation choices into the SOS-08-B normative surface. All 5 L1 services have ratified ports + generics + SVA + composition discipline. The SOS-08-A primitive surface + SOS-08-B service surface together form the complete L0+L1 layered RTL stack ready for SOS-08-C chart→FSM emission to instantiate against.
+
+### 2026-05-24 — §6.5 amendment: ratify async sibling variant (`sos_message_channel_async`)
+
+Wave-1's agent-default ratification #9 deferred the CDC variant to "a future §15 amendment". The SOS-08-C wave-3-d-2 work consuming this amendment promotes the deferred variant to a fully-specified sibling L1 service. Resolves the gap between §6.5 normative interface signature (which prints `clk_tx/rst_tx, clk_rx/rst_rx` per spec sketch from initial ratification) and the wave-1 impl (which composed `sos_fifo_sync` and exposes a single `clk/rst`).
+
+**Resolution shape**: TWO sibling L1 primitives under the `sos_message_channel` family namespace, each with its own RTL + SVA + bind:
+
+| Variant | RTL module | Composition | Use case | Selected when |
+|---|---|---|---|---|
+| **single-clock** (wave-1 baseline) | `sos_message_channel` | one `sos_fifo_sync` | producer + all consumers share one clock | SOS-08-C: producer.clock_domain == consumer.clock_domain ∀ consumers |
+| **async / CDC** (wave-3-d-2) | `sos_message_channel_async` | one `sos_fifo_async` | producer and ≥ 1 consumer in different domains | SOS-08-C: producer.clock_domain ≠ consumer.clock_domain (for any consumer) |
+
+Both variants share:
+- Identical AXI-Stream packed + decomposed sideband convention on each side (slave-side OR-combine; master-side fanout).
+- Identical generics `EVENT_ID_WIDTH`, `PAYLOAD_WIDTH`, `DEPTH`, `READ_LATENCY`, `RESET_MEM`.
+- Identical pack/unpack consistency claim on the master-side via service-level SVA.
+- Inherit the inner FIFO's vendor-IP shim selection (INV-S-HDL-B-4).
+
+**Variant-specific surface** (async-only additions):
+
+- Mandatory: `wr_clk, wr_rst, rd_clk, rd_rst` (replaces `clk, rst`).
+- Generic: `SYNC_STAGES` (default 2 per `sos_fifo_async` precedent; INV-S-HDL-A-5 named exception).
+- Observability: `wr_full, wr_count` (producer domain) + `rd_empty, rd_count` (consumer domain) — replaces the sync variant's unified `full/empty/count` triple.
+
+**SOS-08-C selection contract** (consumed by wave-3-d-2 walker):
+
+- For each chart-wide unique event name, compute the **producer-domain set** (union of producers' `clock_domain`) and the **consumer-domain set** (union of consumers' `clock_domain`).
+- If both sets are singletons AND equal: emit `sos_message_channel` with that clock.
+- If both sets are singletons but unequal: emit `sos_message_channel_async` with `wr_clk` = producer domain, `rd_clk` = consumer domain.
+- If either set has cardinality > 1: NOT SUPPORTED at wave-3-d-2. The walker emits a chart-vocabulary error pointing at the multi-domain producer or consumer. (Future amendment may introduce a fan-in arbiter or multi-channel fanout primitive.)
+
+**Invariants now operational**:
+
+- **INV-S-HDL-3** (cross-domain isolation): was N/A for the wave-1 baseline; OPERATIONAL for `sos_message_channel_async`. The inner `sos_fifo_async`'s gray-coded pointer crossings + SYNC_STAGES-deep flop synchronizers + the documented MTBF analysis at `rtl/sos_fifo_async/MTBF.md` cover the CDC primitive obligation.
+- **INV-S-HDL-B-1** (vocabulary mirror): both variants expose the same chart-side verbs (send / receive). The CDC variant is the FreeRTOS `xStreamBufferSendFromISR` analog when the ISR runs on a different clock from the receiving task (per §5.1 + §6.5 mapping).
+- **INV-S-HDL-B-2** (L0 non-modification): both variants compose their L0 FIFO as a black-box.
+- **INV-S-HDL-B-3** (service-level SVA): each variant ships its own SVA module + bind file (`sos_message_channel_sva.sv` for sync; `sos_message_channel_async_sva.sv` for CDC).
+- **INV-S-HDL-B-4** (vendor-IP pass-through): CDC variant pass-through is `xpm_fifo_async` (Xilinx) per the same shim mechanism.
+
+**SVA layering for the async variant**:
+
+The async SVA module splits properties across the two clock domains:
+- Slave-side properties (`tvalid_stable`, `tevent_id_stable`, `tpayload_stable`, `no_send_when_full`) clock on `wr_clk`, disable on `wr_rst`.
+- Master-side properties (`master_pack_consistency`, FWFT-mode `tevent_id_stable` / `tpayload_stable`) clock on `rd_clk`, disable on `rd_rst`.
+- Reset-clears properties split per-domain (`wr_reset_clears_count`, `wr_reset_clears_full`, `rd_reset_sets_empty`, `rd_reset_clears_count`).
+
+The CDC handshake atomicity (packed word arrives intact across the boundary) is VERIFIED_BY_ELAB via the inner `sos_fifo_async`'s gray-code construction — no L1-level runtime assertion needed (the L0's MTBF analysis is the load-bearing artifact).
+
+**Vendor-IP pass-through** (informative): `sos_message_channel_async` inherits the inner `sos_fifo_async`'s vendor-IP shim selection — `-Dvendor=xilinx` → `xpm_fifo_async`. Other vendor variants land per the SOS-08-A vendor shim discipline.
+
+**Conformance gates** updated: §12 acceptance gate (b) ("each of the five services has its §6 subsection ratified") now reads as "each of the five service FAMILIES" — the message-channel family ratifies BOTH sibling variants under the same §6.5 subsection. PCDN-B-mailbox-CROSS_CLK-deferred (§6.1 mailbox CDC variant) remains deferred to a future amendment on the same precedent.
+
+**Files added** in this amendment (rtl + tb):
+- `rtl/sos_message_channel/sos_message_channel_async.sv`
+- `rtl/sos_message_channel/sos_message_channel_async.vhd`
+- `rtl/sos_message_channel/sos_message_channel_async_sva.sv`
+- `tb/sos_message_channel/sos_message_channel_async_bind.sv`
+
+Status: 🟢 **§6.5 async variant ratified**. SOS-08-C wave-3-d-2 walker logic consumes this amendment to select between the two variants based on producer/consumer clock-domain alignment.

@@ -746,3 +746,85 @@ The load-bearing §6.4 fix. Until this wave, transitions with `event="..."` had 
 **Cited PCDNs**: §6.4 (event ingress wiring); PCDN-C-006 (doc-order priority); INV-S-HDL-C-3 (channel-mediated event consumption); INV-S-HDL-4 (cooperative-only priority-claim).
 
 Status: 🟢 **wave-3-d-3 complete**. With wave-3-d-1 (producer backpressure) + wave-3-d-3 (consumer ingress) + wave-3-c (channel instantiation) + wave-3-a/b (raise emission), the SCXML event-routing pipeline is end-to-end functional for the single-clock-domain case. Wave-3-d-2 (multi-clock-domain `sos_message_channel_async`) + wave-3-e (payload data) remain deferred.
+
+### 2026-05-24 — Impl wave-3-d-2: async channel variant + walker selection (Ira)
+
+Depends on SOS-08-B §15 2026-05-24 amendment (async sibling variant ratified). With the L1 primitive in place, the SOS-08-C walker can now emit `sos_message_channel_async` instances when chart-side producers and consumers cross clock domains.
+
+**Wave-3-d-2 implementation surface**:
+
+- **No region-FSM changes**: the region-side ports (`_send_valid/_send_ready`, `_recv_valid/_recv_ready`) are identical across the two channel variants. The walker selects between variants only at the chart-top wrapper.
+- **`hdl_common.py` chart-top wrapper variant selection**:
+  - Per chart-wide unique event, compute `producer_domains = sorted({region_index[r]["clock_domain"] for r in producers})` and `consumer_domains` symmetrically.
+  - **Single clock case** (both sets singletons AND equal): emit `sos_message_channel` (wave-3-c form unchanged).
+  - **CDC case** (both sets singletons but unequal): emit `sos_message_channel_async` with `wr_clk = producer_domains[0]` and `rd_clk = consumer_domains[0]`. Default `SYNC_STAGES = 2` (per `sos_fifo_async` precedent). Async-only observability ports (`wr_full`, `wr_count`, `rd_empty`, `rd_count`) bound to empty `()` in SV / `open` in VHDL.
+  - **Multi-domain producers OR consumers per event**: raise `ValueError` with a chart-vocabulary diagnostic. Walker `_render_chart_top` re-raises `ValueError` (does NOT fall back to `_render_chart_top_local`), so the operator sees the diagnostic.
+- **Walker fallback discipline (load-bearing)**: the existing `try / except Exception: pass` fallback at `_render_chart_top` (SV + VHDL) was catching ALL exceptions to tolerate signature drift of the canonical helper. Wave-3-d-2 introduces an intentional chart-vocabulary error path; the fallback now distinguishes:
+  - `ValueError` (chart-author error) → re-raise. Operator sees the diagnostic; HDL is NOT silently emitted via the legacy local emitter.
+  - Other exceptions (signature drift, runtime error) → continue falling back to `_render_chart_top_local`.
+- **Channel-instance emission template** (SV):
+  ```sv
+  sos_message_channel_async #(
+      .EVENT_ID_WIDTH(8),
+      .PAYLOAD_WIDTH(8),
+      .DEPTH(4),
+      .READ_LATENCY(0),
+      .RESET_MEM(1),
+      .SYNC_STAGES(2)
+  ) u_chan_<name> (
+      .wr_clk(<producer-clock>),
+      .wr_rst(<producer-reset>),
+      // ... slave AXI-Stream (producer side) ...
+      .rd_clk(<consumer-clock>),
+      .rd_rst(<consumer-reset>),
+      // ... master AXI-Stream (consumer side) ...
+  );
+  ```
+  Mirror VHDL form uses `entity work.sos_message_channel_async` with `generic map (... SYNC_STAGES => 2 ...)`.
+
+**Wave-3-d-2 scope explicitly excludes**:
+
+- Multi-domain producers per event (would require a fan-in arbiter primitive — defer to future amendment).
+- Multi-domain consumers per event (would require a fanout primitive with per-consumer CDC paths — defer).
+- Payload routing on `_tpayload` ports (wave-3-e).
+- The CDC variant's MTBF sign-off — inherited transparently from `sos_fifo_async/MTBF.md` per INV-S-HDL-B-4.
+
+**Wave-3-d roadmap (final)**:
+
+| Sub-wave | Scope | Status |
+|---|---|---|
+| wave-3-d-1 | Producer backpressure (`_send_ready`) | ✅ `e41fa56` |
+| **wave-3-d-2** | Multi-clock channel variant (`sos_message_channel_async`) | ✅ **this commit** |
+| wave-3-d-3 | Event ingress refactor (per-event `_recv_*` ports) | ✅ `dd816a3` |
+
+With all three sub-waves landed, the SCXML event-routing pipeline now supports:
+- Producer backpressure (no data drops on full channel).
+- Single-clock-domain consumption.
+- Cross-clock-domain consumption (via the CDC sibling primitive).
+- Multiple producers and consumers per event (single domain each).
+- Boundary observers (chart-top `event_<name>_recv_valid/ready` ports) co-existing with internal consumers.
+
+Wave-3-e remains for payload data routing on `_tpayload` ports + chart `<param>`/`<content>` extension.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-3** (cross-domain isolation): now fully operational. Cross-domain transitions route through `sos_message_channel_async`'s inner `sos_fifo_async`, which provides the gray-coded pointer crossings + SYNC_STAGES-deep flop synchronizers + the MTBF sign-off at `rtl/sos_fifo_async/MTBF.md`. Per PCDN-SOS-08-C-002 (retain_synchronizers), the channel instance survives `--verified-strip` regardless of bound-analysis reachability of consumer transitions.
+- **INV-S-HDL-C-1** (deterministic emission): producer/consumer domain sets sorted before variant selection; channel instance emission deterministic for any given chart.
+- **INV-S-HDL-C-3** (cross-domain event consumption uses `sos_message_channel`): now operational for the async case via the sibling variant; the doctrine "every cross-domain event consumption MUST traverse `sos_message_channel*`" is satisfied by either variant.
+- **INV-S-HDL-4** (cooperative-only): preserved. The async variant doesn't change the cooperative-semantics contract — it only adds a CDC primitive between cooperative single-domain FSMs.
+- **INV-SOS-H** (chart-vocabulary traceability): preserved. Both variants emit identical event-name annotations.
+- **INV-S-HDL-B-2** (L0 non-modification): the async channel composes `sos_fifo_async` as a black-box.
+
+**Test count**: net +5 — `TestWave3d2AsyncChannelVariant` (5 tests): CDC chart selects async variant; async variant uses `wr_clk` from producer domain; async variant exposes per-domain observability (wr_full/wr_count/rd_empty/rd_count); single-clock chart still uses sync variant (regression guard for variant selection); multi-producer-domain charts raise `ValueError`.
+
+**Test suite**: 394/394 passing (389 baseline + 5 net wave-3-d-2).
+
+**Files added** in this wave (rtl + tb):
+- `rtl/sos_message_channel/sos_message_channel_async.sv`
+- `rtl/sos_message_channel/sos_message_channel_async.vhd`
+- `rtl/sos_message_channel/sos_message_channel_async_sva.sv`
+- `tb/sos_message_channel/sos_message_channel_async_bind.sv`
+
+**Cited PCDNs / amendments**: SOS-08-B §15 2026-05-24 (async sibling variant ratified); SOS-08-A §6.1 (sos_fifo_async contract — composition root); INV-S-HDL-3 (cross-domain isolation — now operational); PCDN-SOS-08-C-002 (retain_synchronizers across `--verified-strip`).
+
+Status: 🟢 **wave-3-d-2 complete**. Wave-3-d sub-wave family is fully landed. Future amendments: wave-3-e (payload data) + multi-domain fanin/fanout primitives (deferred per scope).

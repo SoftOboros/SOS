@@ -2102,38 +2102,98 @@ def _emit_chart_top_wrapper_vhdl_new(
                 f"{' or '.join(ready_terms)};"
                 f"  -- chart event `{ev}` recv_ready aggregate"
             )
-            first_dom = clock_order[0] if clock_order else "main"
-            if producers and producers[0] in region_index:
-                first_dom = region_index[producers[0]]["clock_domain"]
-            elif consumers and consumers[0] in region_index:
-                first_dom = region_index[consumers[0]]["clock_domain"]
-            lines.append(
-                f"    u_chan_{ev_ident} : entity work.sos_message_channel\n"
-                f"        generic map (\n"
-                f"            EVENT_ID_WIDTH => 8,\n"
-                f"            PAYLOAD_WIDTH  => 8,\n"
-                f"            DEPTH          => 4,\n"
-                f"            READ_LATENCY   => 0,\n"
-                f"            RESET_MEM      => '1'\n"
-                f"        )\n"
-                f"        port map (\n"
-                f"            clk              => {clk_port_name(first_dom)},\n"
-                f"            rst              => {rst_port_name(first_dom)},\n"
-                f"            s_axis_tdata     => (others => '0'),\n"
-                f"            s_axis_tevent_id => std_logic_vector(to_unsigned({idx}, 8)),\n"
-                f"            s_axis_tpayload  => (others => '0'),\n"
-                f"            s_axis_tvalid    => ev_{ev_ident}_send_valid,\n"
-                f"            s_axis_tready    => ev_{ev_ident}_send_ready,\n"
-                f"            m_axis_tdata     => open,\n"
-                f"            m_axis_tevent_id => open,\n"
-                f"            m_axis_tpayload  => open,\n"
-                f"            m_axis_tvalid    => ev_{ev_ident}_recv_valid_w,\n"
-                f"            m_axis_tready    => ev_{ev_ident}_recv_ready_w,\n"
-                f"            full             => open,\n"
-                f"            empty            => open,\n"
-                f"            count            => open\n"
-                f"        );"
+            # Wave-3-d-2 variant selection (mirror of SV walker).
+            producer_domains = sorted({
+                region_index[r]["clock_domain"]
+                for r in producers if r in region_index
+            })
+            consumer_domains = sorted({
+                region_index[r]["clock_domain"]
+                for r in consumers if r in region_index
+            })
+            if len(producer_domains) > 1:
+                raise ValueError(
+                    f"emit_chart_top_wrapper: chart event `{ev}` has "
+                    f"producers in multiple clock domains "
+                    f"({producer_domains}); SOS-08-C wave-3-d-2 does "
+                    f"not yet support multi-domain producers."
+                )
+            if len(consumer_domains) > 1:
+                raise ValueError(
+                    f"emit_chart_top_wrapper: chart event `{ev}` has "
+                    f"consumers in multiple clock domains "
+                    f"({consumer_domains}); SOS-08-C wave-3-d-2 does "
+                    f"not yet support multi-domain consumers."
+                )
+            wr_dom = producer_domains[0] if producer_domains else (
+                consumer_domains[0] if consumer_domains else (
+                    clock_order[0] if clock_order else "main"
+                )
             )
+            rd_dom = consumer_domains[0] if consumer_domains else wr_dom
+            is_cdc = wr_dom != rd_dom and bool(producer_domains) and bool(consumer_domains)
+            if is_cdc:
+                lines.append(
+                    f"    -- SOS-08-C wave-3-d-2 (CDC variant) for event `{ev}` —\n"
+                    f"    -- event_id={idx}, wr_clk=`{wr_dom}` → rd_clk=`{rd_dom}`.\n"
+                    f"    u_chan_{ev_ident} : entity work.sos_message_channel_async\n"
+                    f"        generic map (\n"
+                    f"            EVENT_ID_WIDTH => 8,\n"
+                    f"            PAYLOAD_WIDTH  => 8,\n"
+                    f"            DEPTH          => 4,\n"
+                    f"            READ_LATENCY   => 0,\n"
+                    f"            RESET_MEM      => true,\n"
+                    f"            SYNC_STAGES    => 2\n"
+                    f"        )\n"
+                    f"        port map (\n"
+                    f"            wr_clk           => {clk_port_name(wr_dom)},\n"
+                    f"            wr_rst           => {rst_port_name(wr_dom)},\n"
+                    f"            s_axis_tdata     => (others => '0'),\n"
+                    f"            s_axis_tevent_id => std_logic_vector(to_unsigned({idx}, 8)),\n"
+                    f"            s_axis_tpayload  => (others => '0'),\n"
+                    f"            s_axis_tvalid    => ev_{ev_ident}_send_valid,\n"
+                    f"            s_axis_tready    => ev_{ev_ident}_send_ready,\n"
+                    f"            wr_full          => open,\n"
+                    f"            wr_count         => open,\n"
+                    f"            rd_clk           => {clk_port_name(rd_dom)},\n"
+                    f"            rd_rst           => {rst_port_name(rd_dom)},\n"
+                    f"            m_axis_tdata     => open,\n"
+                    f"            m_axis_tevent_id => open,\n"
+                    f"            m_axis_tpayload  => open,\n"
+                    f"            m_axis_tvalid    => ev_{ev_ident}_recv_valid_w,\n"
+                    f"            m_axis_tready    => ev_{ev_ident}_recv_ready_w,\n"
+                    f"            rd_empty         => open,\n"
+                    f"            rd_count         => open\n"
+                    f"        );"
+                )
+            else:
+                lines.append(
+                    f"    u_chan_{ev_ident} : entity work.sos_message_channel\n"
+                    f"        generic map (\n"
+                    f"            EVENT_ID_WIDTH => 8,\n"
+                    f"            PAYLOAD_WIDTH  => 8,\n"
+                    f"            DEPTH          => 4,\n"
+                    f"            READ_LATENCY   => 0,\n"
+                    f"            RESET_MEM      => true\n"
+                    f"        )\n"
+                    f"        port map (\n"
+                    f"            clk              => {clk_port_name(wr_dom)},\n"
+                    f"            rst              => {rst_port_name(wr_dom)},\n"
+                    f"            s_axis_tdata     => (others => '0'),\n"
+                    f"            s_axis_tevent_id => std_logic_vector(to_unsigned({idx}, 8)),\n"
+                    f"            s_axis_tpayload  => (others => '0'),\n"
+                    f"            s_axis_tvalid    => ev_{ev_ident}_send_valid,\n"
+                    f"            s_axis_tready    => ev_{ev_ident}_send_ready,\n"
+                    f"            m_axis_tdata     => open,\n"
+                    f"            m_axis_tevent_id => open,\n"
+                    f"            m_axis_tpayload  => open,\n"
+                    f"            m_axis_tvalid    => ev_{ev_ident}_recv_valid_w,\n"
+                    f"            m_axis_tready    => ev_{ev_ident}_recv_ready_w,\n"
+                    f"            full             => open,\n"
+                    f"            empty            => open,\n"
+                    f"            count            => open\n"
+                    f"        );"
+                )
     lines.append("end architecture rtl;")
     # VHDL declares the per-region pulse signals + per-event aggregated
     # signal in the architecture's declarative region. We assemble the
@@ -2402,49 +2462,126 @@ def _emit_chart_top_wrapper_sv_new(
                 f"{' | '.join(ready_terms)};"
                 f"  // chart event `{ev}` recv_ready aggregate"
             )
-            # Choose clock domain: first producer's clock domain.
-            # Multi-domain producers requires the async channel
-            # variant (`sos_message_channel_async`) which is deferred
-            # to its own wave (post wave-3-d); v1 assumes single
-            # clock domain across producers of a given event.
-            first_dom = clock_order[0] if clock_order else "main"
-            if producers and producers[0] in region_index:
-                first_dom = region_index[producers[0]]["clock_domain"]
-            elif consumers and consumers[0] in region_index:
-                first_dom = region_index[consumers[0]]["clock_domain"]
-            lines.append(
-                f"    // SOS-08-C wave-3-c channel for event `{ev}` — "
-                f"event_id={idx}\n"
-                f"    // Wave-3-d-1: s_axis_tready → ev_<name>_send_ready\n"
-                f"    // (broadcast to producer regions).\n"
-                f"    // Wave-3-d-3: m_axis_tvalid → ev_<name>_recv_valid_w\n"
-                f"    // (fanout to boundary + consumer regions);\n"
-                f"    //              m_axis_tready ← OR of boundary +\n"
-                f"    //              per-consumer recv_ready signals.\n"
-                f"    sos_message_channel #(\n"
-                f"        .EVENT_ID_WIDTH(8),\n"
-                f"        .PAYLOAD_WIDTH(8),\n"
-                f"        .DEPTH(4),\n"
-                f"        .READ_LATENCY(0),\n"
-                f"        .RESET_MEM(1)\n"
-                f"    ) u_chan_{ev_ident} (\n"
-                f"        .clk({clk_port_name(first_dom)}),\n"
-                f"        .rst({rst_port_name(first_dom)}),\n"
-                f"        .s_axis_tdata('0),\n"
-                f"        .s_axis_tevent_id(8'd{idx}),\n"
-                f"        .s_axis_tpayload('0),\n"
-                f"        .s_axis_tvalid(ev_{ev_ident}_send_valid),\n"
-                f"        .s_axis_tready(ev_{ev_ident}_send_ready),\n"
-                f"        .m_axis_tdata(),\n"
-                f"        .m_axis_tevent_id(),\n"
-                f"        .m_axis_tpayload(),\n"
-                f"        .m_axis_tvalid(ev_{ev_ident}_recv_valid_w),\n"
-                f"        .m_axis_tready(ev_{ev_ident}_recv_ready_w),\n"
-                f"        .full(),\n"
-                f"        .empty(),\n"
-                f"        .count()\n"
-                f"    );"
+            # SOS-08-C wave-3-d-2 (2026-05-24 §15): variant selection.
+            #
+            # Per SOS-08-B §15 2026-05-24 amendment, the channel family
+            # has TWO sibling primitives:
+            #   - sos_message_channel        (single-clock, wave-1)
+            #   - sos_message_channel_async  (CDC, wave-3-d-2)
+            #
+            # Walker selection contract:
+            #   - producer_domains = set of producer regions' clocks.
+            #   - consumer_domains = set of consumer regions' clocks.
+            #   - both singletons AND equal → sync variant on that clock.
+            #   - both singletons, unequal  → async variant
+            #                                  (wr_clk=producer, rd_clk=consumer).
+            #   - either has cardinality > 1 → NOT SUPPORTED at wave-3-d-2;
+            #     raise a chart-vocabulary error.
+            producer_domains = sorted({
+                region_index[r]["clock_domain"]
+                for r in producers if r in region_index
+            })
+            consumer_domains = sorted({
+                region_index[r]["clock_domain"]
+                for r in consumers if r in region_index
+            })
+            if len(producer_domains) > 1:
+                raise ValueError(
+                    f"emit_chart_top_wrapper: chart event `{ev}` has "
+                    f"producers in multiple clock domains "
+                    f"({producer_domains}); SOS-08-C wave-3-d-2 does "
+                    f"not yet support multi-domain producers per chart "
+                    f"event. Restructure the chart to keep producers on "
+                    f"a single clock domain, or wait for a future "
+                    f"amendment introducing a fan-in arbiter primitive."
+                )
+            if len(consumer_domains) > 1:
+                raise ValueError(
+                    f"emit_chart_top_wrapper: chart event `{ev}` has "
+                    f"consumers in multiple clock domains "
+                    f"({consumer_domains}); SOS-08-C wave-3-d-2 does "
+                    f"not yet support multi-domain consumers per chart "
+                    f"event. Restructure the chart to keep consumers on "
+                    f"a single clock domain, or wait for a future "
+                    f"amendment introducing a fanout primitive."
+                )
+            wr_dom = producer_domains[0] if producer_domains else (
+                consumer_domains[0] if consumer_domains else (
+                    clock_order[0] if clock_order else "main"
+                )
             )
+            rd_dom = consumer_domains[0] if consumer_domains else wr_dom
+            is_cdc = wr_dom != rd_dom and bool(producer_domains) and bool(consumer_domains)
+            if is_cdc:
+                lines.append(
+                    f"    // SOS-08-C wave-3-d-2 (CDC variant) for event `{ev}` — "
+                    f"event_id={idx}\n"
+                    f"    // Producer domain: `{wr_dom}` → "
+                    f"Consumer domain: `{rd_dom}`.\n"
+                    f"    // Selected sos_message_channel_async per SOS-08-B §15\n"
+                    f"    // 2026-05-24 amendment (CDC sibling variant).\n"
+                    f"    sos_message_channel_async #(\n"
+                    f"        .EVENT_ID_WIDTH(8),\n"
+                    f"        .PAYLOAD_WIDTH(8),\n"
+                    f"        .DEPTH(4),\n"
+                    f"        .READ_LATENCY(0),\n"
+                    f"        .RESET_MEM(1),\n"
+                    f"        .SYNC_STAGES(2)\n"
+                    f"    ) u_chan_{ev_ident} (\n"
+                    f"        .wr_clk({clk_port_name(wr_dom)}),\n"
+                    f"        .wr_rst({rst_port_name(wr_dom)}),\n"
+                    f"        .s_axis_tdata('0),\n"
+                    f"        .s_axis_tevent_id(8'd{idx}),\n"
+                    f"        .s_axis_tpayload('0),\n"
+                    f"        .s_axis_tvalid(ev_{ev_ident}_send_valid),\n"
+                    f"        .s_axis_tready(ev_{ev_ident}_send_ready),\n"
+                    f"        .wr_full(),\n"
+                    f"        .wr_count(),\n"
+                    f"        .rd_clk({clk_port_name(rd_dom)}),\n"
+                    f"        .rd_rst({rst_port_name(rd_dom)}),\n"
+                    f"        .m_axis_tdata(),\n"
+                    f"        .m_axis_tevent_id(),\n"
+                    f"        .m_axis_tpayload(),\n"
+                    f"        .m_axis_tvalid(ev_{ev_ident}_recv_valid_w),\n"
+                    f"        .m_axis_tready(ev_{ev_ident}_recv_ready_w),\n"
+                    f"        .rd_empty(),\n"
+                    f"        .rd_count()\n"
+                    f"    );"
+                )
+            else:
+                lines.append(
+                    f"    // SOS-08-C wave-3-c channel for event `{ev}` — "
+                    f"event_id={idx}\n"
+                    f"    // Wave-3-d-1: s_axis_tready → ev_<name>_send_ready\n"
+                    f"    // (broadcast to producer regions).\n"
+                    f"    // Wave-3-d-3: m_axis_tvalid → ev_<name>_recv_valid_w\n"
+                    f"    // (fanout to boundary + consumer regions);\n"
+                    f"    //              m_axis_tready ← OR of boundary +\n"
+                    f"    //              per-consumer recv_ready signals.\n"
+                    f"    sos_message_channel #(\n"
+                    f"        .EVENT_ID_WIDTH(8),\n"
+                    f"        .PAYLOAD_WIDTH(8),\n"
+                    f"        .DEPTH(4),\n"
+                    f"        .READ_LATENCY(0),\n"
+                    f"        .RESET_MEM(1)\n"
+                    f"    ) u_chan_{ev_ident} (\n"
+                    f"        .clk({clk_port_name(wr_dom)}),\n"
+                    f"        .rst({rst_port_name(wr_dom)}),\n"
+                    f"        .s_axis_tdata('0),\n"
+                    f"        .s_axis_tevent_id(8'd{idx}),\n"
+                    f"        .s_axis_tpayload('0),\n"
+                    f"        .s_axis_tvalid(ev_{ev_ident}_send_valid),\n"
+                    f"        .s_axis_tready(ev_{ev_ident}_send_ready),\n"
+                    f"        .m_axis_tdata(),\n"
+                    f"        .m_axis_tevent_id(),\n"
+                    f"        .m_axis_tpayload(),\n"
+                    f"        .m_axis_tvalid(ev_{ev_ident}_recv_valid_w),\n"
+                    f"        .m_axis_tready(ev_{ev_ident}_recv_ready_w),\n"
+                    f"        .full(),\n"
+                    f"        .empty(),\n"
+                    f"        .count()\n"
+                    f"    );"
+                )
     lines.append("endmodule")
     return "\n".join(lines)
 

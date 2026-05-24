@@ -2060,6 +2060,13 @@ def _render_chart_top(
             )
             fname = f"{top_name}.sv"
             return fname, body
+        except ValueError:
+            # Chart-vocabulary error from the canonical helper (e.g.
+            # SOS-08-C wave-3-d-2 multi-domain producer/consumer
+            # rejection per SOS-08-B §15 amendment). Re-raise so the
+            # operator sees the diagnostic — DO NOT fall back to the
+            # local emitter, which would silently produce broken HDL.
+            raise
         except Exception:
             # Signature drift or runtime error — fall back to the
             # local emitter so wave-2 emission stays unblocked.

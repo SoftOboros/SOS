@@ -1298,3 +1298,153 @@ class TestWave3d3EventIngressRefactor:
         # We look for the bare assign WITHOUT the wrapping if/else.
         assert "if (event_go_recv_valid) state_next = ST_B;" in src
         assert "if (event_finish_recv_valid) state_next = ST_C;" in src
+
+
+class TestWave3d2AsyncChannelVariant:
+    """SOS-08-C wave-3-d-2 (2026-05-24 §15): walker selects between
+    `sos_message_channel` (single-clock) and `sos_message_channel_async`
+    (CDC) based on producer/consumer clock-domain alignment.
+
+    Per SOS-08-B §15 2026-05-24 amendment, the channel family has TWO
+    sibling primitives. Selection contract:
+      - producer + consumer same clock → sos_message_channel.
+      - producer + consumer different clocks → sos_message_channel_async
+        with wr_clk = producer domain, rd_clk = consumer domain.
+      - multi-domain producers OR consumers per event → walker raises.
+    """
+
+    def _cdc_chart(self):
+        """Two parallel regions on different clock domains; one raises
+        `tick`, the other consumes it."""
+        return {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "fast", "clock": "fast", "initial": "F1",
+                     "state": [
+                         _state("F1", transitions=[
+                             {"target": "F2",
+                              "raise_value": [{"event": "tick"}]},
+                         ]),
+                         _state("F2"),
+                     ]},
+                    {"id": "slow", "clock": "slow", "initial": "S1",
+                     "state": [
+                         _state("S1", transitions=[
+                             {"event": "tick", "target": "S2"},
+                         ]),
+                         _state("S2"),
+                     ]},
+                ],
+            }],
+        }
+
+    def test_cdc_chart_selects_async_variant(self):
+        files = transliterate_hdl_sv.render_target(
+            self._cdc_chart(), {"chart_name": "cdc"}
+        )
+        top = files["cdc_top.sv"]
+        # Async variant primitive instantiated for the cross-domain
+        # event.
+        assert "sos_message_channel_async #(" in top
+        # SYNC_STAGES parameter present.
+        assert ".SYNC_STAGES(2)" in top
+        # The sync variant MUST NOT be instantiated for this chart.
+        assert "sos_message_channel #(" not in top
+
+    def test_async_variant_uses_wr_clk_from_producer(self):
+        files = transliterate_hdl_sv.render_target(
+            self._cdc_chart(), {"chart_name": "cdc"}
+        )
+        top = files["cdc_top.sv"]
+        # Producer is region `fast` → wr_clk = clk_fast.
+        assert ".wr_clk(clk_fast)" in top
+        assert ".wr_rst(rst_fast)" in top
+        # Consumer is region `slow` → rd_clk = clk_slow.
+        assert ".rd_clk(clk_slow)" in top
+        assert ".rd_rst(rst_slow)" in top
+
+    def test_async_variant_exposes_per_domain_observability(self):
+        """Async variant has wr_full/wr_count + rd_empty/rd_count
+        (split across the two domains)."""
+        files = transliterate_hdl_sv.render_target(
+            self._cdc_chart(), {"chart_name": "cdc"}
+        )
+        top = files["cdc_top.sv"]
+        assert ".wr_full()" in top
+        assert ".wr_count()" in top
+        assert ".rd_empty()" in top
+        assert ".rd_count()" in top
+        # Single-clock unified observability ports MUST NOT appear.
+        # (At least, not in a way that's confusable with the async
+        # variant.)
+        assert ".full()" not in top  # async has wr_full instead
+        assert ".empty()" not in top  # async has rd_empty instead
+
+    def test_single_clock_chart_still_uses_sync_variant(self):
+        """Regression: charts with all regions on one clock domain
+        continue to use the wave-3-c sync variant."""
+        chart = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[
+                            {"target": "L2", "raise_value": [{"event": "tick"}]},
+                        ]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1", "state": [
+                        _state("R1", transitions=[
+                            {"event": "tick", "target": "R2"},
+                        ]),
+                        _state("R2"),
+                    ]},
+                ],
+            }],
+        }
+        files = transliterate_hdl_sv.render_target(chart, {"chart_name": "x"})
+        top = files["x_top.sv"]
+        # Sync variant — no SYNC_STAGES generic, single clk/rst.
+        assert "sos_message_channel #(" in top
+        assert "sos_message_channel_async #(" not in top
+        # Single clk/rst on the channel instance.
+        assert ".clk(clk_main)" in top
+        # Async-only ports MUST NOT appear on the sync channel.
+        assert ".wr_clk(" not in top
+        assert ".rd_clk(" not in top
+
+    def test_multi_producer_domains_raises(self):
+        """Wave-3-d-2 does not support multiple producer clock domains
+        per chart event — walker raises ValueError."""
+        chart = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "fast", "clock": "fast", "initial": "F1",
+                     "state": [
+                         _state("F1", transitions=[
+                             {"target": "F2",
+                              "raise_value": [{"event": "shared"}]},
+                         ]),
+                         _state("F2"),
+                     ]},
+                    {"id": "slow", "clock": "slow", "initial": "S1",
+                     "state": [
+                         _state("S1", transitions=[
+                             {"target": "S2",
+                              "raise_value": [{"event": "shared"}]},
+                         ]),
+                         _state("S2"),
+                     ]},
+                ],
+            }],
+        }
+        import pytest
+        with pytest.raises(ValueError, match="multiple clock domains"):
+            transliterate_hdl_sv.render_target(
+                chart, {"chart_name": "x"}
+            )
