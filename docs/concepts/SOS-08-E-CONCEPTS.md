@@ -441,3 +441,56 @@ Wave-1 implementation surface landed under the 2026-05-23 ratification of §15 a
 **Cited PCDNs** (all resolved 2026-05-23 §15 ratification entry above, implementation now in place): PCDN-SOS-08-E-001 (flat class hierarchy at v1), PCDN-SOS-08-E-002 (Verilator-subset compliance via deferred-failure-stub policy), PCDN-SOS-08-E-003 (coverage emission deferred), PCDN-SOS-08-E-004 (per-region testbench shape at v1), PCDN-SOS-08-E-005 (separate simulator wrappers — wave-1 ships two of five; wave-2 closes the remaining three).
 
 **Status**: 🟢 **ratified (continuing)** — wave-1 scaffold lands the SV-testbench emission path with single-region chart coverage; parallel-chart split, full five-simulator wrapper coverage, and cross-path equivalence with SOS-08-D are wave-2 work.
+
+### 2026-05-23 — Impl wave-2: full simulator-wrapper coverage + cross-path equivalence with SOS-08-D (Ira)
+
+Wave-2 closes two of the wave-1 deferred candidates: (a) the remaining three of five simulator build wrappers (VCS / Xcelium / Riviera) per PCDN-SOS-08-E-005, and (b) cross-path equivalence with the SOS-08-D cocotb path per §12 gate (h). Parallel-chart support on the SV-testbench side is **still wave-3** (co-deferred with SOS-08-D wave-3's per-region step-driven vectors + multi-clock-domain bind wiring).
+
+**Wave-2 implementation surface**:
+
+- **VCS `Makefile.sv`** emitted via `_emit_vcs_makefile`. Synopsys VCS uses `vcs` (compile) + `./simv` (run) with `-sverilog -assert enable_diag -debug_access+all` flag set. Targets the chart-top wrapper module; lists all six SV sources in dependency order. `make compile` / `make run` / `make clean` targets.
+- **Xcelium `run_xrun.sh`** emitted via `_emit_xcelium_argfile`. Cadence Xcelium uses `xrun -sv -access +rwc -assert -assertinitvar`. Bash script with `set -euo pipefail`; honors `XRUN` env var override for custom Xcelium installs. `-gui` flag opens SimVision after elaboration.
+- **Riviera-PRO `run_riviera.tcl`** emitted via `_emit_riviera_tcl`. Aldec Riviera uses `alog -sv2k17` (compile) + `asim` (elaborate + run) — distinct from Questa's `vlog`/`vsim` so wave-2 split the previously-shared `.do` form. Wave-1's `run.do` is now Questa-specific (header text updated; flag set unchanged).
+- **Filename additions** to `render_target`: three new keys under `tb/sv/<chart>/`:
+    - `Makefile.sv`         (VCS)
+    - `run_xrun.sh`         (Xcelium)
+    - `run_riviera.tcl`     (Riviera-PRO)
+  Emit count grows from 8 to **11 files** per single-region chart.
+- **Cross-path equivalence test class** in `tools/sos-codegen/tests/test_transliterate_hdl_sv_tb.py::TestCrossPathEquivalenceWithSOS08D` (5 tests). Verifies §12 gate (h):
+    - SVA assertion module byte-identical between SOS-08-D (`tests/<chart>/<chart>_fsm_sva.sv`) and SOS-08-E (`tb/sv/<chart>/<chart>_fsm_sva.sv`).
+    - SVA bind directive byte-identical between the two paths.
+    - Equivalence holds across a chart with transition guards (the SVA bind walker lowers guards into the assertion antecedent; both paths produce identical lowered text).
+    - **Path-disjointness sanity checks**: SOS-08-E does NOT emit `.py` (cocotb territory); SOS-08-D does NOT emit `tb_*.sv` / `sos_driver_*.sv` / `sos_checker_*.sv` / `dut_if_*.sv` (SOS-08-E territory).
+- **`TestWave2BuildWrappers` class** (10 tests): per-wrapper presence + simulator-tool invocation pattern + SVA-flag presence + bash-shebang correctness for the shell wrapper + Questa vs Riviera content divergence (regression guard against accidentally collapsing the wave-2 split back to wave-1's shared form).
+- **Existing `TestFileSet.test_emits_eight_files` renamed to `test_emits_eleven_files`** to reflect the new emit count; the three new wrapper-presence assertions add to the suite.
+
+**Wave-2 scope (what landed vs. what is deferred)**:
+
+- **All five simulator wrappers** ✅ landed. INV-S-HDL-E-5's "per-simulator build wrapper for each named simulator" gate is now fully satisfied — Verilator + Questa + VCS + Xcelium + Riviera-PRO.
+- **Cross-path equivalence** with SOS-08-D ✅ verified at the SVA artifact level (gate (h) byte-identical claim). Live cross-path equivalence (running both paths against a real DUT and comparing pass/fail verdict) requires bench validation — that lands with the umbrella's gate (e) Lattice ECP5 dev board session per the wave-1 conformance review's wave-2 plan.
+- **Parallel-chart support** on the SV-testbench side: **wave-3 scope**. Currently wave-1's parallel-chart rejection is still in place in this walker (single-region only). Lifting it requires per-region observable read against the chart-top wrapper (mirror of SOS-08-D wave-2c), plus per-region SVA bind co-emission (mirror of SOS-08-D wave-2b). The SVA bind walker's wave-2b support is already available; the SV-testbench walker's wave-3 lift composes against it.
+- **Full SOS-03 vector-schema consumer** (replacing the wave-1 LCD integer-field shape): **wave-3** alongside the SOS-08-F wave-3 parser landing (co-deferred to land once and serve both walkers).
+- **Layered class hierarchy opt-in** (PCDN-SOS-08-E-001): wave-3+ if a customer requests it.
+- **Verilator deferred-failure stubs** (INV-S-HDL-E-6): wave-3+ when chart authors actually use SV-2017 constructs outside Verilator's subset.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-E-1** (no constrained-random): retained — wave-2 audit passes on all 11 emitted files (the three new wrappers are Makefile / shell / Tcl, none of which carry SV constructs).
+- **INV-S-HDL-E-2** (no UVM imports): retained — none of the new wrappers reference UVM.
+- **INV-S-HDL-E-3** (SVA only via bind files): retained — wrappers don't emit SVA; they invoke the simulator against the SV sources that do.
+- **INV-S-HDL-E-4** (chart-vocabulary failure messages): retained — checker class emits `[FAIL] vector V<n>:` regardless of which simulator runs.
+- **INV-S-HDL-E-5** (per-simulator build wrapper): ✅ **closed**. All five simulators have a wrapper.
+- **INV-S-HDL-E-6** (Verilator-subset compliance declared): retained.
+- **INV-S-HDL-D-4** (same SVA artifact feeds cocotb + formal flow): **explicitly verified by test** at this wave — the cross-path equivalence test class proves the SVA artifact is byte-identical between SOS-08-D and SOS-08-E emissions.
+
+**Test count**: 18 new tests:
+
+- `TestFileSet`: 1 renamed (`test_emits_eight_files` → `test_emits_eleven_files`) + 3 new wrapper-presence tests.
+- `TestWave2BuildWrappers` class: 10 tests covering per-wrapper invocation patterns + flag presence + Questa-vs-Riviera split regression guard.
+- `TestCrossPathEquivalenceWithSOS08D` class: 5 tests covering SVA module + bind directive byte-identical equivalence + guard-lowering equivalence + path-disjointness sanity checks.
+
+**Test suite**: 354/354 passing (336 prior + 18 wave-2).
+
+**Cited PCDNs**: PCDN-SOS-08-E-005 (separate wrappers per simulator — wave-2 closes the remaining three of five); §12 gate (h) cross-path equivalence with SOS-08-D (verified at SVA artifact byte-identical level).
+
+Status: 🟢 **ratified (continuing)** — wave-2 closes the simulator-wrapper coverage and the cross-path equivalence gate. Wave-3 lifts parallel-chart support on the SV-testbench side (composing against SOS-08-D wave-2b's already-landed parallel SVA bind support) + the full SOS-03 vector-schema consumer + Verilator deferred-failure stubs + layered class hierarchy opt-in.

@@ -87,14 +87,19 @@ def _parallel_chart() -> dict:
 
 
 class TestFileSet:
-    """SOS-08-E §6 emission contract: eight artifacts per region."""
+    """SOS-08-E §6 emission contract.
 
-    def test_emits_eight_files(self):
+    Wave-1: 6 SV files + 2 build wrappers (Verilator, Questa) = 8.
+    Wave-2 (2026-05-23 §15): adds 3 more wrappers (VCS, Xcelium,
+    Riviera) closing PCDN-E-005's five-of-five gate = 11 total.
+    """
+
+    def test_emits_eleven_files(self):
         files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
-        # Six SV files + two build wrappers = 8.
-        assert len(files) == 8, (
-            f"SOS-08-E §6: expected 8 emitted files, got {len(files)}: "
-            f"{sorted(files)}"
+        # Six SV files + five build wrappers = 11 (wave-2).
+        assert len(files) == 11, (
+            f"SOS-08-E §6 + wave-2 §15: expected 11 emitted files, "
+            f"got {len(files)}: {sorted(files)}"
         )
 
     def test_emits_top_module(self):
@@ -128,6 +133,21 @@ class TestFileSet:
     def test_emits_questa_do(self):
         files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
         assert "tb/sv/demo/run.do" in files
+
+    def test_emits_vcs_makefile(self):
+        """Wave-2: VCS build wrapper per PCDN-E-005."""
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        assert "tb/sv/demo/Makefile.sv" in files
+
+    def test_emits_xcelium_script(self):
+        """Wave-2: Xcelium build wrapper per PCDN-E-005."""
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        assert "tb/sv/demo/run_xrun.sh" in files
+
+    def test_emits_riviera_tcl(self):
+        """Wave-2: Riviera-PRO build wrapper per PCDN-E-005."""
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        assert "tb/sv/demo/run_riviera.tcl" in files
 
 
 class TestNamingConventions:
@@ -564,3 +584,200 @@ class TestInputValidation:
         # No config → chart_name defaults to "chart".
         files = sv_tb.render_target(_simple_chart(), None)
         assert any(k.startswith("tb/sv/chart/") for k in files)
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-E wave-2: VCS / Xcelium / Riviera build wrappers (PCDN-E-005
+# five-of-five closure) + cross-path equivalence with SOS-08-D (gate (h)).
+# ---------------------------------------------------------------------------
+
+
+class TestWave2BuildWrappers:
+    """PCDN-E-005 (resolved 2026-05-23): separate wrappers per simulator.
+    Wave-2 closes the remaining 3 of 5 (VCS, Xcelium, Riviera) that
+    wave-1 deferred."""
+
+    def _files(self) -> dict:
+        return sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+
+    def test_vcs_makefile_invokes_vcs(self):
+        wrapper = self._files()["tb/sv/demo/Makefile.sv"]
+        assert "VCS" in wrapper
+        assert "vcs" in wrapper.lower()
+
+    def test_vcs_makefile_enables_assertions(self):
+        wrapper = self._files()["tb/sv/demo/Makefile.sv"]
+        # VCS SVA flag.
+        assert "-assert enable_diag" in wrapper
+
+    def test_vcs_makefile_lists_all_sources(self):
+        wrapper = self._files()["tb/sv/demo/Makefile.sv"]
+        for fname in (
+            "dut_if_demo.sv",
+            "sos_driver_demo.sv",
+            "sos_checker_demo.sv",
+            "demo_fsm_sva.sv",
+            "demo_fsm_bind.sv",
+            "tb_demo.sv",
+        ):
+            assert fname in wrapper, f"VCS Makefile missing {fname}"
+
+    def test_xcelium_script_invokes_xrun(self):
+        wrapper = self._files()["tb/sv/demo/run_xrun.sh"]
+        assert "xrun" in wrapper.lower()
+
+    def test_xcelium_script_enables_assertions(self):
+        wrapper = self._files()["tb/sv/demo/run_xrun.sh"]
+        assert "-assert" in wrapper
+
+    def test_xcelium_script_is_bash(self):
+        wrapper = self._files()["tb/sv/demo/run_xrun.sh"]
+        # Shebang + `set -euo pipefail` make this a portable bash
+        # wrapper rather than a /bin/sh script.
+        assert wrapper.startswith("#!/usr/bin/env bash")
+        assert "set -euo pipefail" in wrapper
+
+    def test_riviera_wrapper_invokes_alog_asim(self):
+        wrapper = self._files()["tb/sv/demo/run_riviera.tcl"]
+        # Riviera-PRO uses alog/asim (or vlog/vsim aliases); the wave-2
+        # split uses the native Riviera commands.
+        assert "alog" in wrapper
+        assert "asim" in wrapper
+
+    def test_riviera_wrapper_distinct_from_questa(self):
+        files = self._files()
+        questa = files["tb/sv/demo/run.do"]
+        riviera = files["tb/sv/demo/run_riviera.tcl"]
+        # Wave-2 split: the two wrappers are no longer byte-identical.
+        # Questa uses vlog/vsim; Riviera uses alog/asim.
+        assert questa != riviera
+
+    def test_all_five_wrappers_emitted(self):
+        """INV-S-HDL-E-5 closure: per-simulator build wrapper for each
+        of the five supported simulators (PCDN-E-005)."""
+        files = self._files()
+        for fname in (
+            "tb/sv/demo/run_verilator.mk",  # Verilator (wave-1)
+            "tb/sv/demo/run.do",            # Questa     (wave-1, refined wave-2)
+            "tb/sv/demo/Makefile.sv",       # VCS        (wave-2)
+            "tb/sv/demo/run_xrun.sh",       # Xcelium    (wave-2)
+            "tb/sv/demo/run_riviera.tcl",   # Riviera    (wave-2)
+        ):
+            assert fname in files, (
+                f"INV-S-HDL-E-5: missing build wrapper {fname}"
+            )
+
+    def test_all_wrappers_audit_clean(self):
+        """Every wrapper passes the INV-S-HDL-E-1/-2/-3 audit."""
+        # render_target's _audit_all runs over every emitted file; if
+        # we got this far it passed.
+        files = self._files()
+        for fname in (
+            "tb/sv/demo/Makefile.sv",
+            "tb/sv/demo/run_xrun.sh",
+            "tb/sv/demo/run_riviera.tcl",
+        ):
+            assert files[fname]  # non-empty
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-E wave-2 cross-path equivalence with SOS-08-D (gate (h)).
+# ---------------------------------------------------------------------------
+
+
+sva_bind = pytest.importorskip(
+    "transliterate_sva_bind",
+    reason="cross-path equivalence test requires sibling walker.",
+)
+cocotb_walker = pytest.importorskip(
+    "transliterate_cocotb",
+    reason="cross-path equivalence test requires SOS-08-D cocotb walker.",
+)
+
+
+class TestCrossPathEquivalenceWithSOS08D:
+    """SOS-08-E §12 gate (h) — cross-path equivalence with SOS-08-D.
+
+    The claim: rendering the same chart through SOS-08-D (cocotb path)
+    and SOS-08-E (SV testbench path) produces SVA bind file content
+    that is byte-identical between the two paths. This is the
+    load-bearing claim of the dual-emission design — one chart, two
+    test scaffoldings, ONE assertion artifact.
+    """
+
+    def test_sva_module_byte_identical_across_paths(self):
+        cfg = {"chart_name": "kernel"}
+        from_e = sv_tb.render_target(_simple_chart(), cfg)
+        from_d = sva_bind.render_target(_simple_chart(), cfg)
+
+        # SOS-08-E emits at tb/sv/<chart>/; SOS-08-D at tests/<chart>/.
+        # The SVA module body MUST be byte-identical.
+        e_sva = from_e["tb/sv/kernel/kernel_fsm_sva.sv"]
+        d_sva = from_d["tests/kernel/kernel_fsm_sva.sv"]
+        assert e_sva == d_sva, (
+            "SOS-08-E §5.2 + §12 gate (h): SVA assertion module MUST be "
+            "byte-identical across cocotb (SOS-08-D) + SV testbench "
+            "(SOS-08-E) paths. Diverging content means the dual-"
+            "emission equivalence claim regresses."
+        )
+
+    def test_bind_directive_byte_identical_across_paths(self):
+        cfg = {"chart_name": "kernel"}
+        from_e = sv_tb.render_target(_simple_chart(), cfg)
+        from_d = sva_bind.render_target(_simple_chart(), cfg)
+        assert (
+            from_e["tb/sv/kernel/kernel_fsm_bind.sv"]
+            == from_d["tests/kernel/kernel_fsm_bind.sv"]
+        )
+
+    def test_sva_module_byte_identical_with_guards(self):
+        """Equivalence MUST hold across a non-trivial chart with
+        transition guards (the SVA bind walker lowers guards into the
+        assertion antecedent; both paths must produce the same lowered
+        text)."""
+        chart_with_guards = {
+            "initial": "idle",
+            "datamodel": [{"data": [{"id": "ready", "expr": "0"}]}],
+            "state": [
+                {
+                    "id": "idle",
+                    "transition": [
+                        {"event": "go", "cond": "ready == 1",
+                         "target": "active"},
+                    ],
+                },
+                {"id": "active"},
+            ],
+        }
+        cfg = {"chart_name": "guarded"}
+        from_e = sv_tb.render_target(chart_with_guards, cfg)
+        from_d = sva_bind.render_target(chart_with_guards, cfg)
+        assert (
+            from_e["tb/sv/guarded/guarded_fsm_sva.sv"]
+            == from_d["tests/guarded/guarded_fsm_sva.sv"]
+        )
+
+    def test_sos_08_e_does_not_emit_cocotb_artifacts(self):
+        """Gate (h) sanity check: the SV-testbench path MUST NOT emit
+        Python cocotb test files (those are SOS-08-D's territory)."""
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        for fname in files:
+            assert not fname.endswith(".py"), (
+                f"SOS-08-E MUST NOT emit Python files; saw {fname}"
+            )
+
+    def test_sos_08_d_does_not_emit_sv_testbench_artifacts(self):
+        """Gate (h) sanity check: the cocotb path MUST NOT emit
+        SV-testbench class files (those are SOS-08-E's territory)."""
+        files = cocotb_walker.render_target(
+            _simple_chart(), {"chart_name": "demo"}
+        )
+        forbidden_prefixes = ("tb_", "sos_driver_", "sos_checker_", "dut_if_")
+        for fname in files:
+            leaf = fname.rsplit("/", 1)[-1]
+            for pref in forbidden_prefixes:
+                if leaf.startswith(pref) and leaf.endswith(".sv"):
+                    pytest.fail(
+                        f"SOS-08-D MUST NOT emit SV testbench file "
+                        f"{leaf!r}; that's SOS-08-E's territory."
+                    )

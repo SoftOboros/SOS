@@ -811,21 +811,21 @@ clean:
 
 
 def _emit_questa_do(chart_name: str) -> str:
-    """``run.do`` — Questa/Riviera build wrapper.
+    """``run.do`` — Questa-specific build wrapper.
 
-    Wave-1 reference shape per §6.4. Commercial-only — CI verification
-    runs on Verilator; this wrapper documents the Questa/Riviera path
-    so commercial-shop adopters have a working starting template.
+    Per PCDN-SOS-08-E-005 (resolved 2026-05-23) separate wrappers per
+    simulator. Wave-2 split this from the shared Questa/Riviera form
+    (wave-1) — Riviera now has its own ``run_riviera.tcl`` wrapper
+    with Riviera-specific `asim` / `arun` idioms.
     """
     base = _normalise_chart_name(chart_name)
     top = tb_module_name(chart_name)
-    return f"""# SOS-08-E wave-1 emitted artifact — DO NOT EDIT BY HAND.
+    return f"""# SOS-08-E wave-2 emitted artifact — DO NOT EDIT BY HAND.
 #
-# Questa / Riviera build wrapper for the {chart_name} chart testbench.
+# Questa build wrapper for the {chart_name} chart testbench.
 #
 # Per SOS-08-E §5.3 + §6.4 + PCDN-SOS-08-E-005 separate wrappers per
-# simulator. Wave-1 ships this Questa/Riviera `.do` reference; VCS
-# Makefile and Xcelium argument file are wave-2.
+# simulator (wave-2 split this from the shared Questa/Riviera form).
 
 # Usage:
 #   vsim -c -do run.do                 # batch mode
@@ -846,6 +846,163 @@ vlog -sv \\
 vsim -c -voptargs="+acc" -assertdebug work.{top}
 run -all
 quit -code 0
+"""
+
+
+def _emit_vcs_makefile(chart_name: str) -> str:
+    """``Makefile.sv`` — Synopsys VCS build wrapper.
+
+    Per PCDN-SOS-08-E-005 separate wrappers per simulator. VCS uses
+    `vcs` (compile) + `./simv` (run) with `+define`-style command-line
+    flags rather than do-file conventions. The `-sverilog -assert
+    enable_diag` flag-set is the canonical SVA-aware VCS invocation.
+    """
+    base = _normalise_chart_name(chart_name)
+    top = tb_module_name(chart_name)
+    return f"""# SOS-08-E wave-2 emitted artifact — DO NOT EDIT BY HAND.
+#
+# Synopsys VCS build wrapper for the {chart_name} chart testbench.
+#
+# Per SOS-08-E §5.3 + §6.4 + PCDN-SOS-08-E-005 separate wrappers per
+# simulator.
+#
+# Usage:
+#   make -f Makefile.sv          # compile + run
+#   make -f Makefile.sv compile  # compile only
+#   make -f Makefile.sv clean
+
+TOP := {top}
+
+SOURCES := \\
+    dut_if_{base}.sv \\
+    sos_driver_{base}.sv \\
+    sos_checker_{base}.sv \\
+    {base}_fsm_sva.sv \\
+    {base}_fsm_bind.sv \\
+    tb_{base}.sv \\
+    {base}_fsm.sv
+
+VCS       ?= vcs
+VCS_FLAGS := -sverilog \\
+             -assert enable_diag \\
+             -timescale=1ns/1ps \\
+             -full64 \\
+             -debug_access+all \\
+             -kdb \\
+             -top $(TOP)
+
+.PHONY: all compile run clean
+
+all: run
+
+compile: simv
+
+simv: $(SOURCES)
+\t$(VCS) $(VCS_FLAGS) $(SOURCES) -o simv
+
+run: simv
+\t./simv -ucli -do "run; quit"
+
+clean:
+\trm -rf simv simv.daidir csrc ucli.key DVEfiles inter.vpd
+"""
+
+
+def _emit_xcelium_argfile(chart_name: str) -> str:
+    """``run_xrun.sh`` — Cadence Xcelium build wrapper.
+
+    Per PCDN-SOS-08-E-005 separate wrappers per simulator. Xcelium's
+    `xrun` accepts SystemVerilog sources directly on the command line
+    along with `-sv -assert` flags; the wrapper is a shell script that
+    invokes `xrun` with a deterministic flag order.
+    """
+    base = _normalise_chart_name(chart_name)
+    top = tb_module_name(chart_name)
+    return f"""#!/usr/bin/env bash
+# SOS-08-E wave-2 emitted artifact — DO NOT EDIT BY HAND.
+#
+# Cadence Xcelium build wrapper for the {chart_name} chart testbench.
+#
+# Per SOS-08-E §5.3 + §6.4 + PCDN-SOS-08-E-005 separate wrappers per
+# simulator.
+#
+# Usage:
+#   ./run_xrun.sh                # compile + run with default flags
+#   ./run_xrun.sh -gui           # open SimVision after elaboration
+#
+# Honors XRUN env var override for custom Xcelium installs.
+
+set -euo pipefail
+
+XRUN=${{XRUN:-xrun}}
+TOP={top}
+
+SOURCES=(
+    dut_if_{base}.sv
+    sos_driver_{base}.sv
+    sos_checker_{base}.sv
+    {base}_fsm_sva.sv
+    {base}_fsm_bind.sv
+    tb_{base}.sv
+    {base}_fsm.sv
+)
+
+# Common Xcelium SVA-aware flag set.
+XRUN_FLAGS=(
+    -sv
+    -access +rwc
+    -assert
+    -assertinitvar
+    -timescale 1ns/1ps
+    -top "$TOP"
+)
+
+if [[ "${{1:-}}" == "-gui" ]]; then
+    XRUN_FLAGS+=(-gui)
+    shift
+fi
+
+"$XRUN" "${{XRUN_FLAGS[@]}}" "${{SOURCES[@]}}" "$@"
+"""
+
+
+def _emit_riviera_tcl(chart_name: str) -> str:
+    """``run_riviera.tcl`` — Aldec Riviera-PRO build wrapper.
+
+    Per PCDN-SOS-08-E-005 separate wrappers per simulator. Riviera's
+    Tcl uses `alog` (compile) + `asim` (elaborate + run) rather than
+    Questa's `vlog`/`vsim`. The flag set diverges enough from Questa's
+    that wave-2 splits them into separate wrapper files (wave-1's
+    shared `.do` covered both at LCD-level only).
+    """
+    base = _normalise_chart_name(chart_name)
+    top = tb_module_name(chart_name)
+    return f"""# SOS-08-E wave-2 emitted artifact — DO NOT EDIT BY HAND.
+#
+# Aldec Riviera-PRO build wrapper for the {chart_name} chart testbench.
+#
+# Per SOS-08-E §5.3 + §6.4 + PCDN-SOS-08-E-005 separate wrappers per
+# simulator (wave-2 split this from the shared Questa/Riviera `.do`).
+#
+# Usage:
+#   vsim -c -do run_riviera.tcl         # batch mode (Riviera-PRO ships vsim as a wrapper)
+#   alib + amap + alog + asim invocation below for the full Riviera flow
+
+alib work
+amap work work
+
+alog -sv2k17 \\
+    dut_if_{base}.sv \\
+    sos_driver_{base}.sv \\
+    sos_checker_{base}.sv \\
+    {base}_fsm_sva.sv \\
+    {base}_fsm_bind.sv \\
+    tb_{base}.sv \\
+    {base}_fsm.sv
+
+asim -t 1ps +access+rw +sv_seed=1 work.{top}
+run -all
+exit
 """
 
 
@@ -994,6 +1151,11 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
         f"tb/sv/{base}/tb_{base}.sv": _emit_top_module(chart_name, n_states),
         f"tb/sv/{base}/run_verilator.mk": _emit_verilator_makefile(chart_name),
         f"tb/sv/{base}/run.do": _emit_questa_do(chart_name),
+        # SOS-08-E wave-2 (2026-05-23 §15): close PCDN-E-005 by shipping
+        # the remaining three of five simulator wrappers.
+        f"tb/sv/{base}/Makefile.sv": _emit_vcs_makefile(chart_name),
+        f"tb/sv/{base}/run_xrun.sh": _emit_xcelium_argfile(chart_name),
+        f"tb/sv/{base}/run_riviera.tcl": _emit_riviera_tcl(chart_name),
     }
 
     # Mirror the SOS-08-D SVA bind file artifact, byte-identical, but
