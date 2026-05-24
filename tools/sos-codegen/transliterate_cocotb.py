@@ -172,11 +172,36 @@ class UnsupportedChartError(Exception):
 
 
 @dataclass
+class CocotbRegion:
+    """One chart region — SOS-08-D wave-2c parallel-chart shape.
+
+    Per SOS-08-C §6.10 chart-top wrapper emission: each region of a
+    parallel chart contributes one ``<chart>_region_<name>_fsm``
+    sub-module instantiated by the chart-top wrapper, with the wrapper
+    exposing a ``current_state_<name>`` output port per region. The
+    cocotb test reads that per-region port through the chart-top wrapper
+    DUT to verify per-region state.
+    """
+
+    name: str
+    state_ids: list[str]
+    initial_state: str
+
+
+@dataclass
 class CocotbChart:
     """Minimal chart view this emitter consumes.
 
-    The shape mirrors what SOS-08-C's single-region walker produces at
-    its observation boundary but carries only the fields wave-1 needs.
+    Single-region charts (wave-1) populate ``state_ids`` + ``initial_state``
+    and leave ``regions`` empty. Parallel charts (wave-2c, 2026-05-23)
+    additionally populate ``regions`` with per-region state lists +
+    initial states; the emitted test branches on ``has_parallel`` to
+    read ``current_state_<region>`` per region.
+
+    State-encoding parity: for parallel charts ``state_ids`` is the
+    union of all regions' state ids in document order so the chart-
+    wide ``_STATE_ENCODING`` map remains a single-source-of-truth
+    even when individual regions only reference their own slice.
     """
 
     name: str
@@ -185,6 +210,9 @@ class CocotbChart:
     has_parallel: bool = False
     # Vector ids the emitter was asked to bind tests against.
     vector_ids: list[str] = field(default_factory=list)
+    # SOS-08-D wave-2c: per-region info for parallel charts; empty
+    # tuple for single-region (wave-1 path unchanged).
+    regions: list[CocotbRegion] = field(default_factory=list)
 
 
 def _walk_states_in_order(node: dict[str, Any]) -> Iterable[tuple[str, dict]]:
@@ -257,16 +285,16 @@ def _normalise_chart(
         )
 
     if _detect_parallel(chart_ir):
-        raise UnsupportedChartError(
-            "SOS-08-D wave-1 cocotb scaffold rejects parallel charts; "
-            "parallel charts land in wave-2 alongside the per-region "
-            "cocotb harness shape (SOS-08-D §15 / SOS-08-D §6.1)."
-        )
+        # SOS-08-D wave-2c (2026-05-23 §15): parallel charts accepted.
+        # Per-region observable read pattern lands here; SOS-08-C §6.10
+        # chart-top wrapper exposes one `current_state_<region>` output
+        # port per region.
+        return _normalise_parallel_chart(chart_ir, chart_name, vector_ids)
 
     state_ids = [sid for sid, _st in _walk_states_in_order(chart_ir)]
     if not state_ids:
         raise UnsupportedChartError(
-            "SOS-08-D wave-1 cocotb emitter requires at least one <state> "
+            "SOS-08-D cocotb emitter requires at least one <state> "
             f"in chart '{chart_name}'; none found."
         )
 
@@ -277,6 +305,73 @@ def _normalise_chart(
         initial_state=initial,
         has_parallel=False,
         vector_ids=list(vector_ids),
+    )
+
+
+def _normalise_parallel_chart(
+    chart_ir: dict[str, Any],
+    chart_name: str,
+    vector_ids: list[str],
+) -> CocotbChart:
+    """Build a parallel-chart ``CocotbChart`` per SOS-08-D wave-2c.
+
+    For each ``<parallel>`` child ``<state>`` (each region):
+      * Walk its state subtree in document order.
+      * Resolve the region's initial state from ``<state initial="...">``
+        (or first state in document order if missing).
+      * Build a ``CocotbRegion`` carrying the region's name + state ids
+        + initial state.
+
+    The aggregate ``CocotbChart.state_ids`` is the union of all regions'
+    state ids in document order (region-major). The aggregate
+    ``initial_state`` is set to the first region's initial state — a
+    placeholder for cross-region compatibility with the wave-1 code
+    path; the parallel-chart test body branches to per-region
+    assertions rather than reading the aggregate value.
+    """
+    regions: list[CocotbRegion] = []
+    aggregate_state_ids: list[str] = []
+    for par in chart_ir.get("parallel") or []:
+        for region_state in par.get("state") or []:
+            rname = region_state.get("id")
+            if not isinstance(rname, str) or not rname:
+                # Skip nameless region nodes — chart authors must name
+                # every region (matches SOS-08-C wave-2 expectation).
+                continue
+            r_state_ids = [
+                sid for sid, _st in _walk_states_in_order(region_state)
+            ]
+            if not r_state_ids:
+                raise UnsupportedChartError(
+                    f"SOS-08-D cocotb emitter: parallel chart "
+                    f"'{chart_name}' region '{rname}' has no <state> "
+                    f"children; every region must contribute at least "
+                    f"one state."
+                )
+            r_initial = _resolve_initial_state(region_state, r_state_ids)
+            regions.append(
+                CocotbRegion(
+                    name=rname,
+                    state_ids=r_state_ids,
+                    initial_state=r_initial,
+                )
+            )
+            aggregate_state_ids.extend(r_state_ids)
+
+    if not regions:
+        raise UnsupportedChartError(
+            f"SOS-08-D cocotb emitter: parallel chart '{chart_name}' "
+            f"yielded zero regions; the top-level <parallel> must "
+            f"contain at least one named <state> region."
+        )
+
+    return CocotbChart(
+        name=chart_name,
+        state_ids=aggregate_state_ids,
+        initial_state=regions[0].initial_state,
+        has_parallel=True,
+        vector_ids=list(vector_ids),
+        regions=regions,
     )
 
 
@@ -390,6 +485,36 @@ def _emit_helpers_py(
         encoding_lines.append(f"    {sid!r}: 0b{value:0{len(encoding)}b},  # {_state_constant_name(sid)}")
     encoding_block = "\n".join(encoding_lines) if encoding_lines else "    # (no chart states found)"
 
+    # SOS-08-D wave-2c: per-region state-encoding maps for parallel
+    # charts. Each region has its own one-hot encoding (state 0 → bit 0
+    # within the region's slice). The chart-top wrapper exposes one
+    # `current_state_<region>` output per region; the test reads each
+    # port and asserts against the region's encoding.
+    region_encodings_block: str
+    region_initials_block: str
+    if chart.has_parallel and chart.regions:
+        region_enc_lines: list[str] = []
+        region_init_lines: list[str] = []
+        for r in chart.regions:
+            r_enc = _one_hot_encoding(r.state_ids)
+            r_inner: list[str] = []
+            for sid, val in sorted(r_enc.items(), key=lambda kv: kv[1]):
+                r_inner.append(
+                    f"        {sid!r}: 0b{val:0{len(r_enc)}b},"
+                )
+            r_inner_block = "\n".join(r_inner) if r_inner else ""
+            region_enc_lines.append(
+                f"    {r.name!r}: {{\n{r_inner_block}\n    }},"
+            )
+            region_init_lines.append(
+                f"    {r.name!r}: {r.initial_state!r},"
+            )
+        region_encodings_block = "\n".join(region_enc_lines)
+        region_initials_block = "\n".join(region_init_lines)
+    else:
+        region_encodings_block = "    # (single-region chart; no per-region encodings)"
+        region_initials_block = "    # (single-region chart; no per-region initials)"
+
     body = f'''"""Shared cocotb helpers for chart `{chart.name}`.
 
 {_GEN_HEADER}
@@ -433,6 +558,21 @@ _STATE_ENCODING: dict[str, int] = {{
 # messages can render the chart name + initial state per INV-S-HDL-D-5.
 _CHART_NAME: str = {chart.name!r}
 _INITIAL_STATE: str = {chart.initial_state!r}
+_HAS_PARALLEL: bool = {chart.has_parallel!r}
+
+# SOS-08-D wave-2c: per-region state encodings + initial states for
+# parallel charts. The chart-top wrapper exposes one `current_state_
+# <region>` output port per region (per SOS-08-C §6.10); the test
+# reads each port through `dut.current_state_<region>` and asserts
+# against the region's encoding via `assert_region_state`. For
+# single-region charts these maps are empty + unused.
+_REGION_STATE_ENCODINGS: dict[str, dict[str, int]] = {{
+{region_encodings_block}
+}}
+
+_REGION_INITIAL_STATES: dict[str, str] = {{
+{region_initials_block}
+}}
 
 
 def load_vector(path: Path | str) -> dict[str, Any]:
@@ -495,6 +635,72 @@ def assert_state(dut: Any, expected_state_id: str, failure_ctx: str) -> None:
             f"expected state {{expected_state_id!r}} (one-hot=0b{{expected:b}}), "
             f"observed one-hot=0b{{observed:b}}. "
             f"Chart-vocabulary failure per INV-SOS-H + SOS-08-D §6.6."
+        )
+
+
+def assert_region_state(
+    dut: Any,
+    region_name: str,
+    expected_state_id: str,
+    failure_ctx: str,
+) -> None:
+    """Per-region chart-vocabulary state assertion (SOS-08-D wave-2c).
+
+    For parallel charts the chart-top wrapper exposes one
+    ``current_state_<region>`` output port per region per SOS-08-C
+    §6.10. This helper:
+
+      1. Looks up the per-region one-hot encoding in
+         ``_REGION_STATE_ENCODINGS[region_name]``.
+      2. Reads ``dut.current_state_<region>`` via getattr.
+      3. Asserts equality with chart-vocabulary failure message.
+
+    Mirrors :func:`assert_state` for the single-region case; differs
+    only by routing through the region-specific encoding + observable
+    port.
+
+    Raises ``AssertionError`` (with chart vocabulary per INV-S-HDL-D-5)
+    when the region name is unknown, the state id is not a member of
+    the region's encoding, the observable cannot be read, or the
+    observed value mismatches the expected.
+    """
+    if region_name not in _REGION_STATE_ENCODINGS:
+        raise AssertionError(
+            f"chart-state mismatch in test {{failure_ctx}}: region "
+            f"{{region_name!r}} is not a known region of chart "
+            f"{{_CHART_NAME!r}}. Known regions: "
+            f"{{sorted(_REGION_STATE_ENCODINGS)!r}}. "
+            f"Chart-vocabulary failure per INV-SOS-H + SOS-08-D §6.6."
+        )
+    region_encoding = _REGION_STATE_ENCODINGS[region_name]
+    if expected_state_id not in region_encoding:
+        raise AssertionError(
+            f"chart-state mismatch in test {{failure_ctx}}: state "
+            f"{{expected_state_id!r}} is not a known state of region "
+            f"{{region_name!r}} (chart {{_CHART_NAME!r}}). Known "
+            f"states: {{sorted(region_encoding)!r}}. Chart-vocabulary "
+            f"failure per INV-SOS-H + SOS-08-D §6.6."
+        )
+    expected = region_encoding[expected_state_id]
+    port_name = f"current_state_{{region_name}}"
+    try:
+        observed = int(getattr(dut, port_name).value)
+    except Exception as exc:  # pragma: no cover - simulator-side surface
+        raise AssertionError(
+            f"chart-state read failure in test {{failure_ctx}}: could "
+            f"not read dut.{{port_name}}.value ({{exc}}). Expected "
+            f"state {{expected_state_id!r}} (one-hot=0b{{expected:b}}) "
+            f"in region {{region_name!r}}. Chart-vocabulary failure "
+            f"per INV-SOS-H + SOS-08-D §6.6."
+        ) from exc
+    if observed != expected:
+        raise AssertionError(
+            f"chart-state mismatch in test {{failure_ctx}}: region "
+            f"{{region_name!r}} expected state "
+            f"{{expected_state_id!r}} (one-hot=0b{{expected:b}}), "
+            f"observed one-hot=0b{{observed:b}} on "
+            f"dut.{{port_name}}. Chart-vocabulary failure per "
+            f"INV-SOS-H + SOS-08-D §6.6."
         )
 
 
@@ -680,18 +886,33 @@ def _emit_test_py(chart: CocotbChart, config: "_CocotbConfig") -> str:
     body loads the vector at test runtime, drives the clock + reset,
     walks the vector steps (if any) asserting state per step, then
     asserts the terminal state.
+
+    SOS-08-D wave-2c: parallel charts emit a parallel-aware test body
+    that reads ``current_state_<region>`` per region (SOS-08-C §6.10
+    chart-top wrapper convention) and asserts per-region initial-state
+    entry after reset. Per-region step-driven vectors land in wave-3
+    alongside SOS-03 schema extension for per-region ``expected_states``.
     """
     dut_module = config.dut_module or _dut_module_name(chart.name)
     test_funcs: list[str] = []
     for vec in chart.vector_ids:
         slug = _slugify_vector_id(vec)
-        func = _emit_one_test_function(
-            vector_id=vec,
-            slug=slug,
-            clock_period_ns=config.clock_period_ns,
-            reset_cycles=config.reset_cycles,
-            initial_state=chart.initial_state,
-        )
+        if chart.has_parallel:
+            func = _emit_parallel_test_function(
+                chart=chart,
+                vector_id=vec,
+                slug=slug,
+                clock_period_ns=config.clock_period_ns,
+                reset_cycles=config.reset_cycles,
+            )
+        else:
+            func = _emit_one_test_function(
+                vector_id=vec,
+                slug=slug,
+                clock_period_ns=config.clock_period_ns,
+                reset_cycles=config.reset_cycles,
+                initial_state=chart.initial_state,
+            )
         test_funcs.append(func)
 
     funcs_block = "\n\n".join(test_funcs)
@@ -733,6 +954,7 @@ from cocotb.triggers import RisingEdge, Timer
 
 from _cocotb_helpers import (
     AnnotationWriter,
+    assert_region_state,
     assert_state,
     format_failure,
     load_vector,
@@ -864,6 +1086,99 @@ async def test_vector_{slug}(dut):
         # SOS-08-G §5.6 (PCDN-G-003): one file per test run; close on
         # both success and failure so the annotation file is well-formed
         # on disk regardless of the test outcome.
+        writer.close()
+'''
+
+
+def _emit_parallel_test_function(
+    chart: CocotbChart,
+    vector_id: str,
+    slug: str,
+    clock_period_ns: int,
+    reset_cycles: int,
+) -> str:
+    """Emit one ``@cocotb.test()`` async function for a parallel chart.
+
+    Per SOS-08-D §15 wave-2c (2026-05-23) + SOS-08-C §6.10 chart-top
+    wrapper convention. The emitted test:
+
+      1. Loads the vector (kept for vocabulary parity with the
+         single-region path; per-region step-driven vectors land in
+         wave-3).
+      2. Starts the clock + applies reset.
+      3. For each region, asserts ``dut.current_state_<region>``
+         equals the region's initial-state one-hot value (via the
+         emitted ``assert_region_state`` helper).
+      4. Records a per-region chart-state entry into the SOS-08-G
+         annotation overlay so the review surface sees each region's
+         post-reset state.
+
+    Per-region step-driven assertions (where each step names the
+    region whose ``expected_state`` is being asserted) are wave-3
+    scope alongside the SOS-03 schema extension that adds
+    ``expected_states: {region: state}`` to each step.
+    """
+    # Build the per-region assertion + annotation block.
+    region_blocks: list[str] = []
+    for r in chart.regions:
+        region_blocks.append(
+            f"        assert_region_state(\n"
+            f"            dut, {r.name!r}, {r.initial_state!r},\n"
+            f"            format_failure(vector),\n"
+            f"        )\n"
+            f"        writer.record_transition(\n"
+            f"            cycle=cycle,\n"
+            f"            chart_state={r.initial_state!r},\n"
+            f"            transition_id=None,\n"
+            f"            chart_path=[{r.name!r}, {r.initial_state!r}],\n"
+            f"            signal=\"dut.current_state_{r.name}\",\n"
+            f"            region={r.name!r},\n"
+            f"        )"
+        )
+    region_block = "\n".join(region_blocks) if region_blocks else "        pass"
+
+    return f'''@cocotb.test()
+async def test_vector_{slug}(dut):
+    """SOS-08-D wave-2c — parallel-chart vector {vector_id!r}.
+
+    Wave-2c parallel-chart scaffold (SOS-08-D §15 2026-05-23 entry +
+    SOS-08-C §6.10 chart-top wrapper convention). The DUT here is
+    the chart-top wrapper (``{_dut_module_name(chart.name)}``); it
+    exposes one ``current_state_<region>`` output port per region.
+
+    This wave-2c test:
+      1. Applies reset against the chart-top wrapper.
+      2. Asserts each region's initial-state entry via
+         ``assert_region_state(dut, <region>, <initial>, ...)``.
+      3. Emits per-region SOS-08-G annotation records for the post-
+         reset state-entry per region.
+
+    Per-region step-driven assertions are wave-3 scope (alongside the
+    SOS-03 schema extension that adds ``expected_states: {{region:
+    state}}`` to each step). Wave-2c keeps the scaffold tight: reset
+    + initial-state-per-region — every region is verified to enter
+    its declared initial state on reset deassertion.
+    """
+    vector = load_vector(_VECTORS_DIR / "{vector_id}.json")
+    cocotb.start_soon(Clock(dut.clk, _CLOCK_PERIOD_NS, units="ns").start())
+
+    # SOS-08-G §5.6 (PCDN-G-003): one annotation file per test run;
+    # closed in finally so the file is well-formed on success or
+    # failure.
+    writer = AnnotationWriter(test_name="test_vector_{slug}")
+    cycle = 0
+    try:
+        await _apply_reset(dut)
+        cycle += _RESET_CYCLES
+        await RisingEdge(dut.clk)
+        cycle += 1
+
+        # SOS-08-D wave-2c: assert each region's initial state via
+        # the per-region observable port. Per SOS-08-C §6.10 each
+        # region's `current_state_<region>` is the chart-top wrapper's
+        # observable output for that region.
+{region_block}
+    finally:
         writer.close()
 '''
 

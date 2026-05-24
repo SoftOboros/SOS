@@ -563,3 +563,54 @@ Wave-2b lifts the wave-1 parallel-chart rejection in `transliterate_sva_bind.py`
 **Cited PCDNs**: PCDN-D-004 wave-2 extension (per-DUT bind file co-located with the cocotb test directory — now per-region under the same `tests/<chart>/` prefix); SOS-08-C §6.10 chart-top wrapper module naming convention; SOS-08-C wave-2's per-region FSM module naming convention.
 
 Status: 🟢 ratified (continuing) — SOS-08-D wave-2b SVA bind side closes the parallel-chart binding half. Wave-2c lifts the cocotb-side parallel-chart rejection + emits the chart-top-wrapper-targeted scaffold test. Wave-3 covers multi-clock-domain bind wiring + cross-region invariant SVA properties.
+
+### 2026-05-23 — Impl wave-2c: cocotb parallel-chart support (Ira)
+
+Wave-2c closes the cocotb half of the parallel-chart deliverable. The wave-1 parallel-chart rejection in `transliterate_cocotb.py._normalise_chart` is lifted; parallel charts now emit a parallel-aware test scaffold that reads each region's `current_state_<region>` output port (per SOS-08-C §6.10 chart-top wrapper convention) and asserts the region's initial-state entry after reset.
+
+**Wave-2c implementation surface**:
+
+- **`CocotbRegion` dataclass** added: carries `name`, `state_ids`, `initial_state` per region per SOS-08-C §6.10 chart-top wrapper convention.
+- **`CocotbChart.regions: list[CocotbRegion]`** field added; populated by `_normalise_parallel_chart` for parallel charts; empty for single-region (wave-1 path unchanged).
+- **`_normalise_parallel_chart` function** added: walks each region's state subtree, builds a `CocotbRegion` per `<state>` child of the top-level `<parallel>`, populates the aggregate `CocotbChart` with the union of regions' state ids and `has_parallel=True`. Region naming uses each region's `<state id>` attribute; missing region names raise `UnsupportedChartError`.
+- **`_emit_helpers_py` extension**: emitted `_cocotb_helpers.py` now includes:
+    - `_HAS_PARALLEL: bool` flag — `True` for parallel charts, `False` for single-region.
+    - `_REGION_STATE_ENCODINGS: dict[str, dict[str, int]]` — per-region one-hot encoding map; one entry per region for parallel charts; empty for single-region.
+    - `_REGION_INITIAL_STATES: dict[str, str]` — per-region initial-state map.
+    - `assert_region_state(dut, region_name, expected_state_id, failure_ctx)` helper — looks up the per-region encoding, reads `dut.current_state_<region>` via `getattr`, asserts equality with chart-vocabulary failure message per INV-S-HDL-D-5.
+- **`_emit_test_py` dispatch**: branches on `chart.has_parallel`; parallel charts dispatch to `_emit_parallel_test_function`, single-region charts continue through the wave-1 `_emit_one_test_function` path unchanged.
+- **`_emit_parallel_test_function`**: emits one `@cocotb.test()` per vector for parallel charts. Test body applies reset, then asserts each region's initial-state entry via `assert_region_state(dut, <region>, <region_initial>, format_failure(vector))` and records a per-region SOS-08-G annotation overlay entry (with `region=<region>` per §5.2).
+- **Test imports update**: emitted `test_<chart>_fsm.py` imports `assert_region_state` alongside `assert_state` from `_cocotb_helpers` so single-region tests retain the original helper and parallel-chart tests get the per-region variant.
+
+**Wave-2c scope (what landed vs. what is deferred)**:
+
+- **Reset + per-region initial-state-entry assertion** for parallel charts: ✅ landed. Every region's declared initial state is verified after reset deassertion via `assert_region_state`.
+- **Per-region SOS-08-G annotation records** with `region=<region>` field set per §5.2: ✅ landed. The review surface sees one record per region per post-reset state-entry.
+- **Per-region step-driven vector assertions** (where each step names the region whose `expected_state` is being asserted): **wave-3 scope**. Requires SOS-03 schema extension: `steps[].expected_states: {region: state}` shape (replacing the wave-1 single-region `steps[].expected_state` field for parallel charts). Wave-2c keeps the scaffold tight — reset + per-region initial-state-entry only.
+- **Cross-region transition driving** (where one region's state change triggers another region's transition via shared datamodel signal): **wave-3 scope** alongside the SOS-08-C cross-region datamodel-signal-tracking pass.
+- **DUT module name** in the parallel-chart test is the chart-top wrapper (`<chart>_fsm` per SOS-08-C §6.10), NOT a per-region FSM module. This matches the wave-2b SVA bind side decision (the bind directives target the chart-top wrapper); both halves of wave-2 thus address the same DUT instantiation surface in the customer's testbench.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-D-3** (vector-IR read-only at emitter): retained — `_normalise_parallel_chart` does not mutate the input chart_ir; region state lists are freshly constructed.
+- **INV-S-HDL-D-5** (chart-vocabulary failure messages): retained — `assert_region_state` emits failure messages naming the region, the expected state, the observed one-hot pattern, and the chart name. Per-region annotation records carry the region in their `region` field per SOS-08-G §5.2.
+- **INV-S-HDL-D-6** (per-vector test isolation by default): retained — parallel charts emit one `@cocotb.test()` per vector (same as single-region); chart-region-grouping remains opt-in for wave-3.
+- **INV-S-HDL-G-5** (generation co-located with `@cocotb.test()` body): retained — the per-region annotation writer is instantiated inside the test body, not as a post-process step.
+
+**Test count**: 11 new tests:
+
+- `test_parallel_charts_accepted_at_wave_2c` (replaces wave-1's `test_parallel_charts_rejected_at_v1`) — confirms the emit set is unchanged, both regions' `current_state_<region>` ports appear in the test body, helpers carry the per-region encoding maps, `_HAS_PARALLEL=True`.
+- `TestParallelChartEmit` class with 10 tests: per-region encodings present; per-region initial states present; `assert_region_state` helper emitted; helpers + test module both parse; test imports `assert_region_state`; per-region initial-state assertions emit for each region; per-region annotation records with `region=<region>`; DUT module is chart-top wrapper; **single-region chart unchanged** (regression guard — `_HAS_PARALLEL=False`, existing test path unchanged).
+
+**Test suite**: 336/336 passing (325 prior + 11 wave-2c).
+
+**Cited PCDNs**: SOS-08-C §6.10 chart-top wrapper module naming + per-region `current_state_<region>` output port convention; SOS-08-G §5.2 annotation record `region` field; INV-S-HDL-D-3/-5/-6; INV-S-HDL-G-5.
+
+**Wave-3 boundary** (consolidated across wave-2b + wave-2c):
+
+- Per-region step-driven vectors via SOS-03 schema extension (`steps[].expected_states: {region: state}`).
+- Multi-clock-domain parallel-chart bind wiring (per-domain `clk_<dom>` / `rst_<dom>` ports on chart-top wrapper).
+- Cross-region invariant SVA properties (`<chart>_top_sva.sv` module with cross-region `assert property` clauses).
+- Cross-region transition driving via shared datamodel signals (SOS-08-C cross-region tracking pass).
+
+Status: 🟢 ratified (continuing) — SOS-08-D wave-2 parallel-chart support is now complete on both the SVA bind side (wave-2b) and the cocotb side (wave-2c). Wave-3 lifts the remaining scope to per-region step-driven vectors + multi-clock-domain bind wiring + cross-region invariant SVA properties.

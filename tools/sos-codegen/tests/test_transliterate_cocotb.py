@@ -358,20 +358,35 @@ def test_assert_state_passes_on_match():
 # ---------------------------------------------------------------------------
 
 
-def test_parallel_charts_rejected_at_v1():
-    """A parallel chart must surface UnsupportedChartError with a
-    clear chart-vocabulary message naming the wave that lands the
-    feature (per INV-S-HDL-D-5 / INV-S-HDL-5).
+def test_parallel_charts_accepted_at_wave_2c():
+    """SOS-08-D wave-2c (2026-05-23 §15): parallel charts now produce
+    a parallel-aware test scaffold. The wave-1 UnsupportedChartError
+    rejection is lifted; the emitted test reads per-region observables
+    via the chart-top wrapper.
     """
-    with pytest.raises(UnsupportedChartError) as exc_info:
-        render_target(_chart_with_parallel(), {"chart_name": "parallels"})
-    msg = str(exc_info.value)
-    assert "wave-1" in msg
-    # The rejection MUST cite the landing wave so chart authors know
-    # when to expect support.
-    assert "wave-2" in msg
-    # And cite the spec doc per the chart-vocabulary doctrine.
-    assert "SOS-08-D" in msg
+    files = render_target(_chart_with_parallel(), {"chart_name": "parallels"})
+
+    # Standard emit set still present (six normative files + scaffold).
+    assert "tests/parallels/test_parallels_fsm.py" in files
+    assert "tests/parallels/_cocotb_helpers.py" in files
+
+    # Per SOS-08-C §6.10 the chart-top wrapper exposes one
+    # `current_state_<region>` output per region; the wave-2c test
+    # body MUST read both `current_state_left` and `current_state_right`.
+    test_src = files["tests/parallels/test_parallels_fsm.py"]
+    assert "current_state_left" in test_src
+    assert "current_state_right" in test_src
+
+    # The emitted helpers module carries the per-region encoding maps.
+    helpers_src = files["tests/parallels/_cocotb_helpers.py"]
+    assert "_REGION_STATE_ENCODINGS" in helpers_src
+    assert "_REGION_INITIAL_STATES" in helpers_src
+    assert "assert_region_state" in helpers_src
+
+    # `_HAS_PARALLEL = True` flag is set for parallel charts so
+    # downstream tools (e.g. SOS-08-G annotation overlay readers)
+    # can detect the parallel-chart provenance.
+    assert "_HAS_PARALLEL: bool = True" in helpers_src
 
 
 def test_non_dict_chart_ir_rejected():
@@ -1037,3 +1052,96 @@ class TestPostResultsEndToEnd:
         # block (one in-order match + two trailing appended).
         for inv in ("I1", "I2", "I3"):
             assert f"invariant={inv}" in combined
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-D wave-2c: cocotb parallel-chart support (§15 2026-05-23 entry).
+# ---------------------------------------------------------------------------
+
+
+class TestParallelChartEmit:
+    """Parallel-chart cocotb emission contract per SOS-08-D §15 wave-2c."""
+
+    def _files(self) -> dict:
+        return render_target(_chart_with_parallel(),
+                             {"chart_name": "parallels"})
+
+    def test_emits_same_artifact_set_as_single_region(self):
+        files = self._files()
+        # Same six normative files + scaffold vector.
+        for fname in (
+            "tests/parallels/test_parallels_fsm.py",
+            "tests/parallels/_cocotb_helpers.py",
+            "tests/parallels/Makefile",
+            "tests/parallels/pytest.ini",
+            "tests/parallels/README.md",
+            "tests/parallels/post_results.py",
+            "tests/parallels/vectors/000-reset.json",
+        ):
+            assert fname in files, f"parallel emit missing {fname}"
+
+    def test_helpers_carry_region_encodings_for_each_region(self):
+        helpers = self._files()["tests/parallels/_cocotb_helpers.py"]
+        # Both regions from the fixture: left + right.
+        assert "'left'" in helpers
+        assert "'right'" in helpers
+
+    def test_helpers_carry_region_initial_states(self):
+        helpers = self._files()["tests/parallels/_cocotb_helpers.py"]
+        # Fixture: left initial = l_idle, right initial = r_idle.
+        assert "'l_idle'" in helpers
+        assert "'r_idle'" in helpers
+
+    def test_assert_region_state_helper_present(self):
+        helpers = self._files()["tests/parallels/_cocotb_helpers.py"]
+        assert "def assert_region_state(" in helpers
+
+    def test_helpers_module_parses(self):
+        helpers = self._files()["tests/parallels/_cocotb_helpers.py"]
+        ast.parse(helpers)
+
+    def test_test_module_parses(self):
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        ast.parse(test)
+
+    def test_test_imports_assert_region_state(self):
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        # Wave-2c parallel emit imports assert_region_state alongside
+        # assert_state (latter retained for single-region paths through
+        # the same helpers module).
+        assert "assert_region_state" in test
+
+    def test_test_body_asserts_per_region_initial_state(self):
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        # Each region's initial-state assertion via assert_region_state.
+        assert "'left'" in test and "'l_idle'" in test
+        assert "'right'" in test and "'r_idle'" in test
+
+    def test_test_body_records_per_region_annotation(self):
+        """SOS-08-G §5.2: every annotation record carries `region`;
+        wave-2c sets region=<region> per record so the review surface
+        attributes each post-reset state-entry to its region."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        assert "region='left'" in test or 'region="left"' in test
+        assert "region='right'" in test or 'region="right"' in test
+
+    def test_dut_module_name_is_chart_top_wrapper(self):
+        """The DUT in the parallel-chart test is the chart-top
+        wrapper `<chart>_fsm` (per SOS-08-C §6.10), NOT a per-region
+        FSM module."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        assert "parallels_fsm" in test
+
+    def test_single_region_chart_unchanged(self):
+        """Wave-2c MUST NOT change single-region emit behavior — the
+        wave-1 code path runs unchanged."""
+        files = render_target(_simple_chart(), {"chart_name": "demo"})
+        helpers = files["tests/demo/_cocotb_helpers.py"]
+        # _HAS_PARALLEL is False for single-region.
+        assert "_HAS_PARALLEL: bool = False" in helpers
+        # Existing test path still emits.
+        test = files["tests/demo/test_demo_fsm.py"]
+        assert "test_vector_" in test
+        # Single-region test reads `dut.current_state`, not
+        # `dut.current_state_<region>`.
+        assert "current_state" in test
