@@ -379,13 +379,101 @@ def test_module_cites_sos_08_d_spec():
     assert "§6.3" in src or "6.3" in src
 
 
-def test_parallel_charts_rejected_at_v1():
-    """Wave-1 scaffold; parallel chart bind files land in wave-2."""
+def test_parallel_charts_accepted_at_wave_2b():
+    """Wave-2b (2026-05-23 §15): parallel charts now emit per-region
+    SVA + per-region bind files; the wave-1 rejection is lifted."""
     chart = _parallel_chart()
-    with pytest.raises(transliterate_sva_bind.UnsupportedChartError) as excinfo:
-        transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
-    msg = str(excinfo.value)
-    assert "wave-1" in msg.lower() or "wave-2" in msg.lower()
+    files = transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+    # Two regions in the fixture → 4 files (2 per region).
+    assert len(files) == 4, (
+        f"Wave-2b parallel-chart emit expected 4 files for the 2-region "
+        f"fixture; got {sorted(files)}"
+    )
+    # Per-region file names follow `<chart>_region_<region>_fsm_*.sv`.
+    expected = {
+        "tests/p/p_region_left_fsm_sva.sv",
+        "tests/p/p_region_left_fsm_bind.sv",
+        "tests/p/p_region_right_fsm_sva.sv",
+        "tests/p/p_region_right_fsm_bind.sv",
+    }
+    assert set(files) == expected
+
+
+class TestParallelChartEmit:
+    """SOS-08-D wave-2b parallel-chart emission contract (§15
+    2026-05-23 entry)."""
+
+    def _files(self):
+        return transliterate_sva_bind.render_target(
+            _parallel_chart(), {"chart_name": "p"}
+        )
+
+    def test_per_region_sva_module_name(self):
+        sva = self._files()["tests/p/p_region_left_fsm_sva.sv"]
+        # SVA module name follows `<chart>_region_<region>_fsm_sva`.
+        assert "module p_region_left_fsm_sva" in sva
+
+    def test_per_region_bind_targets_chart_top_wrapper(self):
+        """The bind directive MUST target the chart-top wrapper module
+        `<chart>_fsm` (per SOS-08-C §6.10), NOT the per-region FSM
+        module."""
+        bind = self._files()["tests/p/p_region_left_fsm_bind.sv"]
+        # `bind <chart-top> <sva-module> <inst> (...);` — chart-top is
+        # `p_fsm` per SOS-08-C wave-2 chart-top wrapper naming.
+        assert "bind p_fsm p_region_left_fsm_sva" in bind
+
+    def test_per_region_bind_wires_current_state_per_region(self):
+        """The bind directive's `.current_state(...)` connection MUST
+        wire the chart-top wrapper's `current_state_<region>` output
+        port to the SVA module's region-local `current_state` input."""
+        bind = self._files()["tests/p/p_region_left_fsm_bind.sv"]
+        assert ".current_state (current_state_left)" in bind
+
+    def test_other_region_bind_wires_other_observable(self):
+        """Each region binds to its own `current_state_<region>` port."""
+        bind = self._files()["tests/p/p_region_right_fsm_bind.sv"]
+        assert ".current_state (current_state_right)" in bind
+
+    def test_per_region_bind_uses_single_clock_domain(self):
+        """Wave-2b assumes single-clock-domain parallel charts; the
+        bind wires `.clk(clk), .rst(rst)`. Multi-clock parallel charts
+        are wave-3."""
+        bind = self._files()["tests/p/p_region_left_fsm_bind.sv"]
+        assert ".clk           (clk)" in bind
+        assert ".rst           (rst)" in bind
+
+    def test_per_region_sva_module_has_one_hot_assertion(self):
+        """Each region's SVA module retains INV-D-1 (one-hot encoding
+        assertion) — the per-region observability claim is independent
+        of every other region's."""
+        sva = self._files()["tests/p/p_region_left_fsm_sva.sv"]
+        assert "INV-D-1" in sva
+
+    def test_per_region_sva_module_has_reset_initial_assertion(self):
+        sva = self._files()["tests/p/p_region_left_fsm_sva.sv"]
+        assert "INV-D-2" in sva
+
+    def test_per_region_sva_module_has_transition_assertions(self):
+        # The fixture region "left" has one transition L1→L2.
+        sva = self._files()["tests/p/p_region_left_fsm_sva.sv"]
+        assert "INV-D-3" in sva
+
+    def test_per_region_bind_cites_wave_2b(self):
+        """The per-region bind file's header SHOULD cite wave-2b so a
+        reader of the bind file knows which contract emitted it."""
+        bind = self._files()["tests/p/p_region_left_fsm_bind.sv"]
+        assert "wave-2b" in bind
+
+    def test_single_region_chart_unchanged(self):
+        """Wave-2b MUST NOT change single-region emit behavior."""
+        files = transliterate_sva_bind.render_target(
+            _simple_chart(), {"chart_name": "demo"}
+        )
+        # Single-region path emits exactly 2 files at the original
+        # paths.
+        assert len(files) == 2
+        assert "tests/demo/demo_fsm_sva.sv" in files
+        assert "tests/demo/demo_fsm_bind.sv" in files
 
 
 def test_chart_ir_must_be_dict():

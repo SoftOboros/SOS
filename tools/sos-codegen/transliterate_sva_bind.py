@@ -318,16 +318,16 @@ def _collect_datamodel(chart: dict[str, Any]) -> dict[str, _SvaDatamodelSignal]:
 def _normalise_chart(
     chart_ir: dict[str, Any], chart_name: str
 ) -> _SvaChart:
-    """Reject parallel charts, build the single-region ``_SvaChart``."""
-    if chart_ir.get("parallel"):
-        raise UnsupportedChartError(
-            "SOS-08-D wave-1 scaffold; parallel chart bind files land "
-            "in wave-2. The wave-1 emitter accepts single-region charts "
-            "only; the chart-top wrapper + per-region SVA module pattern "
-            f"(chart '{chart_name}') is reserved for the wave-2 emission "
-            "alongside the SOS-08-C parallel-region machinery."
-        )
+    """Build the single-region ``_SvaChart`` from chart_ir.
 
+    Per SOS-08-D §15 wave-2b ratification (2026-05-23): parallel charts
+    are no longer rejected here — the caller dispatches through
+    ``_normalise_parallel_chart`` when the chart carries a top-level
+    ``<parallel>``. This function continues to handle the single-region
+    code path. Re-entry from the parallel walker passes one region's
+    state subtree as ``chart_ir`` with the region name embedded in
+    ``chart_name`` per the parallel-chart naming convention.
+    """
     states: list[_SvaState] = []
     for sid, st in _walk_states_in_order(chart_ir):
         sva_state = _SvaState(state_id=sid)
@@ -717,6 +717,140 @@ def _emit_bind_directive(chart: _SvaChart) -> str:
 
 
 # ----------------------------------------------------------------------------
+# Parallel-chart support (SOS-08-D wave-2b — 2026-05-23).
+# ----------------------------------------------------------------------------
+
+
+def _collect_parallel_regions(
+    chart_ir: dict[str, Any]
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return [(region_name, region_state_subtree), ...] for a parallel
+    chart.
+
+    A parallel chart has a top-level ``<parallel>`` element whose
+    ``<state>`` children are the regions. Each region carries its own
+    states + transitions; the region's subtree shape is the same as a
+    single-region chart's, so we can pass each subtree through the
+    existing ``_normalise_chart`` machinery.
+
+    Per SOS-08-C §6.1 + the parallel-region machinery: region names
+    come from the ``id`` attribute of each ``<state>`` child of the
+    top-level ``<parallel>``.
+    """
+    out: list[tuple[str, dict[str, Any]]] = []
+    parallels = chart_ir.get("parallel") or []
+    for par in parallels:
+        for region_state in par.get("state") or []:
+            rid = region_state.get("id")
+            if isinstance(rid, str) and rid:
+                out.append((rid, region_state))
+    return out
+
+
+def _per_region_chart_name(chart_name: str, region_name: str) -> str:
+    """``<chart>_region_<region>`` — base chart-name string passed into
+    ``_module_name`` / ``_sva_module_name`` to produce the per-region
+    SVA module name + per-region bind directive file basename.
+
+    Mirrors SOS-08-C wave-2's per-region SV module naming convention
+    (``<chart>_region_<name>_fsm`` per the SOS-08-C walker's region
+    module emit step) so the per-region SVA module's basename collides
+    with the per-region FSM module's basename in canonical-naming
+    space, and the bind directive's target-module reference works
+    against the chart-top wrapper that instantiates each region FSM.
+    """
+    return f"{chart_name}_region_{region_name}"
+
+
+def _emit_parallel_bind_directive(
+    chart: _SvaChart,
+    chart_top_module: str,
+    region_name: str,
+) -> str:
+    """Per-region bind directive for parallel charts.
+
+    Differs from ``_emit_bind_directive`` (single-region wave-1) in
+    one normative way: the DUT module being bound to is the
+    **chart-top wrapper** (``<chart>_fsm``, passed verbatim via
+    ``chart_top_module``), NOT the per-region FSM module. The chart-
+    top wrapper exposes one ``current_state_<region>`` output port per
+    region (per SOS-08-C §6.10 chart-top wrapper emission); this bind
+    wires that per-region output to the SVA module's region-local
+    ``current_state`` input port.
+
+    Wave-2b assumes single-clock-domain parallel charts (no
+    ``<sos:region clock="..."/>`` annotations). Multi-clock-domain
+    parallel-chart binding (per-domain ``clk_<dom>`` / ``rst_<dom>``
+    ports on the chart-top wrapper, with each region wired to its
+    declared clock domain) is wave-3 scope per the §15 wave-2b entry
+    + SOS-08-C §6.10's clock-distribution contract.
+
+    Args:
+        chart: per-region ``_SvaChart`` (its ``chart_name`` is the
+            ``<chart>_region_<region>`` form per
+            ``_per_region_chart_name``).
+        chart_top_module: the chart-top wrapper module name —
+            ``<chart>_fsm`` per SOS-08-C §6.10. The bind targets this
+            module, not the per-region FSM module.
+        region_name: the region's chart-side identifier; used only to
+            cite the region in the emitted file header comment.
+    """
+    sva_module = _sva_module_name(chart.chart_name)
+    region_observable = f"current_state_{_sanitize_sv_identifier(region_name)}"
+
+    guard_signals = _datamodel_signals_referenced_in_guards(chart)
+
+    conn_lines: list[str] = [
+        "    .clk           (clk),",
+        "    .rst           (rst),",
+        f"    .current_state ({region_observable})",
+    ]
+    if guard_signals:
+        conn_lines[-1] = (
+            f"    .current_state ({region_observable}),"
+        )
+        for i, sig in enumerate(guard_signals):
+            dut_signal = f"data_{_sanitize_sv_identifier(sig.chart_id)}"
+            suffix = "," if i < len(guard_signals) - 1 else ""
+            conn_lines.append(
+                f"    .{sig.sv_name}  ({dut_signal}){suffix}"
+            )
+
+    inst_name = f"u_{sva_module}"
+
+    lines: list[str] = [
+        _emit_header(chart.chart_name, kind="sva-bind-directive"),
+        "",
+        "// SOS-08-D wave-2b: per-region bind for parallel charts.",
+        f"// Region: {region_name}",
+        f"// Chart-top wrapper module bound to: {chart_top_module}",
+        f"// Per-region SVA module:             {sva_module}",
+        f"// Observable wired to SVA input:     {region_observable}",
+        "//",
+        "// Per SOS-08-C §6.10 (chart-top wrapper emission), the",
+        "// chart-top wrapper instantiates each region FSM and exposes",
+        "// one current_state_<region> output per region. The bind",
+        "// directive below attaches the per-region SVA module to the",
+        "// chart-top wrapper instance and wires the corresponding",
+        "// current_state_<region> port to the SVA module's region-local",
+        "// current_state input.",
+        "//",
+        "// Wave-2b assumes single-clock-domain parallel charts. Multi-",
+        "// clock parallel-chart binding (per-domain clk_<dom>/rst_<dom>",
+        "// ports on the chart-top) is wave-3 scope.",
+        "",
+        "`default_nettype none",
+        "",
+        f"bind {chart_top_module} {sva_module} {inst_name} (",
+        *conn_lines,
+        ");",
+        "",
+        "`default_nettype wire",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+# ----------------------------------------------------------------------------
 # Public entry point.
 # ----------------------------------------------------------------------------
 
@@ -724,34 +858,37 @@ def _emit_bind_directive(chart: _SvaChart) -> str:
 def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
     """Emit the SVA assertion module + bind directive for the chart.
 
-    Wave-1 contract:
+    Wave-1 / wave-2b contract:
       * Single-region chart → two files:
           - ``tests/<chart>/<chart>_fsm_sva.sv``
           - ``tests/<chart>/<chart>_fsm_bind.sv``
-      * Parallel charts raise ``UnsupportedChartError`` with a wave-2
-        citation (PCDN-D-004 covers the per-DUT bind shape; the per-
-        region bind machinery is wave-2 scope).
+      * Parallel chart (wave-2b, 2026-05-23) → 2N files for N regions:
+          - ``tests/<chart>/<chart>_region_<region>_fsm_sva.sv``
+          - ``tests/<chart>/<chart>_region_<region>_fsm_bind.sv``
+        Each per-region bind targets the chart-top wrapper
+        (``<chart>_fsm`` per SOS-08-C §6.10) and wires its
+        ``current_state_<region>`` output port to the per-region SVA
+        module's region-local ``current_state`` input.
 
     Args:
         chart_ir: raw scjson dict (``ChartAst.raw_scjson``).
-        config: optional dict / dataclass. Wave-1 consumes:
+        config: optional dict / dataclass. Consumes:
             - ``chart_name`` (str): chart identifier; module-name base.
             - ``guard_depth_budget`` (int): PCDN-C-004 budget override.
 
     Returns:
         dict mapping output filename → file source. Filenames embed the
-        per-DUT directory prefix (``tests/<chart>/<chart>_fsm_sva.sv``)
-        so the codegen dispatcher can land them under the right per-DUT
-        test directory per PCDN-D-004 + SOS-08-D §6.1.
+        per-DUT directory prefix (``tests/<chart>/...``) per PCDN-D-004
+        + SOS-08-D §6.1.
 
     Raises:
-        UnsupportedChartError (or ``GuardDepthExceeded``) when the chart
-        names a feature outside the wave-1 scope or when a guard's
-        compiled depth exceeds the configured budget.
+        UnsupportedChartError (or ``GuardDepthExceeded``) when chart
+        shape is outside the scaffold scope or when a guard's compiled
+        depth exceeds the configured budget.
     """
     if not isinstance(chart_ir, dict):
         raise UnsupportedChartError(
-            "SOS-08-D wave-1 render_target expects the raw scjson dict, "
+            "SOS-08-D render_target expects the raw scjson dict, "
             f"not {type(chart_ir).__name__}. The main.py dispatcher needs "
             "to pass the parsed scjson AST (ChartAst.raw_scjson)."
         )
@@ -763,13 +900,27 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
 
     depth_budget = _resolve_depth_budget(config)
 
+    # SOS-08-D wave-2b (2026-05-23 §15): detect parallel charts and
+    # dispatch to per-region emission. Single-region charts continue
+    # through the wave-1 code path unchanged.
+    regions = _collect_parallel_regions(chart_ir)
+    base = _sanitize_sv_identifier(chart_name).lower()
+
+    if regions:
+        return _render_parallel(
+            chart_ir=chart_ir,
+            chart_name=chart_name,
+            base=base,
+            regions=regions,
+            depth_budget=depth_budget,
+        )
+
     chart = _normalise_chart(chart_ir, chart_name)
 
     sva_body = _emit_sva_module(chart, depth_budget)
     bind_body = _emit_bind_directive(chart)
 
     # PCDN-D-004 places both files under tests/<chart>/.
-    base = _sanitize_sv_identifier(chart_name).lower()
     sva_path = f"tests/{base}/{base}_fsm_sva.sv"
     bind_path = f"tests/{base}/{base}_fsm_bind.sv"
 
@@ -777,6 +928,70 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
         sva_path: sva_body,
         bind_path: bind_body,
     }
+
+
+def _render_parallel(
+    *,
+    chart_ir: dict[str, Any],
+    chart_name: str,
+    base: str,
+    regions: list[tuple[str, dict[str, Any]]],
+    depth_budget: int,
+) -> dict[str, str]:
+    """Emit per-region SVA + per-region bind for a parallel chart.
+
+    Per SOS-08-D §15 wave-2b ratification (2026-05-23): each region of
+    a parallel chart contributes one SVA assertion module + one bind
+    directive file under ``tests/<chart>/``. The bind directives all
+    target the chart-top wrapper (``<chart>_fsm`` per SOS-08-C §6.10),
+    so the SVA modules attach in parallel without coupling.
+
+    Datamodel signals on the parent chart_ir are passed through to
+    each per-region normalisation step so guard-referenced data
+    signals on region transitions resolve correctly. Each region's
+    SVA module carries only the datamodel signals referenced by its
+    own transition guards (per ``_datamodel_signals_referenced_in_guards``).
+    """
+    # The chart-top wrapper module name — bind targets it (not the
+    # per-region FSM modules). Mirrors SOS-08-C §6.10 chart-top
+    # wrapper module naming (``<chart>_fsm``).
+    chart_top_module = _module_name(chart_name)
+
+    out: dict[str, str] = {}
+    for region_name, region_state in regions:
+        # Per-region pseudo-chart: the region's <state> children sit
+        # at the chart's top level. We splice the parent chart's
+        # datamodel onto the region's state-tree so guard signals
+        # resolve consistently with the single-region code path.
+        per_region_ir: dict[str, Any] = {
+            "state": region_state.get("state") or [],
+            "datamodel": chart_ir.get("datamodel") or [],
+        }
+        per_region_initial = region_state.get("initial")
+        if per_region_initial:
+            per_region_ir["initial"] = per_region_initial
+
+        per_region_name = _per_region_chart_name(chart_name, region_name)
+        chart = _normalise_chart(per_region_ir, per_region_name)
+
+        sva_body = _emit_sva_module(chart, depth_budget)
+        bind_body = _emit_parallel_bind_directive(
+            chart=chart,
+            chart_top_module=chart_top_module,
+            region_name=region_name,
+        )
+
+        region_slug = _sanitize_sv_identifier(region_name).lower()
+        sva_path = (
+            f"tests/{base}/{base}_region_{region_slug}_fsm_sva.sv"
+        )
+        bind_path = (
+            f"tests/{base}/{base}_region_{region_slug}_fsm_bind.sv"
+        )
+        out[sva_path] = sva_body
+        out[bind_path] = bind_body
+
+    return out
 
 
 # ---------------------------------------------------------------------------

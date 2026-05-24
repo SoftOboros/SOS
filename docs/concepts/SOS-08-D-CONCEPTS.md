@@ -515,3 +515,51 @@ Wave-2a lands the §6.7 JUnit XML post-processor that wave-1 deferred. PCDN-D-00
 **Test count**: 13 new tests (1 modified existing emit-count assertion + 7 `TestPostResultsEmit` + 5 `TestPostResultsEndToEnd`). Suite total: 315/315 codegen + viewer tests passing.
 
 Status: 🟢 ratified (continuing) — SOS-08-D wave-2a closes the post_results.py gate. Wave-2b is parallel-chart support in both the cocotb and SVA bind walkers (per-region SVA bind file shape; cocotb test against the chart-top wrapper).
+
+### 2026-05-23 — Impl wave-2b: parallel-chart support in SVA bind walker (Ira)
+
+Wave-2b lifts the wave-1 parallel-chart rejection in `transliterate_sva_bind.py`. Parallel charts now emit one SVA assertion module + one bind directive **per region**, with the bind directives targeting the SOS-08-C chart-top wrapper (`<chart>_fsm` per SOS-08-C §6.10) rather than the per-region FSM modules. This closes the SVA half of the wave-2 parallel-chart deliverable; the cocotb half lands as wave-2c.
+
+**Wave-2b implementation surface (SVA bind side)**:
+
+- **`_collect_parallel_regions(chart_ir)`** detects the top-level `<parallel>` element and returns the list of `(region_name, region_state_subtree)` pairs per SOS-08-C §6.1.
+- **`_per_region_chart_name(chart_name, region_name)`** produces the `<chart>_region_<region>` base string passed into `_module_name` / `_sva_module_name`. The resulting per-region SVA module name is `<chart>_region_<region>_fsm_sva`, mirroring SOS-08-C wave-2's per-region FSM module naming.
+- **`_emit_parallel_bind_directive`** emits a per-region bind that targets the chart-top wrapper module and wires its `current_state_<region>` output port (per SOS-08-C §6.10) to the SVA module's region-local `current_state` input.
+- **`_render_parallel`** orchestrates per-region emission: for each region, splice the parent chart's datamodel onto the region's state-tree, run `_normalise_chart` through the existing single-region code path with the per-region pseudo-chart, emit per-region SVA + bind. Per-region INV-D-1 (one-hot), INV-D-2 (reset→initial-state), INV-D-3+ (per-transition) assertions all retained.
+- **Filename convention**: parallel charts emit 2N files for N regions:
+    - `tests/<chart>/<chart>_region_<region>_fsm_sva.sv`
+    - `tests/<chart>/<chart>_region_<region>_fsm_bind.sv`
+  per region.
+
+**Wave-2b scope (what landed vs. what is deferred)**:
+
+- **Single-clock-domain parallel charts** (no `<sos:region clock="..."/>` annotations) work end-to-end. Each per-region bind wires `.clk(clk), .rst(rst)`.
+- **Multi-clock parallel charts** (where regions declare different clock domains via `<sos:region clock="..."/>`): wave-2b does NOT emit per-region `clk_<dom>` / `rst_<dom>` wiring on the bind directives. The chart-top wrapper's per-domain clocks exist (per SOS-08-C §6.10), but the bind file currently always wires `.clk(clk), .rst(rst)`. Multi-clock-domain binding is **wave-3 scope** (alongside the SOS-08-C clock-distribution contract's bind-side counterpart).
+- **Chart-top `_top_sva.sv` for cross-region invariants** (e.g. CDC-handshake liveness): NOT emitted at wave-2b. Each region's SVA module is independent; cross-region properties (e.g. "if region A enters state X, region B must enter state Y within K cycles") are **wave-3 scope** when the chart-side cross-region invariant declaration form ratifies.
+- **The cocotb half (parallel-chart test emit)** is **wave-2c scope**. The cocotb walker still raises `UnsupportedChartError` on parallel charts; lifting that rejection requires the per-region observable-port read pattern in the emitted `@cocotb.test()` body, plus the SOS-03 vector schema extension for per-region expected-state. Wave-2c lands both alongside the cocotb-side parallel scaffold.
+
+**Wave-2c boundary (cocotb side)**:
+
+- Lift parallel-chart rejection in `transliterate_cocotb.py` `_normalise_chart`.
+- Build per-region state-id lists + initial-state per region, surfaced via the `CocotbChart` dataclass.
+- Emit a scaffold test against the chart-top wrapper that reads `current_state_<region>` per region.
+- SOS-03 schema extension: per-step expected state needs a `region` field for parallel charts.
+
+**Invariants upheld** (wave-2b SVA bind side):
+
+- **INV-S-HDL-D-1** (dual artifact, one IR): retained — both SVA module + bind file emit from one `render_target` invocation against one chart_ir.
+- **INV-S-HDL-D-3** (vector-IR read-only at emitter): retained — `_render_parallel` does not mutate the input chart_ir; per-region pseudo-charts are freshly constructed dicts.
+- **INV-S-HDL-D-4** (same SVA artifact feeds cocotb + formal flow): retained — the per-region SVA modules are bind-target-agnostic; SymbiYosys / JasperGold can consume them against the chart-top wrapper without per-tool adaptation.
+- **INV-S-HDL-D-5** (chart-vocabulary failure messages): retained — each per-region SVA module's `$fatal` clauses carry the region's chart-state + invariant ID.
+- **INV-S-HDL-3** (cross-domain isolation): the chart-top wrapper still uses `sos_synchronizer` / `sos_fifo_async` for cross-region signal crossings per SOS-08-C; SVA bind wave-2b does not introduce new CDC paths.
+
+**Test count**: 10 new tests in `test_transliterate_sva_bind.py`:
+
+- `test_parallel_charts_accepted_at_wave_2b` (replaces wave-1's `test_parallel_charts_rejected_at_v1`)
+- `TestParallelChartEmit` class with 9 tests: per-region SVA module name; bind targets chart-top wrapper; per-region `current_state_<region>` wiring; single-clock-domain wiring; per-region INV-D-1/-2/-3 assertions present; wave-2b citation in header; **single-region chart unchanged** (regression guard).
+
+**Test suite**: 325/325 passing (315 prior + 10 wave-2b SVA bind side).
+
+**Cited PCDNs**: PCDN-D-004 wave-2 extension (per-DUT bind file co-located with the cocotb test directory — now per-region under the same `tests/<chart>/` prefix); SOS-08-C §6.10 chart-top wrapper module naming convention; SOS-08-C wave-2's per-region FSM module naming convention.
+
+Status: 🟢 ratified (continuing) — SOS-08-D wave-2b SVA bind side closes the parallel-chart binding half. Wave-2c lifts the cocotb-side parallel-chart rejection + emits the chart-top-wrapper-targeted scaffold test. Wave-3 covers multi-clock-domain bind wiring + cross-region invariant SVA properties.
