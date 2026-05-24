@@ -69,6 +69,7 @@ try:  # pragma: no cover - tested indirectly via the surfer scaffold tests
         OPTIONAL_FIELDS,
         SCHEMA_NAME,
         SCHEMA_VERSION,
+        discover_waveform_paths,
         load_annotations,
         validate_schema_header,
     )
@@ -88,6 +89,7 @@ except ImportError:  # pragma: no cover - standalone invocation fallback
         OPTIONAL_FIELDS,
         SCHEMA_NAME,
         SCHEMA_VERSION,
+        discover_waveform_paths,
         load_annotations,
         validate_schema_header,
     )
@@ -99,6 +101,7 @@ __all__ = [
     "OPTIONAL_FIELDS",
     "SCHEMA_NAME",
     "SCHEMA_VERSION",
+    "discover_waveform_paths",
     "load_annotations",
     "validate_schema_header",
     "render_to_stdout",

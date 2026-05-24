@@ -870,7 +870,7 @@ class AnnotationWriter:
     testbench, not a post-process step.
     """
 
-    _SCHEMA_HEADER = {{
+    _SCHEMA_HEADER_BASE = {{
         "_meta": {{
             "schema": "sos-08-g/annotations",
             "version": "1.0",
@@ -879,20 +879,68 @@ class AnnotationWriter:
     }}
 
     _DENSITY_ENV_VAR = "SOS_ANNOTATION_DENSITY"
+    _WAVEFORM_PREFIX_ENV_VAR = "SOS_WAVEFORM_PREFIX"
+    # Cocotb-classic sets MODULE to the test module name at simulator
+    # launch; reading it as the waveform-prefix fallback gives by-
+    # construction prefix coordination (PCDN-G-wave1-003 / wave-3b).
+    _MODULE_ENV_VAR = "MODULE"
+    # Cocotb-classic sets SIM_BUILD to the simulator's working dir
+    # (default `sim_build/`); the annotation file lands there so the
+    # waveform (`<MODULE>.fst|.vcd`) and the annotations
+    # (`<test>.annotations.jsonl`) are co-located by construction
+    # (SOS-08-G §6 (a) co-locate semantics).
+    _SIM_BUILD_ENV_VAR = "SIM_BUILD"
 
-    def __init__(self, test_name: str, output_dir: Path | str | None = None) -> None:
-        self.output_dir = Path(output_dir) if output_dir is not None else Path(".")
+    def __init__(
+        self,
+        test_name: str,
+        output_dir: Path | str | None = None,
+        waveform_prefix: str | None = None,
+    ) -> None:
+        # SOS-08-G wave-3b / PCDN-G-wave1-003: output_dir defaults to
+        # the cocotb-classic `SIM_BUILD` directory so annotations land
+        # next to the simulator's waveform dumps. Explicit
+        # `output_dir=...` still wins (test-side overrides for unit
+        # tests, etc.). Fallback to current dir when neither is set
+        # (e.g., the test runs outside the cocotb-classic Makefile
+        # path).
+        if output_dir is None:
+            output_dir = os.environ.get(self._SIM_BUILD_ENV_VAR, ".")
+        self.output_dir = Path(output_dir)
         self.path = self.output_dir / f"{{test_name}}.annotations.jsonl"
         # PCDN-G-005: per-event default; `cycle` opts into per-cycle.
         density = os.environ.get(self._DENSITY_ENV_VAR, "event")
         self.density: str = density if density in ("event", "cycle") else "event"
+        # SOS-08-G wave-3b / PCDN-G-wave1-003: by-construction
+        # filename-prefix coordination. The waveform prefix is the
+        # discovery key viewer extensions use to locate
+        # `<prefix>.fst|.vcd` in the same directory as the annotation
+        # overlay (SOS-08-G §6 (a) co-locate semantics, amended
+        # 2026-05-24). Explicit constructor arg wins; otherwise
+        # consult the SOS-specific env var, then fall back to
+        # cocotb-classic's `MODULE` (which the Makefile uses as the
+        # waveform filename prefix in the wave-3b Makefile fragment).
+        if waveform_prefix is None:
+            waveform_prefix = (
+                os.environ.get(self._WAVEFORM_PREFIX_ENV_VAR)
+                or os.environ.get(self._MODULE_ENV_VAR)
+            )
+        self.waveform_prefix: str | None = waveform_prefix
         self.output_dir.mkdir(parents=True, exist_ok=True)
         # PCDN-G-006: line-buffered (flush at every newline).
         self._fh = open(self.path, "w", buffering=1, encoding="utf-8")
         # PCDN-G-001 / INV-S-HDL-G-3: schema-version header is the
         # first JSONL record. Viewer extensions parse this line to
         # detect schema version compatibility before reading the rest.
-        self._fh.write(json.dumps(self._SCHEMA_HEADER) + "\\n")
+        # SOS-08-G wave-3b §15 (2026-05-24): the `_meta` envelope
+        # gains an optional `waveform_prefix` field at v1.0; when
+        # present, conforming viewer extensions locate the waveform
+        # via `<output_dir>/<waveform_prefix>.fst|.vcd` instead of
+        # the wave-1 same-prefix-as-overlay convention.
+        header = {{"_meta": dict(self._SCHEMA_HEADER_BASE["_meta"])}}
+        if self.waveform_prefix is not None:
+            header["_meta"]["waveform_prefix"] = self.waveform_prefix
+        self._fh.write(json.dumps(header) + "\\n")
 
     def record_transition(
         self,
@@ -1490,12 +1538,112 @@ RTL_DIR ?= ../../../rtl
 
 VERILOG_SOURCES += $(RTL_DIR)/{chart_id}/{dut_module}.sv
 
+# SOS-08-G wave-3b / PCDN-G-wave1-003: filename-prefix coordination
+# BY CONSTRUCTION. The waveform and the annotation overlays share the
+# same prefix-discovery source — `MODULE` — derived from the chart
+# name at emit time. The Makefile passes `MODULE` through to the
+# simulator's dump filename; cocotb-classic auto-exports `MODULE`
+# into the test runner's environment, where `AnnotationWriter` reads
+# it (falling back to `SOS_WAVEFORM_PREFIX`) and records
+# `_meta.waveform_prefix = "<MODULE>"` in every overlay's first
+# JSONL record. Viewer extensions read `_meta.waveform_prefix` to
+# locate `<MODULE>.fst|.vcd` in the same directory (SOS-08-G §6 (a)
+# co-locate, amended 2026-05-24).
+SOS_WAVEFORM_PREFIX ?= $(MODULE)
+export SOS_WAVEFORM_PREFIX
+
 # Verilator wave dump + trace for debugging; harmless on Icarus.
+# Wave-3b: the dump-file path is derived from `SOS_WAVEFORM_PREFIX`
+# so the waveform shares a discoverable prefix with the annotation
+# overlays in the same `SIM_BUILD` directory.
 ifeq ($(SIM),verilator)
     EXTRA_ARGS += --trace --trace-structs
+    PLUSARGS += +SOS_WAVEFORM_PREFIX=$(SOS_WAVEFORM_PREFIX)
+endif
+
+# Icarus uses an SV-side `initial $dumpfile(...)` driver. The emitted
+# `dump_waveform.sv` file reads the `+SOS_WAVEFORM_PREFIX=<...>`
+# plusarg at simulator launch and opens `<prefix>.fst`. When SIM is
+# Icarus, append the dump driver to the SV sources.
+ifeq ($(SIM),icarus)
+    VERILOG_SOURCES += dump_waveform.sv
+    PLUSARGS += +SOS_WAVEFORM_PREFIX=$(SOS_WAVEFORM_PREFIX)
+endif
+
+# GHDL writes VCD via `--vcd=<path>` flag passed to the run step.
+ifeq ($(SIM),ghdl)
+    SIM_ARGS += --vcd=$(SOS_WAVEFORM_PREFIX).vcd
 endif
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
+"""
+
+
+def _emit_dump_waveform_sv(chart: CocotbChart, dut_module: str) -> str:
+    """Emit ``dump_waveform.sv`` — SystemVerilog dump-file driver
+    (SOS-08-G wave-3b / PCDN-G-wave1-003).
+
+    Icarus does not honour a `--trace-file` CLI knob the way Verilator
+    does; the dump filename is set via SV `$dumpfile(...)` at simulator
+    launch. The wave-3b filename-prefix coordination contract requires
+    the dump filename to derive from `MODULE` (the Makefile's chart-
+    derived test-module identifier), so the SV driver reads the
+    `+SOS_WAVEFORM_PREFIX=<prefix>` plusarg the Makefile passes via
+    `PLUSARGS` and opens `<prefix>.fst`.
+
+    The Verilator path does NOT use this file — Verilator's
+    `--trace --trace-structs` writes to its own default path
+    (`dump.fst` / `dump.vcd`) which the Makefile redirects via
+    `--trace-file` (wave-3b future) or via the cocotb-classic wrapper's
+    standard build-dir layout (wave-3b v1).
+
+    Per INV-S-HDL-G-1 (three-file output coupling): the SV driver
+    binds the simulator's dump path to the same `<prefix>` the
+    annotation overlays record in their `_meta.waveform_prefix`
+    field, so viewer extensions can locate `<prefix>.fst|.vcd` in
+    the overlay's directory by construction.
+    """
+    chart_id = _safe_ident(chart.name)
+    return f"""// {_GEN_HEADER}
+//
+// SystemVerilog dump-file driver for Icarus per SOS-08-G wave-3b
+// (PCDN-G-wave1-003 — filename-prefix coordination by construction).
+//
+// The driver reads `+SOS_WAVEFORM_PREFIX=<prefix>` from the
+// simulator's plusargs and opens `<prefix>.fst` for `$dumpvars`.
+// The Makefile passes `+SOS_WAVEFORM_PREFIX=$(MODULE)` so the dump
+// filename derives from the chart-derived MODULE identifier the
+// `AnnotationWriter` records in `_meta.waveform_prefix`. Viewers
+// thereby locate the waveform via the overlay's `_meta` field
+// (SOS-08-G §6 (a) co-locate semantics, amended 2026-05-24).
+//
+// Cites: SOS-08-G §5.2 (overlay schema; `_meta.waveform_prefix`),
+//        SOS-08-G §6 (a) (viewer co-locate by `_meta.waveform_prefix`),
+//        INV-S-HDL-G-1 (three-file output coupling).
+//
+// Wave-3b v1: Icarus only. Verilator dump-file binding is handled
+// inside the Makefile (`EXTRA_ARGS += --trace --trace-structs`); GHDL
+// uses `--vcd=$(SOS_WAVEFORM_PREFIX).vcd`. Wave-3c may emit a
+// Verilator-specific harness shim if the v1 default path proves
+// insufficient.
+
+`timescale 1ns / 1ps
+
+module dump_waveform_{chart_id};
+    initial begin : sos_dump
+        string prefix;
+        string filename;
+        // Default if the Makefile did not pass +SOS_WAVEFORM_PREFIX.
+        // Mirrors the AnnotationWriter env-var fallback chain so the
+        // by-construction discovery stays consistent.
+        prefix = "{dut_module}";
+        $value$plusargs("SOS_WAVEFORM_PREFIX=%s", prefix);
+        filename = {{prefix, ".fst"}};
+        $dumpfile(filename);
+        $dumpvars(0, {dut_module});
+        $display("[SOS-08-G] dump file: %0s", filename);
+    end
+endmodule
 """
 
 
@@ -1644,6 +1792,33 @@ carries the six normative fields per SOS-08-G §5.2 / INV-S-HDL-G-2:
 The file handle is line-buffered per **PCDN-SOS-08-G-006**
 (`open(..., buffering=1)`); each newline-terminated record reaches
 disk without per-record fsync, sufficient for mid-run review.
+
+### Filename-prefix coordination (wave-3b)
+
+Per **PCDN-G-wave1-003** (closed wave-3b 2026-05-24) the waveform
+and the annotation overlays share a discovery prefix BY CONSTRUCTION:
+
+- The Makefile sets `SOS_WAVEFORM_PREFIX = $(MODULE)` (default
+  `test_{{chart}}_fsm`) and `export`s it so `AnnotationWriter` reads
+  it at test runtime.
+- The Makefile passes `--trace --trace-structs` to Verilator (whose
+  default dump file lives in `$(SIM_BUILD)`); for Icarus, the emitted
+  `dump_waveform.sv` reads the same `+SOS_WAVEFORM_PREFIX=<...>`
+  plusarg and calls `$dumpfile("<prefix>.fst")`; for GHDL, the
+  Makefile passes `--vcd=$(SOS_WAVEFORM_PREFIX).vcd`.
+- `AnnotationWriter.__init__` reads `SOS_WAVEFORM_PREFIX` (falling
+  back to `MODULE`) and records it in `_meta.waveform_prefix` of
+  every overlay's first JSONL record.
+- Viewer extensions read `_meta.waveform_prefix` to locate
+  `<output_dir>/<waveform_prefix>.fst|.vcd` in the SAME directory
+  as the annotation overlay (SOS-08-G §6 (a), amended 2026-05-24).
+- `AnnotationWriter` writes overlays to `$(SIM_BUILD)` by default
+  (the cocotb-classic build directory), so the waveform + annotations
+  + viewer all resolve relative to one canonical directory.
+
+The wave-1 same-prefix-as-overlay convention is preserved as the
+fallback for readers that encounter overlays missing the wave-3b
+`_meta.waveform_prefix` field.
 
 ### Viewer integration
 
@@ -2257,6 +2432,10 @@ def render_target(chart_ir: dict, config: Any = None) -> dict[str, str]:
     out[f"{prefix}test_{chart_slug}_fsm.py"] = _emit_test_py(chart, cfg)
     out[f"{prefix}_cocotb_helpers.py"] = _emit_helpers_py(chart, encoding)
     out[f"{prefix}Makefile"] = _emit_makefile(chart, dut_module)
+    # SOS-08-G wave-3b: SV dump-file driver for Icarus (Verilator path
+    # uses --trace-file from the Makefile). Filename-prefix
+    # coordination by construction per PCDN-G-wave1-003.
+    out[f"{prefix}dump_waveform.sv"] = _emit_dump_waveform_sv(chart, dut_module)
     out[f"{prefix}pytest.ini"] = _emit_pytest_ini(chart)
     out[f"{prefix}README.md"] = _emit_readme(chart, dut_module, cfg)
     # SOS-08-D wave-2a: per-chart JUnit XML post-processor per §6.7

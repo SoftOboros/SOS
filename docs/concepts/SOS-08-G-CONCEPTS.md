@@ -128,6 +128,8 @@ The `<test>.annotations.jsonl` file is line-delimited JSON (one JSON object per 
 
 The `_meta` envelope segregates schema bookkeeping from data records (so JSONL stream-consumers can dispatch on `"_meta" in record`); the namespaced `sos-08-g/annotations` schema name reserves a path for cross-phase overlay families to coexist; the `chart_path_max_depth` field publishes the SOS-12 cap (mirrored per PCDN-G-002) so viewer extensions can size path-truncation hints without an out-of-band lookup. Conforming readers MAY accept the flat shape (`{"schema": ..., "version": ...}`) for backwards compatibility with v1-pre-canonicalization producers; conforming **emitters** MUST emit the `_meta` envelope form.
 
+**Wave-3b — `_meta.waveform_prefix` optional field (PCDN-G-wave1-003 resolution, 2026-05-24).** The `_meta` envelope MAY carry an additional optional string field `waveform_prefix` naming the per-test waveform filename prefix. When present, the field MUST resolve to a non-empty string identifying the simulator's dump-file prefix (e.g. `"test_demo_fsm"`); conforming viewer extensions then locate the waveform via `<output_dir>/<waveform_prefix>.fst` and `<output_dir>/<waveform_prefix>.vcd` in the same directory as the overlay file (see §6 (a)). When absent, viewer extensions fall back to the wave-1 same-prefix-as-overlay convention (`<overlay-stem>.fst|.vcd`). Adding this field at v1.0 is a `_meta`-envelope additive extension (not a schema-version bump): the `_meta` envelope is explicitly extensible with optional fields at v1.0, and version `1.0` continues to identify schema-stable v1 overlays.
+
 Every subsequent line is an **annotation record**. Six normative fields, two optional:
 
 | Field | Type | Normative | Description |
@@ -211,7 +213,11 @@ Frozen registration policy: **Standards Action** (any change to storage discipli
 
 A conforming viewer integration (GTKWave plugin, Surfer extension, commercial-viewer user script, or headless CI renderer) MUST satisfy:
 
-- (a) **Co-locate** — given a waveform file path `<test>.fst` or `<test>.vcd`, locate `<test>.annotations.jsonl` in the same directory. If absent, the integration MAY render the waveform alone (no overlay) without error.
+- (a) **Co-locate** — given an annotation overlay `<test>.annotations.jsonl`, locate the waveform companion file(s) in the same directory. Discovery proceeds via:
+    1. Read `_meta.waveform_prefix` from the overlay's first-line header (wave-3b — PCDN-G-wave1-003 resolution); when present, open `<dir>/<waveform_prefix>.fst` and/or `<dir>/<waveform_prefix>.vcd`.
+    2. When the field is absent, fall back to the wave-1 same-prefix-as-overlay convention: `<overlay-stem>.fst` and/or `<overlay-stem>.vcd` in the overlay's directory.
+  
+  Conversely, given a waveform file path, the integration MAY scan the same directory for any `*.annotations.jsonl` files whose `_meta.waveform_prefix` matches (wave-3b discovery direction) or whose name shares the waveform prefix (wave-1 fallback). If no overlay is found, the integration MAY render the waveform alone (no overlay) without error.
 - (b) **Schema-version-aware** — read the first line, unwrap the `_meta` envelope (or accept the flat shape for backwards compatibility), and verify `schema == "sos-08-g/annotations"` and `version == "1.0"` (or a version the integration declares support for). Reject with a clear error if the schema is unknown.
 - (c) **Per-record render** — for each annotation record, render a badge at `(cycle, signal)` on the waveform timeline carrying `chart_state` (and, when present, `transition_id` / `invariant_id` as secondary detail). Badges MUST be visually distinguishable from raw signal traces.
 - (d) **Chart-path navigation** — when the chart-family has sub-charts ([SOS-12][sos-12]), the integration SHOULD provide a UI affordance to filter or scope by `chart_path` so the developer can focus on one sub-chart's transitions at a time.
@@ -555,3 +561,57 @@ Wave-3a closes the first of the two wave-1 deferred candidates:
 **Cited PCDNs**: PCDN-G-wave1-002 (closed); PCDN-G-005 (per-event default preserved); PCDN-G-006 (line-buffered flush preserved); INV-S-HDL-G-2/-3/-5.
 
 Status: 🟢 **wave-3a complete** — per-cycle density opt-in is wired by construction. Wave-3b picks up filename-prefix coordination (the second deferred candidate); wave-3c picks up full GUI integration.
+
+### 2026-05-24 — Impl wave-3b: filename-prefix coordination by construction (Ira)
+
+Wave-3b closes the second of the two wave-1 deferred candidates:
+
+- **PCDN-G-wave1-003 (filename-prefix coordination by construction)** → ✅ landed. The waveform (`.fst` / `.vcd`) and the per-test annotation overlays share a discovery prefix BY CONSTRUCTION via `_meta.waveform_prefix` (written by `AnnotationWriter`, read by viewer extensions). The Makefile derives the prefix from `MODULE` and propagates it as a plusarg + env var; the SV-side `dump_waveform.sv` driver reads the plusarg for Icarus; viewer extensions resolve the waveform file from `_meta.waveform_prefix`.
+
+**§5.2 amendment co-landed**: the `_meta` envelope grows an optional `waveform_prefix: string` field at v1.0 (additive, not a schema-version bump). Conforming emitters set the field when a non-empty value is available (cocotb-classic always sets it via the `MODULE` env-var fallback chain); conforming readers honour it when present and fall back to the wave-1 same-prefix-as-overlay convention when absent.
+
+**§6 (a) amendment co-landed**: the co-locate viewer-integration contract MUST consult `_meta.waveform_prefix` first; the wave-1 convention is preserved as the explicit fallback. The amendment makes wave-3b backwards-compatible with all wave-1 / wave-2 overlays.
+
+**Wave-3b implementation surface**:
+
+- **`AnnotationWriter.__init__` extended**: new `waveform_prefix: str | None = None` constructor kwarg + new env-var fallback chain (`SOS_WAVEFORM_PREFIX` → `MODULE`). When resolved non-None, the `_meta` envelope's first-line header carries `"waveform_prefix": "<value>"` for viewer-side discovery. The static class attribute `_SCHEMA_HEADER` was renamed `_SCHEMA_HEADER_BASE` so the static header is the wave-1/2 baseline and the runtime header is the per-writer instantiation result.
+- **`AnnotationWriter.output_dir` default**: now falls back to `os.environ.get("SIM_BUILD", ".")` so overlays land in cocotb-classic's build directory next to the simulator's dump file. Explicit `output_dir=...` still wins for unit-test isolation.
+- **Makefile fragment update**: `SOS_WAVEFORM_PREFIX ?= $(MODULE)` + `export SOS_WAVEFORM_PREFIX` so the writer can read it. Per-simulator dump-file plumbing: Verilator gets `PLUSARGS += +SOS_WAVEFORM_PREFIX=$(SOS_WAVEFORM_PREFIX)`; Icarus gets the same plusarg + `VERILOG_SOURCES += dump_waveform.sv`; GHDL gets `SIM_ARGS += --vcd=$(SOS_WAVEFORM_PREFIX).vcd`. The plusarg + env-var paths converge: the writer's `_meta.waveform_prefix` field always matches the simulator's dump-file prefix by construction.
+- **`dump_waveform.sv` new emitter**: SystemVerilog dump-file driver for Icarus (Verilator handles dump-file naming via CLI flags; GHDL via the run-step `--vcd=...` arg). The SV driver calls `$value$plusargs("SOS_WAVEFORM_PREFIX=%s", prefix)` and `$dumpfile({prefix, ".fst"})` at simulator startup so the dump filename matches the `MODULE`-derived prefix the AnnotationWriter records. Emitted at `tests/<chart>/dump_waveform.sv` and added to the per-chart emit set (now 8 normative files + 1 scaffold vector per chart, was 7 + 1).
+- **Viewer-extension `discover_waveform_paths(overlay_path) -> list[Path]`**: new public helper exported from `tools/sos-codegen/viewers/gtkwave/sos_gtkwave_ext.py` + re-exported from `tools/sos-codegen/viewers/surfer/sos_surfer_ext.py`. Resolves the waveform path(s) by reading `_meta.waveform_prefix` from the overlay's first-line header; falls back to the wave-1 same-prefix-as-overlay convention when the field is absent. Defensive against missing files and malformed JSON (returns the fallback without raising). Wave-1 viewer-CLI shape remains unchanged; the helper is additive surface for future wave-3c GUI work.
+- **README emit update**: a new "Filename-prefix coordination (wave-3b)" section documents the prefix derivation, the env-var chain, the per-simulator dump-file plumbing, and the viewer-extension discovery path — so chart authors and downstream consumers understand the by-construction coupling without reading the Makefile.
+
+**Wave-3c boundary (full GUI integration)**: GTKWave TCL extension + Surfer Rust/WASM plugin remain wave-3c as named in the wave-2 §15 entry. Wave-3b does NOT cross that boundary. The wave-3b viewer-extension surface is the same Python-CLI shape as wave-1; wave-3c picks up the in-process plugin work.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-G-1** (three-file output coupling): **strengthened** — wave-3b makes the three-file prefix coordination by construction instead of caller-coordinated. The Makefile and the `AnnotationWriter` both derive the prefix from `MODULE`; the `_meta.waveform_prefix` field is the cross-tool single source of truth viewers consume to locate the waveform.
+- **INV-S-HDL-G-2** (chart-vocabulary mandatory): unchanged — the six normative record fields are untouched; the new optional `_meta.waveform_prefix` lives at the schema-envelope layer, not at the per-record layer.
+- **INV-S-HDL-G-3** (schema-version header required at line 0): preserved — the `waveform_prefix` field is an additive field in the line-0 `_meta` envelope; schema and version fields remain authoritative.
+- **INV-S-HDL-G-4** (build-output discipline): unchanged — waveforms, overlays, and the new SV dump-driver's runtime outputs are all build outputs; the `dump_waveform.sv` source file IS tracked (it's an emitted artifact under `tests/<chart>/`, like the Makefile and the test module).
+- **INV-S-HDL-G-5** (generation co-located with test body): unchanged — `AnnotationWriter` instantiation remains inside the `@cocotb.test()` body; wave-3b only changes WHERE the writer's output lands and WHAT prefix it records.
+- **INV-S-HDL-G-6** (chart-diff + waveform-diff parity for MCP-workflow review): **strengthened** — wave-3b's by-construction prefix coordination means an SOS-11 chart-diff that regenerates RTL + tests produces a discoverable review-artifact triple where the waveform is locatable from any per-test annotation overlay's `_meta` field without filesystem heuristics.
+- **PCDN-G-005** (per-event default; cycle is opt-in): unchanged.
+- **PCDN-G-006** (line-buffered flush): unchanged.
+- **PCDN-G-wave1-001** (`_meta`-envelope canonical header): preserved + extended — the envelope's extensibility at v1.0 is now explicit per the §5.2 amendment.
+
+**Test count**: 18 new tests in `TestWave3bFilenamePrefixCoordination`:
+
+- AnnotationWriter accepts `waveform_prefix` kwarg + records in `_meta`.
+- Env-var fallback chain: `SOS_WAVEFORM_PREFIX` → `MODULE` → omit.
+- Explicit kwarg wins over env vars.
+- `output_dir` defaults to `SIM_BUILD` env var.
+- Makefile exports `SOS_WAVEFORM_PREFIX`, derives from `$(MODULE)`.
+- Makefile passes plusargs to Verilator + Icarus, `--vcd=` to GHDL.
+- `dump_waveform.sv` emitted, reads plusarg via `$value$plusargs`, calls `$dumpfile` + `$dumpvars`.
+- GTKWave viewer's `discover_waveform_paths` honours `_meta.waveform_prefix`.
+- Same helper falls back to wave-1 same-prefix-as-overlay when field absent.
+- Helper survives missing-file / malformed-JSON inputs.
+- Surfer viewer re-exports the helper from GTKWave (no drift).
+- README documents wave-3b prefix coordination.
+
+**Test suite**: 455/455 passing (437 prior + 18 wave-3b; the wave-3a tests landed in the same incremental cumulative count).
+
+**Cited PCDNs**: PCDN-G-wave1-003 (closed); PCDN-G-wave1-001 (preserved + envelope-extensibility-at-v1.0 made explicit); INV-S-HDL-G-1/-3/-6.
+
+Status: 🟢 **wave-3b complete** — filename-prefix coordination is now by construction. Wave-3c (full GUI integration: GTKWave TCL extension + Surfer Rust/WASM plugin) remains the open wave-3 boundary.

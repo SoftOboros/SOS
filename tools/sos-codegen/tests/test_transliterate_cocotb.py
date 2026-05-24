@@ -115,18 +115,21 @@ def _chart_with_parallel():
 
 
 def test_render_emits_expected_files():
-    """Single-region chart → 7 emitter artifacts + 1 scaffold vector.
+    """Single-region chart → 8 emitter artifacts + 1 scaffold vector.
 
     Per SOS-08-D §6.1 emit directory layout + PCDN-D-006 / §5.6 (one
     test_<dut>.py + shared helpers) + PCDN-D-007 (Makefile +
     pytest.ini both emitted) + PCDN-D-002 (post_results.py JUnit
     post-processor — wave-2a) + SOS-08-G §15 wave-2b
-    (post_annotations.py SVA fire merge) + PCDN-SOS-08-D-wave1-file-
-    layout (2026-05-23 — every key prefixed with ``tests/<chart>/``):
+    (post_annotations.py SVA fire merge) + SOS-08-G §15 wave-3b
+    (dump_waveform.sv — Icarus dump-file driver per filename-prefix
+    coordination) + PCDN-SOS-08-D-wave1-file-layout (2026-05-23 —
+    every key prefixed with ``tests/<chart>/``):
 
       tests/<chart>/test_<chart>_fsm.py
       tests/<chart>/_cocotb_helpers.py
       tests/<chart>/Makefile
+      tests/<chart>/dump_waveform.sv           # wave-3b Icarus dump driver
       tests/<chart>/pytest.ini
       tests/<chart>/README.md
       tests/<chart>/post_results.py            # wave-2a per §6.7
@@ -135,10 +138,11 @@ def test_render_emits_expected_files():
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
 
-    # The seven normative emitter artifacts under tests/<chart>/.
+    # The eight normative emitter artifacts under tests/<chart>/.
     assert "tests/demo/test_demo_fsm.py" in files
     assert "tests/demo/_cocotb_helpers.py" in files
     assert "tests/demo/Makefile" in files
+    assert "tests/demo/dump_waveform.sv" in files
     assert "tests/demo/pytest.ini" in files
     assert "tests/demo/README.md" in files
     assert "tests/demo/post_results.py" in files
@@ -146,7 +150,7 @@ def test_render_emits_expected_files():
 
     # Plus one scaffold vector under tests/<chart>/vectors/.
     assert "tests/demo/vectors/000-reset.json" in files
-    assert len(files) == 8
+    assert len(files) == 9
 
 
 def test_makefile_and_pytest_ini_both_emitted():
@@ -583,7 +587,7 @@ def _exec_helpers(files):
     return namespace, helpers
 
 
-def test_annotation_writer_emits_schema_header(tmp_path):
+def test_annotation_writer_emits_schema_header(tmp_path, monkeypatch):
     """SOS-08-G §5.2 + PCDN-G-001 + INV-S-HDL-G-3: the emitted
     ``AnnotationWriter`` class carries the schema-version header
     matching the spec, and writes it as the first JSONL record on
@@ -594,7 +598,17 @@ def test_annotation_writer_emits_schema_header(tmp_path):
       - "version": "1.0"
       - "chart_path_max_depth": 8 (mirrors SOS-12 depth-cap per
         PCDN-G-002)
+
+    SOS-08-G wave-3b extends the header optionally with
+    `waveform_prefix` when `SOS_WAVEFORM_PREFIX` or `MODULE` is set
+    in the environment; the static `_SCHEMA_HEADER_BASE` class
+    attribute carries the wave-1/2 baseline.
     """
+    # Wave-3b: clear env vars so the test exercises the base-header
+    # shape without the env-var-driven `waveform_prefix` augmentation.
+    monkeypatch.delenv("SOS_WAVEFORM_PREFIX", raising=False)
+    monkeypatch.delenv("MODULE", raising=False)
+
     files = render_target(_simple_chart(), {"chart_name": "demo"})
     ns, helpers_src = _exec_helpers(files)
 
@@ -603,8 +617,10 @@ def test_annotation_writer_emits_schema_header(tmp_path):
         "AnnotationWriter class missing from _cocotb_helpers.py emit"
     AnnotationWriter = ns["AnnotationWriter"]
 
-    # Class-level _SCHEMA_HEADER matches the spec exactly.
-    assert AnnotationWriter._SCHEMA_HEADER == {
+    # Class-level _SCHEMA_HEADER_BASE matches the wave-1/2 spec
+    # (wave-3b adds optional `waveform_prefix` at runtime; the base
+    # constant remains the canonical static header).
+    assert AnnotationWriter._SCHEMA_HEADER_BASE == {
         "_meta": {
             "schema": "sos-08-g/annotations",
             "version": "1.0",
@@ -620,9 +636,9 @@ def test_annotation_writer_emits_schema_header(tmp_path):
     assert '"1.0"' in helpers_src
     assert '"chart_path_max_depth"' in helpers_src
 
-    # When instantiated, the writer's FIRST JSONL line MUST be the
-    # schema header (INV-S-HDL-G-3 — files without the header are
-    # non-conformant).
+    # When instantiated WITHOUT env-var waveform-prefix, the writer's
+    # FIRST JSONL line MUST be the base schema header
+    # (INV-S-HDL-G-3 — files without the header are non-conformant).
     writer = AnnotationWriter("smoke", output_dir=tmp_path)
     writer.close()
     first_line = (tmp_path / "smoke.annotations.jsonl").read_text(
@@ -1645,3 +1661,266 @@ class TestWave3aPerCycleDensity:
         MUST remain — wave-3a wires the caller, not the writer."""
         helpers = self._single_files()["tests/demo/_cocotb_helpers.py"]
         assert "def record_cycle(" in helpers
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-G wave-3b: filename-prefix coordination by construction
+# (§15 2026-05-24).
+# ---------------------------------------------------------------------------
+
+
+class TestWave3bFilenamePrefixCoordination:
+    """SOS-08-G wave-3b: PCDN-G-wave1-003 — the waveform (`.fst` /
+    `.vcd`) and the per-test annotation overlays share a discovery
+    prefix BY CONSTRUCTION via `_meta.waveform_prefix` written by
+    `AnnotationWriter` and read by viewer extensions.
+
+    Implementation surface:
+      - `AnnotationWriter.__init__` accepts an optional
+        `waveform_prefix` kwarg; falls back to `SOS_WAVEFORM_PREFIX`
+        env var; falls back to `MODULE` env var (cocotb-classic's
+        standard test-module identifier).
+      - The header's `_meta` envelope carries `waveform_prefix` when
+        the writer resolves a non-empty value.
+      - `output_dir` now defaults to `SIM_BUILD` env var (cocotb-
+        classic's build directory) so overlays land next to the
+        simulator's dumps.
+      - The emitted Makefile sets `SOS_WAVEFORM_PREFIX = $(MODULE)`
+        and `export`s it; passes `+SOS_WAVEFORM_PREFIX=$(MODULE)`
+        plusargs to Verilator / Icarus and `--vcd=...` to GHDL.
+      - A new `dump_waveform.sv` file is emitted (Icarus dump-file
+        driver) reading the plusarg via `$value$plusargs`.
+      - Viewer extensions expose `discover_waveform_paths(overlay)`
+        that resolves `<output_dir>/<waveform_prefix>.fst|.vcd` from
+        the overlay's `_meta` field, falling back to the wave-1
+        same-prefix-as-overlay convention when absent.
+    """
+
+    def _files(self) -> dict:
+        return render_target(_simple_chart(), {"chart_name": "demo"})
+
+    # --- AnnotationWriter constructor surface --- #
+
+    def test_writer_init_accepts_waveform_prefix_kwarg(self, tmp_path):
+        files = self._files()
+        ns, _ = _exec_helpers(files)
+        AnnotationWriter = ns["AnnotationWriter"]
+        writer = AnnotationWriter(
+            "smoke", output_dir=tmp_path, waveform_prefix="my_module"
+        )
+        writer.close()
+        first = json.loads(
+            (tmp_path / "smoke.annotations.jsonl").read_text().splitlines()[0]
+        )
+        assert first["_meta"]["waveform_prefix"] == "my_module"
+
+    def test_writer_falls_back_to_env_var(self, tmp_path, monkeypatch):
+        """`AnnotationWriter` reads `SOS_WAVEFORM_PREFIX` from env
+        when the constructor kwarg is omitted."""
+        monkeypatch.setenv("SOS_WAVEFORM_PREFIX", "env_prefix")
+        monkeypatch.delenv("MODULE", raising=False)
+        files = self._files()
+        ns, _ = _exec_helpers(files)
+        AnnotationWriter = ns["AnnotationWriter"]
+        writer = AnnotationWriter("smoke", output_dir=tmp_path)
+        writer.close()
+        first = json.loads(
+            (tmp_path / "smoke.annotations.jsonl").read_text().splitlines()[0]
+        )
+        assert first["_meta"]["waveform_prefix"] == "env_prefix"
+
+    def test_writer_falls_back_to_module_env_var(self, tmp_path, monkeypatch):
+        """When `SOS_WAVEFORM_PREFIX` is absent, fall back to cocotb-
+        classic's `MODULE` env var so the Makefile path stays
+        coordinated by construction (no extra env-var plumbing)."""
+        monkeypatch.delenv("SOS_WAVEFORM_PREFIX", raising=False)
+        monkeypatch.setenv("MODULE", "test_demo_fsm")
+        files = self._files()
+        ns, _ = _exec_helpers(files)
+        AnnotationWriter = ns["AnnotationWriter"]
+        writer = AnnotationWriter("smoke", output_dir=tmp_path)
+        writer.close()
+        first = json.loads(
+            (tmp_path / "smoke.annotations.jsonl").read_text().splitlines()[0]
+        )
+        assert first["_meta"]["waveform_prefix"] == "test_demo_fsm"
+
+    def test_writer_omits_waveform_prefix_when_unset(
+        self, tmp_path, monkeypatch
+    ):
+        """When neither kwarg nor env var is set, the header MUST NOT
+        carry a `waveform_prefix` field (backwards-compatible with
+        wave-1/2 overlays)."""
+        monkeypatch.delenv("SOS_WAVEFORM_PREFIX", raising=False)
+        monkeypatch.delenv("MODULE", raising=False)
+        files = self._files()
+        ns, _ = _exec_helpers(files)
+        AnnotationWriter = ns["AnnotationWriter"]
+        writer = AnnotationWriter("smoke", output_dir=tmp_path)
+        writer.close()
+        first = json.loads(
+            (tmp_path / "smoke.annotations.jsonl").read_text().splitlines()[0]
+        )
+        assert "waveform_prefix" not in first["_meta"]
+
+    def test_writer_explicit_kwarg_wins_over_env(
+        self, tmp_path, monkeypatch
+    ):
+        """Explicit `waveform_prefix=...` kwarg overrides env-var
+        fallback — caller control trumps environment defaults."""
+        monkeypatch.setenv("SOS_WAVEFORM_PREFIX", "env_prefix")
+        monkeypatch.setenv("MODULE", "env_module")
+        files = self._files()
+        ns, _ = _exec_helpers(files)
+        AnnotationWriter = ns["AnnotationWriter"]
+        writer = AnnotationWriter(
+            "smoke", output_dir=tmp_path, waveform_prefix="explicit"
+        )
+        writer.close()
+        first = json.loads(
+            (tmp_path / "smoke.annotations.jsonl").read_text().splitlines()[0]
+        )
+        assert first["_meta"]["waveform_prefix"] == "explicit"
+
+    # --- output_dir SIM_BUILD fallback --- #
+
+    def test_writer_output_dir_defaults_to_sim_build_env(
+        self, tmp_path, monkeypatch
+    ):
+        """When `output_dir` is None, fall back to `SIM_BUILD` env
+        var so overlays land in cocotb-classic's build directory next
+        to the simulator's dumps."""
+        sim_build = tmp_path / "sim_build_dir"
+        monkeypatch.setenv("SIM_BUILD", str(sim_build))
+        monkeypatch.delenv("SOS_WAVEFORM_PREFIX", raising=False)
+        monkeypatch.delenv("MODULE", raising=False)
+        files = self._files()
+        ns, _ = _exec_helpers(files)
+        AnnotationWriter = ns["AnnotationWriter"]
+        writer = AnnotationWriter("smoke")
+        writer.close()
+        assert (sim_build / "smoke.annotations.jsonl").exists(), \
+            "writer did not honour SIM_BUILD env var"
+
+    # --- Makefile fragment --- #
+
+    def test_makefile_exports_sos_waveform_prefix(self):
+        mk = self._files()["tests/demo/Makefile"]
+        assert "SOS_WAVEFORM_PREFIX ?= $(MODULE)" in mk
+        assert "export SOS_WAVEFORM_PREFIX" in mk
+
+    def test_makefile_passes_plusarg_to_verilator(self):
+        mk = self._files()["tests/demo/Makefile"]
+        assert "ifeq ($(SIM),verilator)" in mk
+        assert "PLUSARGS += +SOS_WAVEFORM_PREFIX=$(SOS_WAVEFORM_PREFIX)" in mk
+
+    def test_makefile_passes_plusarg_to_icarus(self):
+        mk = self._files()["tests/demo/Makefile"]
+        assert "ifeq ($(SIM),icarus)" in mk
+        assert "VERILOG_SOURCES += dump_waveform.sv" in mk
+
+    def test_makefile_passes_vcd_path_to_ghdl(self):
+        mk = self._files()["tests/demo/Makefile"]
+        assert "ifeq ($(SIM),ghdl)" in mk
+        assert "SIM_ARGS += --vcd=$(SOS_WAVEFORM_PREFIX).vcd" in mk
+
+    # --- dump_waveform.sv driver --- #
+
+    def test_dump_waveform_sv_emitted(self):
+        files = self._files()
+        assert "tests/demo/dump_waveform.sv" in files
+
+    def test_dump_waveform_sv_reads_plusarg(self):
+        sv = self._files()["tests/demo/dump_waveform.sv"]
+        assert "$value$plusargs(\"SOS_WAVEFORM_PREFIX=%s\"" in sv
+        assert "$dumpfile(filename);" in sv
+        assert "$dumpvars(0, " in sv
+
+    def test_dump_waveform_sv_defaults_to_toplevel(self):
+        """The SV driver carries a default prefix matching `MODULE`
+        (the chart-derived test-module identifier) so direct
+        simulator invocation (without plusarg) still produces a
+        coordinated filename."""
+        sv = self._files()["tests/demo/dump_waveform.sv"]
+        # The Makefile uses `MODULE ?= test_<chart>_fsm`; the SV driver
+        # defaults to the chart's DUT module name (`<chart>_fsm`) per
+        # the wave-3b template.
+        assert "demo_fsm" in sv
+
+    # --- Viewer-extension discovery helper --- #
+
+    def test_viewer_discover_uses_waveform_prefix(self, tmp_path):
+        """The GTKWave viewer extension's `discover_waveform_paths`
+        helper resolves the waveform via `_meta.waveform_prefix`."""
+        import sys as _sys
+        viewers_dir = _TOOL_DIR / "viewers"
+        if str(viewers_dir) not in _sys.path:
+            _sys.path.insert(0, str(viewers_dir))
+        from gtkwave.sos_gtkwave_ext import discover_waveform_paths  # type: ignore
+
+        overlay = tmp_path / "test_vector_001.annotations.jsonl"
+        overlay.write_text(
+            '{"_meta": {"schema": "sos-08-g/annotations", '
+            '"version": "1.0", "chart_path_max_depth": 8, '
+            '"waveform_prefix": "test_demo_fsm"}}\n',
+            encoding="utf-8",
+        )
+        paths = discover_waveform_paths(overlay)
+        assert tmp_path / "test_demo_fsm.fst" in paths
+        assert tmp_path / "test_demo_fsm.vcd" in paths
+
+    def test_viewer_discover_falls_back_to_same_prefix(self, tmp_path):
+        """When `_meta.waveform_prefix` is absent, the viewer falls
+        back to the wave-1 same-prefix-as-overlay convention."""
+        import sys as _sys
+        viewers_dir = _TOOL_DIR / "viewers"
+        if str(viewers_dir) not in _sys.path:
+            _sys.path.insert(0, str(viewers_dir))
+        from gtkwave.sos_gtkwave_ext import discover_waveform_paths  # type: ignore
+
+        overlay = tmp_path / "wave1_style.annotations.jsonl"
+        overlay.write_text(
+            '{"_meta": {"schema": "sos-08-g/annotations", '
+            '"version": "1.0", "chart_path_max_depth": 8}}\n',
+            encoding="utf-8",
+        )
+        paths = discover_waveform_paths(overlay)
+        assert tmp_path / "wave1_style.fst" in paths
+        assert tmp_path / "wave1_style.vcd" in paths
+
+    def test_viewer_discover_handles_missing_file(self, tmp_path):
+        """Missing overlay file → same-prefix fallback without raising."""
+        import sys as _sys
+        viewers_dir = _TOOL_DIR / "viewers"
+        if str(viewers_dir) not in _sys.path:
+            _sys.path.insert(0, str(viewers_dir))
+        from gtkwave.sos_gtkwave_ext import discover_waveform_paths  # type: ignore
+
+        overlay = tmp_path / "absent.annotations.jsonl"
+        # File does NOT exist — helper should still resolve fallback.
+        paths = discover_waveform_paths(overlay)
+        assert tmp_path / "absent.fst" in paths
+        assert tmp_path / "absent.vcd" in paths
+
+    def test_surfer_reexports_discover_waveform_paths(self):
+        """The Surfer viewer extension re-exports the same helper
+        from the GTKWave module so both viewers share the
+        discovery contract."""
+        import sys as _sys
+        viewers_dir = _TOOL_DIR / "viewers"
+        if str(viewers_dir) not in _sys.path:
+            _sys.path.insert(0, str(viewers_dir))
+        from surfer.sos_surfer_ext import discover_waveform_paths  # type: ignore
+
+        assert callable(discover_waveform_paths)
+
+    # --- README documents the wave-3b coordination --- #
+
+    def test_readme_documents_wave_3b(self):
+        """The emitted README MUST document the wave-3b prefix
+        coordination so chart authors know how to discover the
+        waveform file from the overlay."""
+        readme = self._files()["tests/demo/README.md"]
+        assert "Filename-prefix coordination" in readme
+        assert "SOS_WAVEFORM_PREFIX" in readme
+        assert "_meta.waveform_prefix" in readme

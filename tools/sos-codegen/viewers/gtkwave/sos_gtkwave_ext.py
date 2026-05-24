@@ -123,6 +123,57 @@ def validate_schema_header(header: dict) -> None:
         )
 
 
+def discover_waveform_paths(path: Path) -> list[Path]:
+    """Resolve the waveform file paths a viewer should open for the
+    given annotation overlay (SOS-08-G wave-3b co-locate semantics).
+
+    Reads the overlay's first-line `_meta` header and, when
+    `waveform_prefix` is present (wave-3b filename-prefix coordination
+    by construction per PCDN-G-wave1-003), returns
+    `[<dir>/<prefix>.fst, <dir>/<prefix>.vcd]` paths in the same
+    directory as the overlay. Existence is NOT enforced here — the
+    caller checks `Path.exists()` per its own retry/fallback policy.
+    When the header lacks `waveform_prefix` (wave-1 / wave-2 overlays),
+    falls back to the same-prefix-as-overlay convention:
+    `<overlay-without-suffix>.fst|.vcd`.
+
+    Cites: SOS-08-G §6 (a) co-locate (amended 2026-05-24); §5.2 +
+    INV-S-HDL-G-1 (three-file output coupling).
+    """
+    path = Path(path)
+    overlay_dir = path.parent
+    # Same-prefix wave-1 fallback. The overlay's filename without
+    # `.annotations.jsonl` is the wave-1 same-prefix base.
+    name = path.name
+    if name.endswith(".annotations.jsonl"):
+        base = name[: -len(".annotations.jsonl")]
+    else:
+        base = path.stem
+    fallback = [overlay_dir / f"{base}.fst", overlay_dir / f"{base}.vcd"]
+    # Read just the header line to extract `_meta.waveform_prefix`
+    # when present. Defensive: missing file / malformed line → fall
+    # back to the same-prefix convention without raising.
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            first_line = fh.readline().strip()
+    except OSError:
+        return fallback
+    if not first_line:
+        return fallback
+    try:
+        header = json.loads(first_line)
+    except json.JSONDecodeError:
+        return fallback
+    meta = header.get("_meta", header)
+    waveform_prefix = meta.get("waveform_prefix")
+    if not isinstance(waveform_prefix, str) or not waveform_prefix:
+        return fallback
+    return [
+        overlay_dir / f"{waveform_prefix}.fst",
+        overlay_dir / f"{waveform_prefix}.vcd",
+    ]
+
+
 def load_annotations(path: Path) -> list[dict]:
     """Load + validate an SOS-08-G annotation overlay file.
 
