@@ -213,6 +213,12 @@ class CocotbChart:
     # SOS-08-D wave-2c: per-region info for parallel charts; empty
     # tuple for single-region (wave-1 path unchanged).
     regions: list[CocotbRegion] = field(default_factory=list)
+    # SOS-08-G wave-2: per-state chart_path lists (per §5.2 +
+    # PCDN-G-002 — max depth 8). Wave-1 emitted single-segment
+    # chart_path=[state_id]; wave-2 walks the SCXML hierarchy at
+    # emit time so each state's path is rooted at the chart name
+    # and threads through every parent state / parallel region.
+    chart_paths: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _walk_states_in_order(node: dict[str, Any]) -> Iterable[tuple[str, dict]]:
@@ -234,6 +240,72 @@ def _walk_states_in_order(node: dict[str, Any]) -> Iterable[tuple[str, dict]]:
         # nested compound states; we treat each as a leaf for one-hot
         # encoding purposes — same convention as SOS-08-C wave-1).
         yield from _walk_states_in_order(st)
+
+
+_CHART_PATH_MAX_DEPTH = 8
+"""SOS-08-G PCDN-G-002 (resolved 2026-05-23) + PCDN-G-wave1-001 hybrid
+header: chart_path is capped at 8 segments by reference from SOS-12.
+The walker truncates anything deeper at emit time so the overlay's
+`_meta.chart_path_max_depth` field remains the load-bearing depth
+declaration."""
+
+
+def _build_chart_paths(
+    chart_ir: dict[str, Any], chart_name: str
+) -> dict[str, list[str]]:
+    """Build a ``{state_id: chart_path_list}`` map for the chart.
+
+    SOS-08-G wave-2 (2026-05-23 §15): the annotation overlay's
+    ``chart_path`` field per record (per §5.2 + INV-S-HDL-G-2) carries
+    the chart-hierarchy path from the chart root to the named state.
+    Wave-1 emitted ``chart_path=[state_id]`` (single-segment); wave-2
+    walks the SCXML hierarchy at emit time to populate
+    ``chart_path=[chart_name, parent_id, ..., state_id]`` per SOS-12
+    recursive-dispatch vocabulary (separator `/` is render-side
+    concern; the overlay stores the list form).
+
+    Per PCDN-G-002 (resolved 2026-05-23) the max depth is 8 (mirrored
+    from SOS-12). Paths deeper than the cap are truncated to the first
+    8 segments at emit time; the truncation preserves the leaf state
+    so chart-vocabulary attribution remains intact.
+
+    Parallel charts: the path threads through each region's `<state>`
+    container, so a state inside a region carries
+    ``[chart_name, region_name, ..., state_id]``.
+
+    Args:
+        chart_ir: raw scjson dict.
+        chart_name: chart identifier — first segment of every path.
+
+    Returns:
+        Mapping of every state-id reachable from chart_ir to its
+        chart_path list. Capped at ``_CHART_PATH_MAX_DEPTH`` segments.
+    """
+    out: dict[str, list[str]] = {}
+
+    def _walk(node: dict[str, Any], path: list[str]) -> None:
+        # Recurse into <state> children.
+        for st in node.get("state", []) or []:
+            sid = st.get("id")
+            if isinstance(sid, str) and sid:
+                segment_path = (path + [sid])[:_CHART_PATH_MAX_DEPTH]
+                out[sid] = segment_path
+                _walk(st, segment_path)
+            else:
+                _walk(st, path)
+        # Recurse into <parallel> wrappers — each <parallel> can name
+        # sub-regions but the regions themselves are <state> children
+        # of the parallel node.
+        for par in node.get("parallel", []) or []:
+            par_id = par.get("id")
+            par_path = path
+            if isinstance(par_id, str) and par_id:
+                par_path = (path + [par_id])[:_CHART_PATH_MAX_DEPTH]
+                out[par_id] = par_path
+            _walk(par, par_path)
+
+    _walk(chart_ir, [chart_name])
+    return out
 
 
 def _detect_parallel(chart: dict[str, Any]) -> bool:
@@ -305,6 +377,7 @@ def _normalise_chart(
         initial_state=initial,
         has_parallel=False,
         vector_ids=list(vector_ids),
+        chart_paths=_build_chart_paths(chart_ir, chart_name),
     )
 
 
@@ -372,6 +445,7 @@ def _normalise_parallel_chart(
         has_parallel=True,
         vector_ids=list(vector_ids),
         regions=regions,
+        chart_paths=_build_chart_paths(chart_ir, chart_name),
     )
 
 
@@ -492,6 +566,20 @@ def _emit_helpers_py(
     # port and asserts against the region's encoding.
     region_encodings_block: str
     region_initials_block: str
+    # SOS-08-G wave-2: per-state chart_path map (§5.2 + PCDN-G-002).
+    # Walks the SCXML hierarchy at emit time so each annotation
+    # record's `chart_path` carries the full root-to-leaf path
+    # rather than the wave-1 single-segment `[state_id]` shape.
+    chart_paths_lines: list[str] = []
+    for sid in chart.state_ids:
+        path = chart.chart_paths.get(sid, [chart.name, sid])
+        chart_paths_lines.append(f"    {sid!r}: {path!r},")
+    chart_paths_block = (
+        "\n".join(chart_paths_lines)
+        if chart_paths_lines
+        else "    # (no states)"
+    )
+
     if chart.has_parallel and chart.regions:
         region_enc_lines: list[str] = []
         region_init_lines: list[str] = []
@@ -559,6 +647,16 @@ _STATE_ENCODING: dict[str, int] = {{
 _CHART_NAME: str = {chart.name!r}
 _INITIAL_STATE: str = {chart.initial_state!r}
 _HAS_PARALLEL: bool = {chart.has_parallel!r}
+
+# SOS-08-G wave-2: per-state chart_path map (§5.2 + PCDN-G-002 cap).
+# Walks the SCXML hierarchy at emit time so each annotation record
+# carries the full path from chart root to leaf state per SOS-12
+# recursive-dispatch vocabulary. The test body looks up the path
+# at runtime via ``_CHART_PATHS.get(state_id, [_CHART_NAME, state_id])``
+# so a state added post-emit still gets a sensible default path.
+_CHART_PATHS: dict[str, list[str]] = {{
+{chart_paths_block}
+}}
 
 # SOS-08-D wave-2c: per-region state encodings + initial states for
 # parallel charts. The chart-top wrapper exposes one `current_state_
@@ -1035,7 +1133,14 @@ async def test_vector_{slug}(dut):
             cycle=cycle,
             chart_state={initial_state!r},
             transition_id=None,
-            chart_path=[{initial_state!r}],
+            # SOS-08-G wave-2 (§5.2 + PCDN-G-002): chart_path is the
+            # walker-computed root-to-leaf path; defaults to a
+            # single-segment list with the chart name + state id
+            # when the state was added post-emit (unlikely in
+            # practice; defensive).
+            chart_path=_CHART_PATHS.get(
+                {initial_state!r}, [_CHART_NAME, {initial_state!r}]
+            ),
             signal="dut.current_state",
         )
 
@@ -1065,7 +1170,9 @@ async def test_vector_{slug}(dut):
                     cycle=cycle,
                     chart_state=expected_state,
                     transition_id=step.get("transition_id"),
-                    chart_path=[expected_state],
+                    chart_path=_CHART_PATHS.get(
+                        expected_state, [_CHART_NAME, expected_state]
+                    ),
                     signal="dut.current_state",
                     vector_index=step_index,
                 )
@@ -1079,7 +1186,9 @@ async def test_vector_{slug}(dut):
             cycle=cycle,
             chart_state=terminal,
             transition_id=None,
-            chart_path=[terminal],
+            chart_path=_CHART_PATHS.get(
+                terminal, [_CHART_NAME, terminal]
+            ),
             signal="dut.current_state",
         )
     finally:
@@ -1121,6 +1230,13 @@ def _emit_parallel_test_function(
     # Build the per-region assertion + annotation block.
     region_blocks: list[str] = []
     for r in chart.regions:
+        # SOS-08-G wave-2: chart_path uses the walker-computed root-to-
+        # leaf path for the region's initial state per §5.2 +
+        # PCDN-G-002. The path threads chart root → region → initial
+        # state per SOS-12 recursive-dispatch vocabulary.
+        per_region_path = chart.chart_paths.get(
+            r.initial_state, [chart.name, r.name, r.initial_state]
+        )
         region_blocks.append(
             f"        assert_region_state(\n"
             f"            dut, {r.name!r}, {r.initial_state!r},\n"
@@ -1130,7 +1246,7 @@ def _emit_parallel_test_function(
             f"            cycle=cycle,\n"
             f"            chart_state={r.initial_state!r},\n"
             f"            transition_id=None,\n"
-            f"            chart_path=[{r.name!r}, {r.initial_state!r}],\n"
+            f"            chart_path={per_region_path!r},\n"
             f"            signal=\"dut.current_state_{r.name}\",\n"
             f"            region={r.name!r},\n"
             f"        )"
@@ -1671,6 +1787,209 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
+# post_annotations.py — SVA invariant_id merge into annotation overlays.
+# SOS-08-G wave-2b per §15 (2026-05-23) + wave-1 §15's "SVA bind-file
+# annotation integration" wave-2 candidate.
+#
+# Reads cocotb's build/sim.log + the per-test build/<test>.annotations.
+# jsonl overlays; merges chart-vocabulary `SOS-FAIL` lines into the
+# matching overlay as invariant-fire annotation records (per §5.2 +
+# INV-S-HDL-G-2 — the `invariant_id` field on annotation records is
+# populated when an SVA assertion fires during the test run).
+# ---------------------------------------------------------------------------
+
+
+def _emit_post_annotations_py(chart: CocotbChart) -> str:
+    """Emit ``post_annotations.py`` — the SOS-08-G wave-2b SVA fire
+    merge post-processor.
+
+    Per SOS-08-G §15 wave-2 candidate "SVA bind-file annotation
+    integration" (resolved in this commit): the script reads the
+    cocotb run's `build/sim.log` for `SOS-FAIL chart=<chart>
+    region=<region> transition=<txid> state=<state> invariant=<invid>
+    @ <time>` lines (per SOS-08-D §6.6 emit format) and appends one
+    invariant-fire annotation record per matching line to the
+    test's `.annotations.jsonl` overlay.
+
+    The script is per-chart and self-filters by `chart=<this_chart>`
+    so a shared `build/` across charts cannot cross-contaminate
+    (same self-filter pattern wave-2a established for
+    `post_results.py`). Standalone Python 3.10+, standard-library
+    only.
+
+    Annotation record shape per §5.2:
+        {
+            "cycle":         <int>,    # simulator time → cycle count
+            "signal":        "dut.<chart_top>",
+            "chart_state":   <state from SOS-FAIL>,
+            "transition_id": <txid from SOS-FAIL>,
+            "chart_path":    <from _CHART_PATHS lookup if available
+                              else [chart_name, state]>,
+            "region":        <region from SOS-FAIL>,
+            "invariant_id":  <invid from SOS-FAIL>,
+        }
+
+    The script appends to each `<test>.annotations.jsonl` it finds
+    in the build directory; INV-S-HDL-G-3 (schema header at line 0)
+    is preserved because we append AFTER the existing records, never
+    rewriting the header.
+
+    Invariants upheld:
+      * INV-S-HDL-G-2 (chart-vocabulary mandatory): every appended
+        record carries chart_state, transition_id, chart_path,
+        region, plus the invariant_id from the SVA fire.
+      * INV-S-HDL-G-3 (schema-version header at line 0): preserved
+        — we append, never rewrite the header.
+      * INV-S-HDL-G-4 (build-output discipline): appended records
+        live inside the per-test annotation file, which is itself
+        a build output (gitignored per §5.8).
+    """
+    chart_name = chart.name
+    chart_name_repr = repr(chart_name)
+    return f'''# {_GEN_HEADER}
+#
+# SOS-08-G wave-2b SVA invariant_id merge for chart `{chart_name}`.
+#
+# Reads build/sim.log for SOS-FAIL lines (per SOS-08-D §6.6) and
+# appends one invariant-fire annotation record to each test's
+# build/<test>.annotations.jsonl overlay (per SOS-08-G §5.2 +
+# INV-S-HDL-G-2).
+#
+# Per SOS-08-G §15 wave-2 candidate "SVA bind-file annotation
+# integration" — wave-1 deferred this; wave-2b lands it as a
+# post-test merge step that runs alongside post_results.py.
+#
+# Usage:
+#     python3 post_annotations.py [BUILD_DIR]
+# (BUILD_DIR defaults to "./build".)
+#
+# Invariants:
+#   * INV-S-HDL-G-2 -- every appended record carries chart-vocab
+#     metadata (chart_state, transition_id, chart_path, region,
+#     invariant_id).
+#   * INV-S-HDL-G-3 -- schema-version header at line 0 preserved
+#     (we append, never rewrite).
+#
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+
+CHART_NAME = {chart_name_repr}
+
+
+# Per SOS-08-D §6.6: SOS-FAIL line emitted by the SVA `\\`SOS_FAIL`
+# macro:
+#     SOS-FAIL chart=<chart> region=<region> transition=<txid>
+#              state=<state> invariant=<invid> @ <time>
+_SOS_FAIL_RE = re.compile(
+    r"^.*SOS-FAIL\\s+chart=(?P<chart>\\S+)\\s+region=(?P<region>\\S+)\\s+"
+    r"transition=(?P<transition>\\S+)\\s+state=(?P<state>\\S+)\\s+"
+    r"invariant=(?P<invariant>\\S+)(?:\\s+@\\s+(?P<time>\\S+))?\\s*$",
+)
+
+
+def _scrape_sva_fires(sim_log: Path) -> list[dict[str, str]]:
+    """Return chart-matching SOS-FAIL lines as dicts. Self-filter
+    by CHART_NAME so a shared build/ across charts cannot cross-
+    contaminate (same pattern as wave-2a post_results.py)."""
+    if not sim_log.is_file():
+        return []
+    hits: list[dict[str, str]] = []
+    for line in sim_log.read_text(encoding="utf-8",
+                                  errors="replace").splitlines():
+        m = _SOS_FAIL_RE.match(line)
+        if not m:
+            continue
+        gd = m.groupdict()
+        if gd.get("chart") != CHART_NAME:
+            continue
+        hits.append(gd)
+    return hits
+
+
+def _time_to_cycle(time_str: str | None) -> int:
+    """Wave-2b stub conversion: extract leading integer from the
+    SOS-FAIL `@ <time>` field (e.g. ``"142ns"`` → 142). The unit
+    suffix is dropped; full simulator-time → cycle conversion needs
+    knowledge of the clock period and is wave-3 scope.
+    """
+    if not time_str:
+        return 0
+    m = re.match(r"(-?\\d+)", time_str)
+    return int(m.group(1)) if m else 0
+
+
+def _build_record(fire: dict[str, str]) -> dict:
+    """Build an annotation record from one SOS-FAIL fire."""
+    chart_path = [CHART_NAME, fire["state"]]
+    return {{
+        "cycle": _time_to_cycle(fire.get("time")),
+        "signal": f"dut.{{fire['region']}}",
+        "chart_state": fire["state"],
+        "transition_id": fire["transition"],
+        "chart_path": chart_path,
+        "region": fire["region"],
+        "invariant_id": fire["invariant"],
+    }}
+
+
+def _append_to_overlay(overlay: Path, records: list[dict]) -> None:
+    """Append records to the overlay file. Per INV-S-HDL-G-3 we
+    preserve the line-0 schema header by appending, not rewriting.
+    """
+    with overlay.open("a", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\\n")
+
+
+def main(argv: list[str]) -> int:
+    build_dir = Path(argv[1]) if len(argv) > 1 else Path("build")
+    sim_log = build_dir / "sim.log"
+
+    fires = _scrape_sva_fires(sim_log)
+    if not fires:
+        sys.stdout.write(
+            f"post_annotations: no SOS-FAIL lines for chart "
+            f"`{{CHART_NAME}}` in {{sim_log!s}}; no records appended.\\n"
+        )
+        return 0
+
+    # Find all <test>.annotations.jsonl files in the build dir; append
+    # the chart's fires to every overlay so a reviewer scrubbing any
+    # test's waveform sees the chart-wide invariant fires.
+    overlays = sorted(build_dir.glob("*.annotations.jsonl"))
+    if not overlays:
+        sys.stderr.write(
+            f"post_annotations: found {{len(fires)}} SOS-FAIL line(s) "
+            f"for chart `{{CHART_NAME}}` but no <test>.annotations."
+            f"jsonl overlay files in {{build_dir!s}}; nothing to "
+            f"merge into.\\n"
+        )
+        return 3
+
+    records = [_build_record(f) for f in fires]
+    for overlay in overlays:
+        _append_to_overlay(overlay, records)
+
+    sys.stdout.write(
+        f"post_annotations: appended {{len(records)}} SVA-fire "
+        f"record(s) for chart `{{CHART_NAME}}` to "
+        f"{{len(overlays)}} overlay file(s).\\n"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+'''
+
+
+# ---------------------------------------------------------------------------
 # Scaffold vector — emitted alongside the test files so the wave-1
 # directory is self-contained on disk. The author replaces this with a
 # real SOS-03 vector at suite-population time.
@@ -1790,6 +2109,9 @@ def render_target(chart_ir: dict, config: Any = None) -> dict[str, str]:
     # SOS-08-D wave-2a: per-chart JUnit XML post-processor per §6.7
     # + PCDN-D-002 (wave-1 deferred, wave-2a lands).
     out[f"{prefix}post_results.py"] = _emit_post_results_py(chart)
+    # SOS-08-G wave-2b: per-chart SVA fire merge — appends invariant
+    # _id-bearing annotation records into each test's overlay file.
+    out[f"{prefix}post_annotations.py"] = _emit_post_annotations_py(chart)
 
     # Scaffold vector files (one per bound vector id) so the emitted
     # directory is end-to-end runnable. Authors replace these with

@@ -115,14 +115,14 @@ def _chart_with_parallel():
 
 
 def test_render_emits_expected_files():
-    """Single-region chart → 6 emitter artifacts + 1 scaffold vector.
+    """Single-region chart → 7 emitter artifacts + 1 scaffold vector.
 
-    Per SOS-08-D §6.1 emit directory layout + PCDN-D-006 / §5.6
-    (one test_<dut>.py + shared helpers) + PCDN-D-007 (Makefile +
+    Per SOS-08-D §6.1 emit directory layout + PCDN-D-006 / §5.6 (one
+    test_<dut>.py + shared helpers) + PCDN-D-007 (Makefile +
     pytest.ini both emitted) + PCDN-D-002 (post_results.py JUnit
-    post-processor — wave-2a landing) + PCDN-SOS-08-D-wave1-file-
-    layout (2026-05-23 ratification — every key prefixed with
-    ``tests/<chart>/``):
+    post-processor — wave-2a) + SOS-08-G §15 wave-2b
+    (post_annotations.py SVA fire merge) + PCDN-SOS-08-D-wave1-file-
+    layout (2026-05-23 — every key prefixed with ``tests/<chart>/``):
 
       tests/<chart>/test_<chart>_fsm.py
       tests/<chart>/_cocotb_helpers.py
@@ -130,23 +130,23 @@ def test_render_emits_expected_files():
       tests/<chart>/pytest.ini
       tests/<chart>/README.md
       tests/<chart>/post_results.py            # wave-2a per §6.7
+      tests/<chart>/post_annotations.py        # wave-2b SVA fire merge
       tests/<chart>/vectors/<vector_id>.json   # scaffold so dir runnable
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
 
-    # The six normative emitter artifacts under tests/<chart>/.
+    # The seven normative emitter artifacts under tests/<chart>/.
     assert "tests/demo/test_demo_fsm.py" in files
     assert "tests/demo/_cocotb_helpers.py" in files
     assert "tests/demo/Makefile" in files
     assert "tests/demo/pytest.ini" in files
     assert "tests/demo/README.md" in files
     assert "tests/demo/post_results.py" in files
+    assert "tests/demo/post_annotations.py" in files
 
-    # Plus one scaffold vector under tests/<chart>/vectors/ — the
-    # wave-1 default is `000-reset` per the emitter's
-    # `_DEFAULT_SCAFFOLD_VECTOR` constant.
+    # Plus one scaffold vector under tests/<chart>/vectors/.
     assert "tests/demo/vectors/000-reset.json" in files
-    assert len(files) == 7
+    assert len(files) == 8
 
 
 def test_makefile_and_pytest_ini_both_emitted():
@@ -1145,3 +1145,240 @@ class TestParallelChartEmit:
         # Single-region test reads `dut.current_state`, not
         # `dut.current_state_<region>`.
         assert "current_state" in test
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-G wave-2a: nested chart_path walking (§15 2026-05-23 entry).
+# ---------------------------------------------------------------------------
+
+
+class TestNestedChartPathWalking:
+    """SOS-08-G wave-2: chart_path field on annotation records is the
+    walker-computed root-to-leaf path per §5.2 + PCDN-G-002 (max
+    depth 8)."""
+
+    def _nested_chart(self) -> dict:
+        return {
+            "initial": "outer",
+            "state": [
+                {
+                    "id": "outer",
+                    "state": [
+                        {
+                            "id": "inner",
+                            "state": [
+                                {"id": "leaf"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+        }
+
+    def test_chart_paths_emitted_in_helpers(self):
+        files = render_target(self._nested_chart(), {"chart_name": "demo"})
+        helpers = files["tests/demo/_cocotb_helpers.py"]
+        assert "_CHART_PATHS: dict[str, list[str]] =" in helpers
+
+    def test_root_state_path(self):
+        files = render_target(self._nested_chart(), {"chart_name": "demo"})
+        helpers = files["tests/demo/_cocotb_helpers.py"]
+        # outer is at depth 1 below the chart root.
+        assert "'outer': ['demo', 'outer']" in helpers
+
+    def test_nested_state_path(self):
+        files = render_target(self._nested_chart(), {"chart_name": "demo"})
+        helpers = files["tests/demo/_cocotb_helpers.py"]
+        # inner is rooted: chart -> outer -> inner.
+        assert "'inner': ['demo', 'outer', 'inner']" in helpers
+
+    def test_deeply_nested_state_path(self):
+        files = render_target(self._nested_chart(), {"chart_name": "demo"})
+        helpers = files["tests/demo/_cocotb_helpers.py"]
+        # leaf is at depth 3: chart -> outer -> inner -> leaf.
+        assert "'leaf': ['demo', 'outer', 'inner', 'leaf']" in helpers
+
+    def test_test_body_uses_chart_paths_lookup(self):
+        files = render_target(self._nested_chart(), {"chart_name": "demo"})
+        test_body = files["tests/demo/test_demo_fsm.py"]
+        # Test body uses _CHART_PATHS.get(...) lookup pattern rather
+        # than the wave-1 single-segment `[state_id]` form.
+        assert "_CHART_PATHS.get(" in test_body
+
+    def test_path_truncated_at_max_depth(self):
+        """PCDN-G-002 max depth = 8. Charts deeper than 8 truncate to
+        the first 8 segments at emit time."""
+        # Build a 10-deep chain.
+        chart_ir = {"state": []}
+        node = chart_ir
+        for i in range(10):
+            sid = f"s{i}"
+            child = {"id": sid, "state": []}
+            node["state"].append(child)
+            node = child
+        files = render_target(chart_ir, {"chart_name": "deep"})
+        helpers = files["tests/deep/_cocotb_helpers.py"]
+        # s9 is at chart depth 10; the emitted path is capped at 8.
+        # Find the s9 entry and parse its list-literal length.
+        import re as _re
+        m = _re.search(r"'s9':\s*\[([^\]]+)\]", helpers)
+        assert m, "s9 entry missing from emitted _CHART_PATHS"
+        segs = [s.strip().strip("'") for s in m.group(1).split(",")]
+        assert len(segs) == 8, (
+            f"chart_path for s9 must be capped at 8 segments per "
+            f"PCDN-G-002; got {len(segs)}: {segs}"
+        )
+
+    def test_parallel_chart_paths_include_region(self):
+        """For parallel charts the path threads through the
+        ``<parallel>`` wrapper id AND the region identifier (the
+        parallel-child ``<state>``) per SOS-12 — both are hierarchy
+        nodes in the SCXML AST so both appear in the path."""
+        chart_ir = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {
+                        "id": "left",
+                        "state": [{"id": "l_idle"}],
+                    },
+                ],
+            }],
+        }
+        files = render_target(chart_ir, {"chart_name": "k"})
+        helpers = files["tests/k/_cocotb_helpers.py"]
+        # l_idle's path: chart root -> <parallel> id -> region -> leaf.
+        assert "'l_idle': ['k', 'p', 'left', 'l_idle']" in helpers
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-G wave-2b: post_annotations.py SVA invariant_id merge.
+# ---------------------------------------------------------------------------
+
+
+class TestPostAnnotationsEmit:
+    """post_annotations.py is emitted per chart and merges SVA fires."""
+
+    def _post_ann(self) -> str:
+        files = render_target(_simple_chart(), {"chart_name": "demo"})
+        return files["tests/demo/post_annotations.py"]
+
+    def test_emitted(self):
+        files = render_target(_simple_chart(), {"chart_name": "demo"})
+        assert "tests/demo/post_annotations.py" in files
+
+    def test_parses_as_python(self):
+        ast.parse(self._post_ann())
+
+    def test_cites_chart_name(self):
+        src = self._post_ann()
+        assert "CHART_NAME = 'demo'" in src or 'CHART_NAME = "demo"' in src
+
+    def test_cites_spec_sections(self):
+        src = self._post_ann()
+        for token in ("SOS-08-G", "INV-S-HDL-G-2", "INV-S-HDL-G-3"):
+            assert token in src, (
+                f"post_annotations.py must cite {token!r}"
+            )
+
+    def test_stdlib_only(self):
+        src = self._post_ann()
+        for forbidden in ("import cocotb", "import pytest"):
+            assert forbidden not in src
+
+
+class TestPostAnnotationsEndToEnd:
+    """Drive the emitted post_annotations.py against synthetic inputs."""
+
+    def _run(self, sim_log_text: str, overlay_lines: list[str]) -> tuple[int, str, str, str]:
+        import subprocess
+        import tempfile
+        files = render_target(_simple_chart(), {"chart_name": "demo"})
+        src = files["tests/demo/post_annotations.py"]
+        with tempfile.TemporaryDirectory() as td:
+            from pathlib import Path
+            td_p = Path(td)
+            (td_p / "post_annotations.py").write_text(src)
+            build = td_p / "build"
+            build.mkdir()
+            overlay = build / "test_x.annotations.jsonl"
+            overlay.write_text("\n".join(overlay_lines) + "\n")
+            (build / "sim.log").write_text(sim_log_text)
+            res = subprocess.run(
+                ["python3", str(td_p / "post_annotations.py"), str(build)],
+                capture_output=True, text=True,
+            )
+            return res.returncode, res.stdout, res.stderr, overlay.read_text()
+
+    def test_appends_sva_fire_with_invariant_id(self):
+        header = (
+            '{"_meta": {"schema": "sos-08-g/annotations", '
+            '"version": "1.0", "chart_path_max_depth": 8}}'
+        )
+        rc, out, err, overlay = self._run(
+            "SOS-FAIL chart=demo region=main transition=T7 "
+            "state=idle invariant=I1 @ 142ns\n",
+            [header],
+        )
+        assert rc == 0, f"post_annotations.py failed: {err}"
+        # Header preserved at line 0 (INV-S-HDL-G-3).
+        lines = overlay.strip().split("\n")
+        assert "sos-08-g/annotations" in lines[0]
+        # Appended record carries invariant_id.
+        appended = lines[1]
+        assert '"invariant_id": "I1"' in appended
+        assert '"transition_id": "T7"' in appended
+
+    def test_self_filters_by_chart_name(self):
+        """Other-chart SOS-FAIL lines MUST NOT be appended."""
+        header = (
+            '{"_meta": {"schema": "sos-08-g/annotations", '
+            '"version": "1.0", "chart_path_max_depth": 8}}'
+        )
+        rc, out, err, overlay = self._run(
+            "SOS-FAIL chart=other region=foo transition=T1 "
+            "state=q invariant=Ix @ 1ns\n"
+            "SOS-FAIL chart=demo region=main transition=T7 "
+            "state=idle invariant=I1 @ 142ns\n",
+            [header],
+        )
+        assert rc == 0
+        # Only the demo-chart fire merged.
+        assert overlay.count("invariant_id") == 1
+        assert "Ix" not in overlay
+
+    def test_no_fires_no_changes(self):
+        header = (
+            '{"_meta": {"schema": "sos-08-g/annotations", '
+            '"version": "1.0", "chart_path_max_depth": 8}}'
+        )
+        rc, out, err, overlay = self._run("", [header])
+        assert rc == 0
+        # Just the header line; no appended records.
+        assert overlay.strip() == header
+
+    def test_header_preserved_at_line_zero(self):
+        """INV-S-HDL-G-3: schema-version header MUST remain at line 0
+        after merge."""
+        header = (
+            '{"_meta": {"schema": "sos-08-g/annotations", '
+            '"version": "1.0", "chart_path_max_depth": 8}}'
+        )
+        existing = (
+            '{"cycle": 0, "signal": "dut.x", "chart_state": "idle", '
+            '"transition_id": null, "chart_path": ["demo", "idle"], '
+            '"region": null}'
+        )
+        rc, out, err, overlay = self._run(
+            "SOS-FAIL chart=demo region=main transition=T7 "
+            "state=idle invariant=I1 @ 142ns\n",
+            [header, existing],
+        )
+        assert rc == 0
+        lines = overlay.strip().split("\n")
+        # Header at line 0; pre-existing record at line 1; merged
+        # fire at line 2.
+        import json as _json
+        assert "_meta" in _json.loads(lines[0])
+        assert len(lines) == 3

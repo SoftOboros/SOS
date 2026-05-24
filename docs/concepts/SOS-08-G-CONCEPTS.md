@@ -455,3 +455,54 @@ The wave-1 scaffold implementation exposed five new PCDNs (PCDN-G-wave1-001 thro
 - `tools/sos-codegen/tests/test_transliterate_cocotb.py` + `tools/sos-codegen/tests/test_sos_08_g_integration.py` — assertions updated to expect `sos-08-g/annotations`.
 
 **Status**: 🟢 **wave-1 PCDN walkthrough complete**. PCDN-G-wave1-001 closed in-tree; PCDN-G-wave1-002 through 005 are documented wave-2 boundary entries (each names its specific deferral reason). Wave-2 may now proceed against an unambiguous spec / impl baseline.
+
+### 2026-05-23 — Impl wave-2: nested chart_path walking + SVA invariant_id merge (Ira)
+
+Wave-2 closes two of the four wave-1 deferred candidates:
+
+- **PCDN-G-wave1-004 (nested-chart `chart_path` walking)** → ✅ landed. The cocotb walker now walks the SCXML hierarchy at emit time and populates each annotation record's `chart_path` field with the full root-to-leaf path per SOS-12 recursive-dispatch vocabulary. Wave-1's single-segment `chart_path=[state_id]` form is replaced with `chart_path=[chart_name, parent_id, ..., state_id]` capped at depth 8 per PCDN-G-002.
+- **PCDN-G-wave1-005 (SVA bind-file `invariant_id` integration)** → ✅ landed via a new per-chart `post_annotations.py` post-processor. The script reads `build/sim.log` for `SOS-FAIL chart=... region=... transition=... state=... invariant=... @ <time>` lines (per SOS-08-D §6.6 emit format) and appends one invariant-fire annotation record per matching line to each `<test>.annotations.jsonl` overlay in the build directory.
+
+**Wave-3 deferred candidates** (the two that remain from wave-1):
+
+- **PCDN-G-wave1-002 (per-cycle density actual implementation)**: instrument `RisingEdge(dut.clk)` callback in emitted test body. Wave-1 + wave-2 read `SOS_ANNOTATION_DENSITY` but the per-cycle callback wiring is wave-3.
+- **PCDN-G-wave1-003 (filename-prefix coordination by construction)**: cocotb Makefile fragment that binds simulator's dump path to writer's annotation path. Currently caller-coordinated; wave-3 makes it by construction.
+
+**Wave-3 GUI integration boundary** (explicitly out of scope at wave-2):
+
+Wave-1 §15 named "full GUI integration" as a wave-2 candidate. Wave-2 does NOT land it. Reason: full GUI integration requires runtime plugins inside the viewer's process — GTKWave needs a TCL extension that loads at simulator-launch time and adds menu items + marker-track rendering; Surfer needs a Rust crate compiled to WebAssembly + a Surfer-side plugin manifest. Both require viewer-binary integration testing and toolchain-specific build infrastructure (TCL for GTKWave; Rust + wasm-pack + the Surfer plugin SDK for Surfer) that the wave-2 commit window cannot ship credibly. Wave-3 picks up GUI integration as a focused multi-commit family.
+
+**Wave-2 implementation surface**:
+
+- **`_build_chart_paths(chart_ir, chart_name)`** added to `transliterate_cocotb.py` (~50 LOC). Recursively walks the SCXML hierarchy yielding `{state_id: chart_path_list}` for every named state and every named `<parallel>` wrapper. The `<parallel>` wrapper's id is a hierarchy node (per SOS-12 — orthogonal regions sit under a named parallel container), so paths through parallel charts thread `chart → parallel_id → region_id → leaf_state`. Cap at `_CHART_PATH_MAX_DEPTH = 8` per PCDN-G-002 + the hybrid header's `chart_path_max_depth: 8` field.
+- **`CocotbChart.chart_paths` field** added: `dict[str, list[str]]`, populated by `_build_chart_paths` from both single-region and parallel chart normalisation code paths.
+- **`_emit_helpers_py` extension**: emits `_CHART_PATHS: dict[str, list[str]] = {...}` into the helpers module — a literal mapping of every state-id reachable in the chart to its walker-computed path. The test body looks it up at runtime via `_CHART_PATHS.get(state_id, [_CHART_NAME, state_id])`.
+- **Test-body emit update**: every `writer.record_transition(..., chart_path=...)` call site in both `_emit_one_test_function` (single-region) and `_emit_parallel_test_function` (parallel) now uses `_CHART_PATHS.get(...)` lookup with the safe `[chart_name, state]` fallback shape, replacing wave-1's hard-coded `[state]` form.
+- **`_emit_post_annotations_py(chart)`** added (~150 LOC). Per-chart standalone Python 3.10+ script wired into `render_target`'s output dict at `tests/<chart>/post_annotations.py`. The script:
+    - Reads `build/sim.log`, scrapes `SOS-FAIL chart=<chart> ...` lines via regex matching the §6.6 macro emit format.
+    - Self-filters by `chart=<this_chart>` (same pattern as wave-2a `post_results.py`) — a shared build directory across charts cannot cross-contaminate.
+    - For each chart-matching fire builds one annotation record with `invariant_id` populated (plus `chart_state`, `transition_id`, `region`, `cycle` from the time stamp, `chart_path` defaulted to `[chart_name, state]` since the script does not have access to the emit-time `_CHART_PATHS` map).
+    - Appends each record to every `<test>.annotations.jsonl` overlay it finds in `build/` — appends only, never rewrites the line-0 schema header per INV-S-HDL-G-3.
+    - Standalone Python 3.10+, standard-library only (re, json, sys, pathlib). No cocotb / pytest dependency at post-processing time.
+
+**Filename prefix convention**: `tests/<chart>/post_annotations.py` — co-located with `post_results.py` (wave-2a) under the same chart directory. Emit count per chart: 7 → 8 (added one).
+
+**Invariants upheld**:
+
+- **INV-S-HDL-G-2** (chart-vocabulary mandatory): retained — both the chart_path-enriched records (wave-2a path lookup) and the post-merged SVA-fire records carry the six normative fields per §5.2 (cycle, signal, chart_state, transition_id, chart_path, region) plus the optional `invariant_id` for fire records.
+- **INV-S-HDL-G-3** (schema-version header at line 0): preserved by the append-only merge. The `post_annotations.py` script opens overlays in append mode (`"a"`) so the line-0 header is never rewritten.
+- **INV-S-HDL-G-4** (build-output discipline): appended records live inside the per-test annotation file — itself a build output (gitignored per §5.8). No new tracked-source files introduced.
+- **INV-S-HDL-G-6** (chart-diff + waveform-diff parity for MCP-workflow review): strengthened — the wave-2 chart_path nesting means a [SOS-11][sos-11] chart-diff that touches a deeply-nested sub-chart state now correlates with annotation records whose `chart_path` field names the same hierarchy path the chart-diff renders.
+- **PCDN-G-002** (chart_path max depth = 8): enforced by `_CHART_PATH_MAX_DEPTH` constant + emit-time truncation. Tested via a 10-deep chart whose deepest state's path is capped at 8 segments.
+
+**Test count**: 16 new tests:
+
+- `TestNestedChartPathWalking` (7 tests): _CHART_PATHS emitted in helpers; root state path; nested state path (depth-2 + depth-3); test body uses `_CHART_PATHS.get(...)` lookup; path truncated at max depth via 10-deep fixture; parallel chart paths thread through `<parallel>` wrapper id + region.
+- `TestPostAnnotationsEmit` (5 tests): file emitted; parses as Python; cites chart name + spec sections (`SOS-08-G`, `INV-S-HDL-G-2`, `INV-S-HDL-G-3`); standard-library only.
+- `TestPostAnnotationsEndToEnd` (4 tests): drives the emitted script against synthetic build directories — appends SVA fire with `invariant_id` populated; self-filters by chart name (other-chart lines ignored); no-fires no-changes; schema header preserved at line 0 after merge (INV-S-HDL-G-3).
+
+**Test suite**: 370/370 passing (354 prior + 16 wave-2).
+
+**Cited PCDNs**: PCDN-G-wave1-004 (closed); PCDN-G-wave1-005 (closed); PCDN-G-002 (chart_path max depth = 8, enforced by walker); SOS-08-D §6.6 SOS-FAIL macro emit format (consumed by post_annotations.py); INV-S-HDL-G-2/-3/-4/-6.
+
+Status: 🟢 **wave-2 complete** — nested chart_path walking + SVA invariant_id integration land cleanly. Wave-3 picks up the remaining two wave-1 deferred candidates (per-cycle density actual implementation + filename-prefix coordination by construction) plus full GUI integration (GTKWave TCL extension + Surfer Rust/WASM plugin) as a focused multi-commit family.
