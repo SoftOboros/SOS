@@ -999,8 +999,18 @@ def _emit_entity(
             dialect=Dialect.VHDL,
         )
     )
-    # Wave-3 events: per-event egress ports — one `event_<name>_send_valid`
-    # output per unique raise-event name in the region.
+    # Wave-3 events: per raise-event, emit a (_send_valid, _send_ready)
+    # port pair.
+    #
+    #   - `event_<name>_send_valid` (output) — wave-3-a.
+    #   - `event_<name>_send_ready` (input) — wave-3-d backpressure
+    #     surface from the chart-top channel's `s_axis_tready`. The
+    #     transition mux gates state-advance on this so the FSM holds
+    #     in source state when the channel is full (INV-S-HDL-4
+    #     cooperative-only: priority-claim is preserved across stalls).
+    #
+    # Multiple raise events on one transition require ALL channels
+    # ready (AND); the transition is atomic.
     egress_annotations: list[str] = []
     for ev in raise_events:
         ev_ident = _safe_event_ident_vhdl(ev)
@@ -1016,7 +1026,22 @@ def _emit_entity(
             )
         )
         egress_annotations.append(f"        -- chart event `{ev}`")
-    n_pre_egress = len(port_lines) - len(raise_events)
+        port_lines.append(
+            emit_port_decl(
+                HdlPort(
+                    name=f"event_{ev_ident}_send_ready",
+                    direction="in",
+                    width=1,
+                    width_expr="std_logic",
+                ),
+                dialect=Dialect.VHDL,
+            )
+        )
+        egress_annotations.append(
+            f"        -- chart event `{ev}` (wave-3-d backpressure)"
+        )
+    n_egress_ports = 2 * len(raise_events)
+    n_pre_egress = len(port_lines) - n_egress_ports
     egress_idx = 0
     for i, pl in enumerate(port_lines):
         suffix = ";" if i < len(port_lines) - 1 else ""
@@ -1073,15 +1098,40 @@ def _emit_transition_case_arm(
     if not state.transitions:
         return f"            state_next <= state_q;"
 
+    def _advance_lines(t: HdlTransition, indent: str) -> list[str]:
+        """Emit the state-advance lines for transition `t`.
+
+        SOS-08-C wave-3-d (2026-05-24 §15): if `t` carries
+        `<raise event="..."/>` elements, wrap the advance in a
+        send-ready gate. When any of the channels the transition
+        publishes to is not ready, the FSM HOLDS in source
+        (`state_next <= state_q`) — priority-claim is preserved
+        across backpressure stalls under INV-S-HDL-4 cooperative
+        semantics. Multiple raise events on one transition require
+        ALL channels ready (AND).
+        """
+        target = _state_constant_name(t.target)
+        if not t.raise_events:
+            return [f"{indent}state_next <= {target};"]
+        ready_terms = [
+            f"event_{_safe_event_ident_vhdl(ev)}_send_ready = '1'"
+            for ev in sorted(set(t.raise_events))
+        ]
+        cond = " and ".join(ready_terms)
+        return [
+            f"{indent}if {cond} then",
+            f"{indent}    state_next <= {target};",
+            f"{indent}else",
+            f"{indent}    state_next <= state_q;",
+            f"{indent}end if;",
+        ]
+
     # Partition into a doc-ordered list; identify whether any have
     # `cond` set.
     has_any_guard = any(t.cond for t in state.transitions)
     if not has_any_guard:
         chosen = state.transitions[0]
-        lines: list[str] = []
-        lines.append(
-            f"            state_next <= {_state_constant_name(chosen.target)};"
-        )
+        lines: list[str] = _advance_lines(chosen, "            ")
         for extra in state.transitions[1:]:
             lines.append(
                 f"            -- doc-order priority elided (PCDN-C-006): "
@@ -1093,7 +1143,7 @@ def _emit_transition_case_arm(
     # Mixed/all-guarded path — emit if/elsif/else chain.
     lines = []
     first = True
-    fallthrough_target: Optional[str] = None
+    fallthrough_tr: Optional[HdlTransition] = None
     for t in state.transitions:
         if t.cond:
             compiled = _compile_guard(
@@ -1104,19 +1154,15 @@ def _emit_transition_case_arm(
             lines.append(
                 f"            {kw} {compiled} then  -- doc-order {t.doc_order} → {t.target}"
             )
-            lines.append(
-                f"                state_next <= {_state_constant_name(t.target)};"
-            )
+            lines.extend(_advance_lines(t, "                "))
         else:
             # First unguarded after some guards = closing else branch.
-            fallthrough_target = t.target
+            fallthrough_tr = t
             break
 
-    if fallthrough_target is not None:
+    if fallthrough_tr is not None:
         lines.append(f"            else")
-        lines.append(
-            f"                state_next <= {_state_constant_name(fallthrough_target)};"
-        )
+        lines.extend(_advance_lines(fallthrough_tr, "                "))
     else:
         lines.append(f"            else")
         lines.append(f"                state_next <= state_q;")

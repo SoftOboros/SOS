@@ -1164,21 +1164,42 @@ def _emit_module_header(
     port_lines.append(
         f"output wire [{n_states - 1}:0] current_state"
     )
-    # Wave-3 events: one egress port per unique raise-event name.
-    # The trailing-comment form puts the chart-event-name annotation
-    # on a separate line from the port declaration so the comma-suffix
-    # logic doesn't end up inside the comment.
+    # Wave-3 events: per raise-event, emit a (_send_valid, _send_ready)
+    # port pair.
+    #
+    #   - `event_<name>_send_valid` (output) — wave-3-a; the
+    #     combinational pulse driven from the transition-firing
+    #     predicate.
+    #   - `event_<name>_send_ready` (input) — wave-3-d; backpressure
+    #     surface from the chart-top channel's `s_axis_tready`. The
+    #     transition mux gates state-advance on this so the FSM holds
+    #     in the source state when the channel is full (cooperative
+    #     INV-S-HDL-4: priority-claim is preserved across backpressure
+    #     stalls; lower-priority transitions MUST NOT take over).
+    #
+    # The trailing-comment form puts the chart-event-name annotation on
+    # a separate line from the port declaration so the comma-suffix
+    # logic doesn't end up inside the comment. Each event contributes
+    # TWO annotation lines (one per port) to keep the pairing visible
+    # in the emitted text.
     egress_annotations: list[str] = []
     for ev in raise_events:
         ev_ident = _safe_event_ident(ev)
         port_lines.append(f"output wire event_{ev_ident}_send_valid")
         egress_annotations.append(f"        // chart event `{ev}`")
+        port_lines.append(f"input  wire event_{ev_ident}_send_ready")
+        egress_annotations.append(
+            f"        // chart event `{ev}` (wave-3-d backpressure)"
+        )
 
     lines: list[str] = []
     lines.append(f"module {module_name} (")
     # Track which port declarations have a trailing-comment annotation
-    # so the comma lands BEFORE the comment, not at end-of-line.
-    n_pre_egress = len(port_lines) - len(raise_events)
+    # so the comma lands BEFORE the comment, not at end-of-line. Each
+    # raise event contributes 2 ports (valid+ready), so the egress span
+    # is 2 × len(raise_events).
+    n_egress_ports = 2 * len(raise_events)
+    n_pre_egress = len(port_lines) - n_egress_ports
     egress_idx = 0
     for i, pl in enumerate(port_lines):
         suffix = "," if i < len(port_lines) - 1 else ""
@@ -1266,12 +1287,42 @@ def _emit_transition_case_arm(
         else:
             unguarded = tr
 
+    def _advance(tr: HdlTransition) -> str:
+        """Render the state-advance statement for transition `tr`.
+
+        SOS-08-C wave-3-d (2026-05-24 §15): if `tr` carries
+        `<raise event="..."/>` elements, wrap the advance in a
+        send-ready gate. When any of the channels the transition
+        publishes to is not ready, the FSM HOLDS in the source state
+        (`state_next = state_q`) — priority-claim is preserved across
+        backpressure stalls under INV-S-HDL-4 cooperative semantics.
+
+        Multiple raise events on one transition require ALL channels
+        ready (AND); the transition is atomic.
+        """
+        target = _state_constant_name(tr.target)
+        advance = f"state_next = {target};"
+        if not tr.raise_events:
+            return advance
+        ready_terms = [
+            f"event_{_safe_event_ident(ev)}_send_ready"
+            for ev in sorted(set(tr.raise_events))
+        ]
+        cond = " && ".join(ready_terms)
+        # Inline begin/end: keeps the case-arm body single-line per
+        # transition so the existing if/else-if chain stays readable.
+        return (
+            f"begin if ({cond}) {advance} "
+            f"else state_next = {cname}; end"
+        )
+
     lines: list[str] = [f"            {cname}: begin"]
     if not guarded:
-        # No guards — fast path matches wave-1 emission shape.
+        # No guards — fast path matches wave-1 emission shape, plus
+        # wave-3-d send_ready wrap when unguarded transition raises.
         if unguarded is not None:
             lines.append(
-                f"                state_next = {_state_constant_name(unguarded.target)};"
+                f"                {_advance(unguarded)}"
             )
         else:
             lines.append(f"                state_next = {cname};")
@@ -1282,12 +1333,11 @@ def _emit_transition_case_arm(
             kw = "if" if first else "else if"
             first = False
             lines.append(
-                f"                {kw} ({guard_sv}) "
-                f"state_next = {_state_constant_name(tr.target)};"
+                f"                {kw} ({guard_sv}) {_advance(tr)}"
             )
         if unguarded is not None:
             lines.append(
-                f"                else state_next = {_state_constant_name(unguarded.target)};"
+                f"                else {_advance(unguarded)}"
             )
         else:
             lines.append(f"                else state_next = {cname};")

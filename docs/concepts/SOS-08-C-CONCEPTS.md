@@ -645,3 +645,48 @@ The wave-3-b per-region boundary ports `event_<region>_<name>_send_valid` are GO
 **Cited PCDNs**: SOS-08-B §6.5 (channel contract); SOS-08-B §5 (v1 baseline channel parameters); INV-S-HDL-C-3 (now operational); INV-S-HDL-4 (OR-tree justification).
 
 Status: 🟢 **wave-3-c complete**. Wave-3-d adds producer backpressure + multi-clock-domain channel variant + event ingress refactor. Wave-3-e adds payload data routing.
+
+### 2026-05-24 — Impl wave-3-d-1: producer backpressure (Ira)
+
+Wave-3-d originally bundled three concerns: (a) producer backpressure on the `<raise>` egress, (b) the multi-clock-domain channel variant (`sos_message_channel_async`), and (c) the event ingress refactor (single `event_in` port → per-event receive-face ports per §6.4). Each is large enough to merit its own wave, so wave-3-d is **split into three sub-waves**:
+
+- **wave-3-d-1** (this entry): producer backpressure.
+- **wave-3-d-2** (deferred): multi-clock-domain channel variant. Requires a new L1 primitive (`sos_message_channel_async` wrapping `sos_fifo_async`) + its SVA + bind file, plus walker logic to switch instance flavour when producers cross clock domains. SOS-08-B normative surface needs an amendment first.
+- **wave-3-d-3** (deferred): event ingress refactor — emit per-event `event_<name>_recv_valid` / `event_<name>_recv_ready` ingress ports on each region FSM, fan-out the channel's m_axis side to consuming regions, and gate transitions with `event="..."` attributes on `_recv_valid`. Currently transitions consuming events are unimplemented (state advances ignore the event attribute) — this is the load-bearing §6.4 refactor.
+
+**Wave-3-d-1 implementation surface**:
+
+- **`_emit_module_header` (SV) / `_emit_entity` (VHDL)**: per raise-event, the existing `event_<name>_send_valid` output port is now paired with a new `event_<name>_send_ready` **input** port. The trailing-comment annotation logic tracks the pair (`// chart event \`<ev>\`` + `// chart event \`<ev>\` (wave-3-d backpressure)`).
+- **`_emit_transition_case_arm` (SV) / `_emit_transition_case_arm` (VHDL)**: a transition with `tr.raise_events` now wraps its state-advance in `if (event_<name>_send_ready) state_next = <target>; else state_next = state_q;` (single-line `begin ... end` in SV; multi-line `if ... then ... else ... end if;` in VHDL). Multiple raise events on one transition require ALL channels ready (AND): `if (event_X_send_ready && event_Y_send_ready) ...`. **Priority-claim is preserved across backpressure stalls** — a blocked high-priority raise transition holds the FSM in source state without falling through to lower-priority transitions, per INV-S-HDL-4 cooperative-only semantics.
+- **`_emit_event_egress_drives` (unchanged)**: the combinational drive on `event_<name>_send_valid` stays state-derived (`(state_q == ST_S) && guard`). Under backpressure (send_ready=0), state holds in source ⇒ send_valid stays asserted across cycles until handshake completes. This satisfies AXI-Stream "valid must hold until handshake" by construction; valid does NOT depend on ready.
+- **`hdl_common.py` chart-top wrapper**: per chart-wide unique raise-event, declares a `wire ev_<name>_send_ready;` (SV) / `signal ev_<name>_send_ready : std_logic;` (VHDL). Wires the channel's `s_axis_tready` output to this wire. Per producer region instance, adds `.event_<name>_send_ready(ev_<name>_send_ready)` (SV) / `event_<name>_send_ready => ev_<name>_send_ready` (VHDL). The fanout is a broadcast — every producer of a given event sees the same ready signal. Broadcast is correct under INV-S-HDL-4 cooperative-only (at most one producer pulses per cycle).
+
+**Cycle-level behaviour** (single producer, channel backed up):
+
+| Cycle | `state_q` | `guard` | `send_ready` | `send_valid` | `state_next` | Notes |
+|-------|-----------|---------|--------------|--------------|--------------|-------|
+| N     | source    | 1       | 0            | 1            | source       | stall: no transfer, valid stays high |
+| N+1   | source    | 1       | 1            | 1            | target       | handshake completes |
+| N+2   | target    | —       | —            | 0            | (next-state) | state has advanced |
+
+**Wave-3-d-1 scope explicitly excludes**:
+
+- Multi-clock-domain channel variant (`sos_message_channel_async`) — needs SOS-08-B amendment + new L1 primitive. Wave-3-d-2.
+- Event ingress refactor (per-event `_recv_*` ports on region FSMs + transition gating on `_recv_valid`). Wave-3-d-3.
+- Payload data routing on `_tpayload` ports. Wave-3-e.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-1** (handshake-compatible ports): the new `_send_ready` input completes the AXI-Stream handshake at the boundary.
+- **INV-S-HDL-C-1** (deterministic emission): per-event `_send_ready` wires + region-instance fanouts emit in sorted order.
+- **INV-S-HDL-4** (cooperative-only): priority-claim across backpressure stalls relies on cooperative semantics (no preemption attempts to switch to a lower-priority transition when a higher-priority raise is blocked).
+- **INV-SOS-H** (chart-vocabulary traceability): the `_send_ready` port carries the same `// chart event \`<name>\`` annotation as its `_send_valid` partner.
+- **INV-S-HDL-B-1/-2/-3/-4/-5**: channel still instantiated as a black-box L1 service per INV-S-HDL-B-2; the `s_axis_tready` output was already in the L1 contract (SOS-08-B §6.5) — wave-3-d-1 just wires it.
+
+**Test count**: net +8 — `TestWave3dProducerBackpressure` (8 tests): region-module pairs `_send_valid` output with `_send_ready` input; unguarded raise transitions stall in source via the send_ready wrap; guarded raise transitions wrap inside the outer guard; charts without `<raise>` retain wave-1 emission shape (no send_ready); chart-top declares per-event send_ready wire; channel's `s_axis_tready` connects to the send_ready wire (not unconnected); per producer region the send_ready wire fans out to `.event_<name>_send_ready(...)`; multi-producer charts use a single shared send_ready wire (broadcast under INV-S-HDL-4).
+
+**Test suite**: 381/381 passing (373 baseline + 8 net wave-3-d-1). The wave-3-c test count of 387 cited in the prior entry was a transient — the actual baseline going into wave-3-d-1 is 373 (the SV `_send_ready` ports are additive at the port-list boundary; existing tests that grep for `event_<name>_send_valid` still match).
+
+**Cited PCDNs**: SOS-08-B §6.5 (channel contract — `s_axis_tready` was already specified); INV-S-HDL-4 (priority-claim across stalls); SOS-08-A §6 (AXI-Stream valid-stable-until-ready convention).
+
+Status: 🟢 **wave-3-d-1 complete**. Wave-3-d-2 adds the multi-clock-domain channel variant (`sos_message_channel_async`) — requires a SOS-08-B amendment first. Wave-3-d-3 adds the event ingress refactor (per-event `_recv_*` ports on region FSMs + transition gating on `_recv_valid`).

@@ -2024,11 +2024,20 @@ def _emit_chart_top_wrapper_vhdl_new(
         # INTERNAL signals (wave-3-b passthrough boundary superseded).
         # The signals feed the per-event sos_message_channel
         # instance's s_axis_tvalid input via OR-aggregation below.
+        #
+        # SOS-08-C wave-3-d (2026-05-24 §15): also wire the matching
+        # `event_<name>_send_ready` input from the chart-wide
+        # `ev_<name>_send_ready` signal that carries the channel's
+        # `s_axis_tready`. Broadcast is correct under INV-S-HDL-4.
         for ev in rm.get("raise_events", []) or []:
             ev_ident = _safe_event_ident_top(ev)
             port_lines.append(
                 f"event_{ev_ident}_send_valid => "
                 f"w_ev_{rm['name']}_{ev_ident}_pulse"
+            )
+            port_lines.append(
+                f"event_{ev_ident}_send_ready => "
+                f"ev_{ev_ident}_send_ready"
             )
         for j, pl in enumerate(port_lines):
             suffix = "," if j < len(port_lines) - 1 else ""
@@ -2071,7 +2080,7 @@ def _emit_chart_top_wrapper_vhdl_new(
                 f"            s_axis_tevent_id => std_logic_vector(to_unsigned({idx}, 8)),\n"
                 f"            s_axis_tpayload  => (others => '0'),\n"
                 f"            s_axis_tvalid    => ev_{ev_ident}_send_valid,\n"
-                f"            s_axis_tready    => open,\n"
+                f"            s_axis_tready    => ev_{ev_ident}_send_ready,\n"
                 f"            m_axis_tdata     => open,\n"
                 f"            m_axis_tevent_id => open,\n"
                 f"            m_axis_tpayload  => open,\n"
@@ -2103,6 +2112,13 @@ def _emit_chart_top_wrapper_vhdl_new(
                 decl_block.append(f"    signal {wire_name} : std_logic;")
             decl_block.append(
                 f"    signal ev_{ev_ident}_send_valid : std_logic;"
+            )
+            # SOS-08-C wave-3-d (2026-05-24 §15): per-event send_ready
+            # signal carrying the channel's `s_axis_tready` broadcast
+            # back to every producer region's `event_<name>_send_ready`
+            # input port.
+            decl_block.append(
+                f"    signal ev_{ev_ident}_send_ready : std_logic;"
             )
         decl_text = "\n".join(decl_block)
         # Locate the architecture-decl marker (the line right after the
@@ -2209,11 +2225,23 @@ def _emit_chart_top_wrapper_sv_new(
         # superseded). The internal wires feed the per-event
         # `sos_message_channel` instance's `s_axis_tvalid` input via
         # OR-aggregation below.
+        #
+        # SOS-08-C wave-3-d (2026-05-24 §15): also wire the matching
+        # `event_<name>_send_ready` input from the chart-wide
+        # `ev_<name>_send_ready` wire that carries the channel's
+        # `s_axis_tready`. The fanout is a broadcast — every producer
+        # region sees the same ready signal — which is correct under
+        # INV-S-HDL-4 cooperative-only (at most one producer pulses
+        # per cycle).
         for ev in rm.get("raise_events", []) or []:
             ev_ident = _safe_event_ident_top(ev)
             port_lines.append(
                 f".event_{ev_ident}_send_valid"
                 f"(w_ev_{rm['name']}_{ev_ident}_pulse)"
+            )
+            port_lines.append(
+                f".event_{ev_ident}_send_ready"
+                f"(ev_{ev_ident}_send_ready)"
             )
         for j, pl in enumerate(port_lines):
             suffix = "," if j < len(port_lines) - 1 else ""
@@ -2238,6 +2266,16 @@ def _emit_chart_top_wrapper_sv_new(
                     continue
                 producer_wires_emitted.add(wire_name)
                 lines.append(f"    wire {wire_name};")
+        # Per-event send_ready wire (wave-3-d): the channel's
+        # `s_axis_tready` output broadcast to every producer region's
+        # `event_<name>_send_ready` input. One wire per chart-wide
+        # unique event.
+        for ev in sorted(chart_event_set):
+            ev_ident = _safe_event_ident_top(ev)
+            lines.append(
+                f"    wire ev_{ev_ident}_send_ready;"
+                f"  // chart event `{ev}` (wave-3-d backpressure)"
+            )
         # One channel + OR-aggregated valid + hardcoded event_id per
         # unique event. Channel params per SOS-08-B §5 v1 baseline.
         for idx, ev in enumerate(sorted(chart_event_set)):
@@ -2251,8 +2289,9 @@ def _emit_chart_top_wrapper_sv_new(
                 f"  // chart event `{ev}`"
             )
             # Choose clock domain: first producer's clock domain.
-            # Multi-domain producers is wave-3-d scope (the channel
-            # needs to become sos_async-flavoured); v1 assumes single
+            # Multi-domain producers requires the async channel
+            # variant (`sos_message_channel_async`) which is deferred
+            # to its own wave (post wave-3-d); v1 assumes single
             # clock domain across producers of a given event.
             first_dom = clock_order[0] if clock_order else "main"
             if producers and producers[0] in region_index:
@@ -2260,10 +2299,9 @@ def _emit_chart_top_wrapper_sv_new(
             lines.append(
                 f"    // SOS-08-C wave-3-c channel for event `{ev}` — "
                 f"event_id={idx}\n"
-                f"    // Unconnected outputs (full/empty/count, m_axis_t"
-                f"data/event_id/payload, s_axis_tready) land at\n"
-                f"    // wave-3-d (producer backpressure) + wave-3-e "
-                f"(payload routing).\n"
+                f"    // Wave-3-d: s_axis_tready is now wired to the\n"
+                f"    // per-event `ev_<name>_send_ready` wire that\n"
+                f"    // broadcasts back to each producer region.\n"
                 f"    sos_message_channel #(\n"
                 f"        .EVENT_ID_WIDTH(8),\n"
                 f"        .PAYLOAD_WIDTH(8),\n"
@@ -2277,7 +2315,7 @@ def _emit_chart_top_wrapper_sv_new(
                 f"        .s_axis_tevent_id(8'd{idx}),\n"
                 f"        .s_axis_tpayload('0),\n"
                 f"        .s_axis_tvalid(ev_{ev_ident}_send_valid),\n"
-                f"        .s_axis_tready(),\n"
+                f"        .s_axis_tready(ev_{ev_ident}_send_ready),\n"
                 f"        .m_axis_tdata(),\n"
                 f"        .m_axis_tevent_id(),\n"
                 f"        .m_axis_tpayload(),\n"

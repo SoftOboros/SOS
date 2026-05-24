@@ -938,3 +938,156 @@ class TestWave3cChartTopChannels:
         assert ("wire ev_shared_send_valid = "
                 "w_ev_left_shared_pulse | w_ev_right_shared_pulse"
                 in top)
+
+
+class TestWave3dProducerBackpressure:
+    """SOS-08-C wave-3-d (2026-05-24 §15): producer backpressure on
+    `<raise>` egress.
+
+    Each region with `<raise>` transitions gets an `event_<name>_send_ready`
+    input port. Transitions are gated on send_ready — state holds in the
+    source when the channel is full (cooperative priority-claim per
+    INV-S-HDL-4). At the chart-top wrapper, the channel's `s_axis_tready`
+    output is routed back to every producer region via a per-event
+    `ev_<name>_send_ready` wire.
+    """
+
+    def test_region_module_emits_send_ready_input_port(self):
+        files = transliterate_hdl_sv.render_target(
+            _chart_with_raise(), {"chart_name": "r"}
+        )
+        src = files["r_fsm.sv"]
+        # Wave-3-d pairs each `_send_valid` (output) with a matching
+        # `_send_ready` (input) per chart-wide unique raise-event name.
+        assert "output wire event_go_send_valid" in src
+        assert "input  wire event_go_send_ready" in src
+
+    def test_unguarded_raise_transition_gated_on_send_ready(self):
+        """Unguarded raise transitions stall in source when send_ready=0.
+        The case-arm wraps the state-advance in `if (send_ready) ... else
+        state_next = state_q;` so priority-claim survives backpressure."""
+        files = transliterate_hdl_sv.render_target(
+            _chart_with_raise(), {"chart_name": "r"}
+        )
+        src = files["r_fsm.sv"]
+        # ST_A's unguarded raise from A→B is wrapped with send_ready.
+        assert "if (event_go_send_ready) state_next = ST_B;" in src
+        # Stall path holds in source.
+        assert "else state_next = ST_A;" in src
+
+    def test_guarded_raise_transition_wrapped_with_send_ready(self):
+        """Guarded raise transitions keep their outer guard + inner
+        send_ready wrap. Lower-priority transitions MUST NOT take over
+        when a high-priority raise is stalled by backpressure."""
+        files = transliterate_hdl_sv.render_target(
+            _chart_with_raise_and_guard(), {"chart_name": "m"}
+        )
+        src = files["m_fsm.sv"]
+        # Outer guard is `data_ready_q == 1`; inner wrap on ack.
+        assert "if (event_ack_send_ready)" in src
+        # The unguarded raise-and-trace transition raises BOTH ack and
+        # trace — wrap requires AND of both readies.
+        assert (
+            "if (event_ack_send_ready && event_trace_send_ready)" in src
+        )
+
+    def test_non_raising_transition_not_wrapped(self):
+        """Transitions WITHOUT `<raise>` retain the wave-1/2 emission
+        shape — no send_ready wrap."""
+        files = transliterate_hdl_sv.render_target(
+            _simple_chart(), {"chart_name": "x"}
+        )
+        src = files["x_fsm.sv"]
+        # No event ports at all on a chart without `<raise>`.
+        assert "send_ready" not in src
+        assert "send_valid" not in src
+
+    def _parallel_with_raise(self):
+        return {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[
+                            {"target": "L2", "raise_value": [{"event": "ack"}]},
+                        ]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1", "state": [
+                        _state("R1", transitions=[
+                            {"target": "R2", "raise_value": [{"event": "done"}]},
+                        ]),
+                        _state("R2"),
+                    ]},
+                ],
+            }],
+        }
+
+    def _top(self):
+        files = transliterate_hdl_sv.render_target(
+            self._parallel_with_raise(), {"chart_name": "k"}
+        )
+        return files["k_top.sv"]
+
+    def test_chart_top_declares_per_event_send_ready_wire(self):
+        top = self._top()
+        assert "wire ev_ack_send_ready;" in top
+        assert "wire ev_done_send_ready;" in top
+
+    def test_chart_top_wires_channel_s_axis_tready_to_send_ready(self):
+        """Channel's s_axis_tready connects to the per-event send_ready
+        wire (NOT left unconnected as in wave-3-c)."""
+        top = self._top()
+        assert ".s_axis_tready(ev_ack_send_ready)" in top
+        assert ".s_axis_tready(ev_done_send_ready)" in top
+        # Wave-3-c's `.s_axis_tready(),` (unconnected) MUST NOT appear.
+        assert ".s_axis_tready()," not in top
+
+    def test_chart_top_fans_send_ready_to_producer_regions(self):
+        """Each producer region instance gets the per-event send_ready
+        wire connected to its `event_<name>_send_ready` input port."""
+        top = self._top()
+        assert ".event_ack_send_ready(ev_ack_send_ready)" in top
+        assert ".event_done_send_ready(ev_done_send_ready)" in top
+
+    def test_multi_producer_backpressure_broadcasts(self):
+        """Two regions raising the SAME event share ONE channel; the
+        channel's s_axis_tready broadcasts to BOTH producers' send_ready
+        inputs. INV-S-HDL-4 cooperative-only makes the broadcast correct
+        (at most one producer pulses per cycle)."""
+        chart = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[
+                            {"target": "L2", "raise_value": [{"event": "shared"}]},
+                        ]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1", "state": [
+                        _state("R1", transitions=[
+                            {"target": "R2", "raise_value": [{"event": "shared"}]},
+                        ]),
+                        _state("R2"),
+                    ]},
+                ],
+            }],
+        }
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "m"}
+        )
+        top = files["m_top.sv"]
+        # ONE send_ready wire shared by BOTH producers.
+        assert top.count("wire ev_shared_send_ready;") == 1
+        # Both producers wire to the same shared signal.
+        # Broadcast under INV-S-HDL-4.
+        ready_drives = [
+            l for l in top.splitlines()
+            if ".event_shared_send_ready(ev_shared_send_ready)" in l
+        ]
+        assert len(ready_drives) == 2, (
+            "expected 2 send_ready fanouts (one per producer region)"
+        )
