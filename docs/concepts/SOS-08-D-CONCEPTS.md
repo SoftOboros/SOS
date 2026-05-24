@@ -481,3 +481,37 @@ Wave-1 implementation of the cocotb + SVA walkers in `tools/sos-codegen/` surfac
 - CLI surface (informative): adds `--target sos-08-d` unified alongside the split `--target cocotb` / `--target sva` forms.
 
 Status: 🟢 ratified (continuing) — impl wave-1 PCDN amendments fold the emit-layout + CLI surface + SVA port naming + vector step schema decisions into the SOS-08-D normative surface. Wave-2 candidates: parallel chart support, post_results.py emission, SVA bind file co-emission with the cocotb half (currently unified via --target sos-08-d), vector schema extension for full SOS-03 trace fidelity.
+
+### 2026-05-23 — Impl wave-2a: post_results.py JUnit XML post-processor (Ira)
+
+Wave-2a lands the §6.7 JUnit XML post-processor that wave-1 deferred. PCDN-D-002 is the load-bearing PCDN; the resolution at the 2026-05-23 ratification entry above named the artifact (`tests/<scope>/<dut>/post_results.py`) but the wave-1 walker scaffold deferred its emission. This entry records the wave-2a landing.
+
+**Wave-2a implementation surface**:
+
+- **`_emit_post_results_py` function** added to `transliterate_cocotb.py` (~150 LOC). Emits a per-chart `tests/<chart>/post_results.py` standalone Python 3.10+ script that:
+    1. Reads `build/results.xml` (cocotb-classic native xunit-ish output).
+    2. Scrapes `SOS-FAIL chart=<chart> region=<region> transition=<txid> state=<state> invariant=<invid> @ <time>` lines from `build/sim.log` per §6.6.
+    3. Self-filters scraped lines by `chart=<this_chart>` for safety (a shared `build/` directory across charts cannot cross-contaminate).
+    4. Merges each matching SOS-FAIL line into the corresponding `<failure>` element of the JUnit XML by appearance order; trailing extras append to the last failure block (rather than silently dropping).
+    5. Writes `build/junit.xml` in pure JUnit XML form.
+
+- **Standard-library only**. The post-processor imports only `re`, `sys`, `pathlib`, `xml.etree.ElementTree` — no cocotb / pytest runtime dependency at post-processing time. CI runs the script after the cocotb run finishes; the input files (`results.xml`, `sim.log`) are the cocotb run's artifacts.
+
+- **Non-mutating with respect to cocotb's `results.xml`** per INV-S-HDL-D-3. The script reads `results.xml` but writes its output to a separate `junit.xml` path. The cocotb artifact remains the audit trail of what the runner produced; the post-processor's output is the CI-consumable artifact.
+
+- **`render_target` wiring**: the new artifact slots into the existing emit dict between the `README.md` and the scaffold vector files. The output filename matches the §6.7 spec: `tests/<chart>/post_results.py`.
+
+- **End-to-end test** at `tools/sos-codegen/tests/test_transliterate_cocotb.py::TestPostResultsEndToEnd` drives the emitted script against synthetic `results.xml` + `sim.log` inputs and verifies (a) chart-vocabulary message merge into JUnit `<failure>` element, (b) chart-name self-filtering at runtime, (c) non-zero exit code when `results.xml` missing, (d) clean run with zero `<failure>` elements, (e) handling of more SOS-FAIL lines than failure elements (appended to last failure).
+
+**Invariants upheld**:
+
+- **INV-SOS-H + INV-S-HDL-5 + INV-S-HDL-D-5** — chart vocabulary surfaces in every JUnit failure body: chart name, region, transition ID, state, invariant ID + time. CI consumers see the chart context alongside the cocotb assertion text.
+- **INV-S-HDL-D-3** — the post-processor reads cocotb's `results.xml` but does not mutate it. The audit trail is preserved.
+- **§5.3 Python 3.10+** — the emitted script targets the same runtime as the cocotb tests themselves.
+- **§6.7 (3) chart-vocabulary merge contract** — every CI system that consumes JUnit XML now sees chart vocabulary in `<failure>` elements without per-system adapters.
+
+**Cited PCDNs**: PCDN-SOS-08-D-002 (resolved 2026-05-23 §15 ratification; wave-2a impl now lands).
+
+**Test count**: 13 new tests (1 modified existing emit-count assertion + 7 `TestPostResultsEmit` + 5 `TestPostResultsEndToEnd`). Suite total: 315/315 codegen + viewer tests passing.
+
+Status: 🟢 ratified (continuing) — SOS-08-D wave-2a closes the post_results.py gate. Wave-2b is parallel-chart support in both the cocotb and SVA bind walkers (per-region SVA bind file shape; cocotb test against the chart-top wrapper).

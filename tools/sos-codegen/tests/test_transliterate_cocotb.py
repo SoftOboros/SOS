@@ -115,12 +115,13 @@ def _chart_with_parallel():
 
 
 def test_render_emits_expected_files():
-    """Single-region chart → 5 emitter artifacts + 1 scaffold vector.
+    """Single-region chart → 6 emitter artifacts + 1 scaffold vector.
 
     Per SOS-08-D §6.1 emit directory layout + PCDN-D-006 / §5.6
     (one test_<dut>.py + shared helpers) + PCDN-D-007 (Makefile +
-    pytest.ini both emitted) + PCDN-SOS-08-D-wave1-file-layout
-    (2026-05-23 ratification — every key prefixed with
+    pytest.ini both emitted) + PCDN-D-002 (post_results.py JUnit
+    post-processor — wave-2a landing) + PCDN-SOS-08-D-wave1-file-
+    layout (2026-05-23 ratification — every key prefixed with
     ``tests/<chart>/``):
 
       tests/<chart>/test_<chart>_fsm.py
@@ -128,22 +129,24 @@ def test_render_emits_expected_files():
       tests/<chart>/Makefile
       tests/<chart>/pytest.ini
       tests/<chart>/README.md
-      tests/<chart>/vectors/<vector_id>.json   # scaffold so wave-1 dir runnable
+      tests/<chart>/post_results.py            # wave-2a per §6.7
+      tests/<chart>/vectors/<vector_id>.json   # scaffold so dir runnable
     """
     files = render_target(_simple_chart(), {"chart_name": "demo"})
 
-    # The five normative emitter artifacts under tests/<chart>/.
+    # The six normative emitter artifacts under tests/<chart>/.
     assert "tests/demo/test_demo_fsm.py" in files
     assert "tests/demo/_cocotb_helpers.py" in files
     assert "tests/demo/Makefile" in files
     assert "tests/demo/pytest.ini" in files
     assert "tests/demo/README.md" in files
+    assert "tests/demo/post_results.py" in files
 
     # Plus one scaffold vector under tests/<chart>/vectors/ — the
     # wave-1 default is `000-reset` per the emitter's
     # `_DEFAULT_SCAFFOLD_VECTOR` constant.
     assert "tests/demo/vectors/000-reset.json" in files
-    assert len(files) == 6
+    assert len(files) == 7
 
 
 def test_makefile_and_pytest_ini_both_emitted():
@@ -833,3 +836,204 @@ def test_helpers_module_parses_with_annotation_writer():
     # And the emitted test module continues to parse (the wired-in
     # AnnotationWriter usage must not regress the test body's syntax).
     ast.parse(files["tests/demo/test_demo_fsm.py"])
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-D wave-2a: post_results.py JUnit XML post-processor (§6.7 +
+# PCDN-D-002 — wave-1 deferred, wave-2a landed).
+# ---------------------------------------------------------------------------
+
+
+class TestPostResultsEmit:
+    """post_results.py is emitted per chart and parses + runs against a
+    synthetic build/ directory."""
+
+    def _post_results(self) -> str:
+        files = render_target(_simple_chart(), {"chart_name": "demo"})
+        return files["tests/demo/post_results.py"]
+
+    def test_emitted(self):
+        files = render_target(_simple_chart(), {"chart_name": "demo"})
+        assert "tests/demo/post_results.py" in files
+
+    def test_parses_as_python(self):
+        ast.parse(self._post_results())
+
+    def test_cites_chart_name(self):
+        src = self._post_results()
+        assert "CHART_NAME = 'demo'" in src or 'CHART_NAME = "demo"' in src
+
+    def test_cites_spec_sections(self):
+        src = self._post_results()
+        for token in ("SOS-08-D", "§6.7", "PCDN-D-002"):
+            assert token in src, (
+                f"post_results.py must cite spec reference {token!r}"
+            )
+
+    def test_cites_invariants(self):
+        src = self._post_results()
+        assert "INV-S-HDL-D-3" in src
+        assert "INV-S-HDL-D-5" in src
+
+    def test_uses_standard_library_only(self):
+        """Per §5.3 + the wave-2a §15 entry the post-processor depends
+        only on the Python standard library so it runs in CI without
+        installing the cocotb/pytest stack twice."""
+        src = self._post_results()
+        # No imports of cocotb / pytest / external packages.
+        for forbidden in ("import cocotb", "import pytest", "from cocotb",
+                          "from pytest"):
+            assert forbidden not in src, (
+                f"post_results.py must be stdlib-only; saw {forbidden!r}"
+            )
+
+    def test_self_filters_by_chart_name(self):
+        """§6.7 (3): post-processor MUST filter SOS-FAIL lines by
+        chart name so a shared build/ across charts does not cross-
+        contaminate."""
+        src = self._post_results()
+        assert 'gd.get("chart") != CHART_NAME' in src
+
+    def test_non_mutating_with_respect_to_results_xml(self):
+        """INV-S-HDL-D-3: the script reads build/results.xml but
+        writes its output to a separate build/junit.xml path."""
+        src = self._post_results()
+        # Reads results.xml, writes junit.xml — never opens results.xml
+        # for writing.
+        assert 'results.xml' in src
+        assert 'junit.xml' in src
+        assert 'tree.write(junit_xml' in src
+        # No .write_text on results.xml.
+        import re
+        assert not re.search(r"results_xml\s*\.\s*write_text", src)
+
+
+class TestPostResultsEndToEnd:
+    """Drive the emitted post_results.py against synthetic inputs and
+    verify the JUnit XML output shape."""
+
+    def _run_script(self, sim_log_text: str,
+                    results_xml_text: str | None = None) -> tuple[int, str, str]:
+        import subprocess
+        import tempfile
+        files = render_target(_simple_chart(), {"chart_name": "demo"})
+        src = files["tests/demo/post_results.py"]
+        with tempfile.TemporaryDirectory() as td:
+            from pathlib import Path
+            td_p = Path(td)
+            (td_p / "post_results.py").write_text(src)
+            build = td_p / "build"
+            build.mkdir()
+            if results_xml_text is None:
+                results_xml_text = (
+                    '<?xml version="1.0"?>\n'
+                    '<testsuites>\n'
+                    '  <testsuite name="demo">\n'
+                    '    <testcase name="test_vector_a">\n'
+                    '      <failure type="AssertionError">'
+                    'cocotb assertion failed</failure>\n'
+                    '    </testcase>\n'
+                    '  </testsuite>\n'
+                    '</testsuites>\n'
+                )
+            (build / "results.xml").write_text(results_xml_text)
+            (build / "sim.log").write_text(sim_log_text)
+            res = subprocess.run(
+                ["python3", str(td_p / "post_results.py"), str(build)],
+                capture_output=True, text=True,
+            )
+            junit = (build / "junit.xml").read_text() if (build / "junit.xml").exists() else ""
+            return res.returncode, res.stdout + junit, res.stderr
+
+    def test_emits_junit_xml_with_sos_fail_merged(self):
+        rc, combined, err = self._run_script(
+            "SOS-FAIL chart=demo region=main transition=T7 "
+            "state=idle invariant=I1 @ 142ns\n"
+        )
+        assert rc == 0, f"post_results.py failed: stderr={err}"
+        assert "transition=T7" in combined
+        assert "state=idle" in combined
+        assert "invariant=I1" in combined
+        assert "[SOS-08-D §6.6 chart-vocabulary]" in combined
+
+    def test_self_filters_by_chart_name_runtime(self):
+        """SOS-FAIL line for a sibling chart name MUST be ignored."""
+        rc, combined, err = self._run_script(
+            "SOS-FAIL chart=other_chart region=main transition=T1 "
+            "state=foo invariant=I2 @ 100ns\n"
+            "SOS-FAIL chart=demo region=main transition=T7 "
+            "state=idle invariant=I1 @ 142ns\n"
+        )
+        assert rc == 0
+        # Only the demo-chart line is merged; the other_chart line
+        # MUST NOT appear in the junit output.
+        assert "other_chart" not in combined
+        assert "invariant=I1" in combined
+        # And the script reports merging exactly 1 line.
+        assert "merged 1 SOS-FAIL line" in combined
+
+    def test_returns_nonzero_when_results_xml_missing(self):
+        """If cocotb did not produce results.xml the post-processor
+        MUST surface the failure rather than silently writing an
+        empty junit.xml."""
+        import subprocess
+        import tempfile
+        files = render_target(_simple_chart(), {"chart_name": "demo"})
+        src = files["tests/demo/post_results.py"]
+        with tempfile.TemporaryDirectory() as td:
+            from pathlib import Path
+            td_p = Path(td)
+            (td_p / "post_results.py").write_text(src)
+            build = td_p / "build"
+            build.mkdir()
+            res = subprocess.run(
+                ["python3", str(td_p / "post_results.py"), str(build)],
+                capture_output=True, text=True,
+            )
+            assert res.returncode == 2
+            assert "results.xml" in res.stderr
+
+    def test_handles_no_failures(self):
+        """A clean cocotb run (no <failure> elements) yields a clean
+        junit.xml — no script error, no merge attempt."""
+        rc, combined, err = self._run_script(
+            "",  # no SOS-FAIL lines
+            results_xml_text=(
+                '<?xml version="1.0"?>\n'
+                '<testsuites>\n'
+                '  <testsuite name="demo">\n'
+                '    <testcase name="test_vector_a"/>\n'
+                '  </testsuite>\n'
+                '</testsuites>\n'
+            ),
+        )
+        assert rc == 0
+        assert "merged 0 SOS-FAIL line" in combined
+
+    def test_handles_more_sos_fail_lines_than_failures(self):
+        """When sim.log has more SOS-FAIL lines than results.xml has
+        <failure> elements, the extras MUST land in the last failure's
+        text rather than being silently dropped."""
+        rc, combined, err = self._run_script(
+            "SOS-FAIL chart=demo region=main transition=T1 "
+            "state=A invariant=I1 @ 10ns\n"
+            "SOS-FAIL chart=demo region=main transition=T2 "
+            "state=B invariant=I2 @ 20ns\n"
+            "SOS-FAIL chart=demo region=main transition=T3 "
+            "state=C invariant=I3 @ 30ns\n",
+            results_xml_text=(
+                '<?xml version="1.0"?>\n'
+                '<testsuites>\n'
+                '  <testsuite name="demo">\n'
+                '    <testcase name="test_vector_a">\n'
+                '      <failure type="AssertionError">first failure</failure>\n'
+                '    </testcase>\n'
+                '  </testsuite>\n'
+                '</testsuites>\n'
+            ),
+        )
+        assert rc == 0
+        # All three SOS-FAIL lines must appear in the single failure
+        # block (one in-order match + two trailing appended).
+        for inv in ("I1", "I2", "I3"):
+            assert f"invariant={inv}" in combined

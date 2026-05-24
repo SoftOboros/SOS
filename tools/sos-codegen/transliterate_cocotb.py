@@ -1133,6 +1133,229 @@ def _coerce_config(config: Any) -> _CocotbConfig:
 
 
 # ---------------------------------------------------------------------------
+# post_results.py — JUnit XML post-processor (SOS-08-D wave-2a per §6.7).
+#
+# Per PCDN-SOS-08-D-002 (resolved 2026-05-23, §15) the cocotb runner
+# writes a native `build/results.xml` in cocotb's xunit-like shape; the
+# emitted `post_results.py` rewrites it to pure JUnit XML at
+# `build/junit.xml` and merges chart-vocabulary `SOS-FAIL` lines from
+# `build/sim.log` into each `<failure>` element's text content.
+#
+# CI systems (GitHub Actions, GitLab CI, Jenkins, Buildkite, CircleCI)
+# consume `build/junit.xml` with zero per-system adapters. The
+# post-processor is per-chart so it self-filters the SOS-FAIL stream
+# by `chart=<this_chart>` for safety.
+# ---------------------------------------------------------------------------
+
+
+def _emit_post_results_py(chart: CocotbChart) -> str:
+    """Emit ``post_results.py`` — the §6.7 JUnit XML post-processor.
+
+    Per SOS-08-D §6.7 + PCDN-SOS-08-D-002 (resolved 2026-05-23, §15
+    wave-1 walkthrough). Wave-1 deferred this artifact (per the
+    `Impl wave-1 PCDN amendments` §15 entry); wave-2a lands it.
+
+    The emitted script:
+      1. Reads `build/results.xml` (cocotb-classic native xunit-ish).
+      2. Scrapes `SOS-FAIL chart=<chart> ...` lines from
+         `build/sim.log` (simulator stdout per §6.6).
+      3. Filters to chart-matching lines (the emitter knows the chart
+         name; the post-processor cites it verbatim).
+      4. Merges each matching SOS-FAIL line into the corresponding
+         `<failure>` element of `build/results.xml` (matched by test
+         appearance order, since cocotb's xunit shape preserves
+         per-test ordering).
+      5. Writes the rewritten tree as pure JUnit XML at
+         `build/junit.xml`.
+
+    The script is standalone Python 3.10+ (matches the SOS-08-D §5.3
+    runtime contract per PCDN-D-005) and depends only on the standard
+    library (`xml.etree.ElementTree`, `pathlib`, `re`, `sys`). No
+    cocotb / pytest runtime dependency at post-processing time — the
+    cocotb run produces the inputs, the script reads them.
+
+    Invariants upheld at emit time:
+      * INV-SOS-H + INV-S-HDL-5 + INV-S-HDL-D-5: every failure
+        rendered in chart vocabulary; the script lifts the SOS-FAIL
+        lines into the JUnit `<failure>` element so CI consumers see
+        chart-state + transition-id + invariant-id alongside the raw
+        cocotb assertion text.
+      * INV-S-HDL-D-3: the script does NOT mutate the cocotb
+        `results.xml` input file in place — it reads, transforms in
+        memory, writes to a separate `junit.xml` path. The cocotb
+        artifact remains the audit trail of what the runner produced.
+    """
+    chart_name = chart.name
+    chart_name_repr = repr(chart_name)
+    return f'''# {_GEN_HEADER}
+#
+# SOS-08-D wave-2a JUnit XML post-processor for chart `{chart_name}`.
+#
+# Reads cocotb's native build/results.xml + scrapes SOS-FAIL lines
+# from build/sim.log; produces pure JUnit XML at build/junit.xml.
+# CI consumes build/junit.xml.
+#
+# Per SOS-08-D §6.7 + PCDN-D-002 (resolved 2026-05-23, §15) +
+# wave-2a landing entry under §15.
+#
+# Usage:
+#     python3 post_results.py [BUILD_DIR]
+# (BUILD_DIR defaults to "./build".)
+#
+# Invariants:
+#   * INV-S-HDL-D-3 — non-mutating with respect to cocotb's
+#     results.xml; the script reads it but writes its output to a
+#     separate junit.xml path.
+#   * INV-S-HDL-D-5 + INV-S-HDL-5 + INV-SOS-H — failure messages
+#     render in chart vocabulary; SOS-FAIL lines from sim.log are
+#     merged into each <failure> element's text content.
+#
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+
+CHART_NAME = {chart_name_repr}
+"""Chart name the post-processor self-filters SOS-FAIL lines by per
+SOS-08-D §6.7. The chart name is emitted by the cocotb walker so the
+post-processor never matches SOS-FAIL lines from a sibling chart whose
+simulator output happens to share a build/ directory."""
+
+
+# Per SOS-08-D §6.6: SOS-FAIL line shape from the SVA `\\`SOS_FAIL`
+# macro is:
+#     SOS-FAIL chart=<chart> region=<region> transition=<txid>
+#              state=<state> invariant=<invid> @ <time>
+_SOS_FAIL_RE = re.compile(
+    r"^.*SOS-FAIL\\s+chart=(?P<chart>\\S+)\\s+region=(?P<region>\\S+)\\s+"
+    r"transition=(?P<transition>\\S+)\\s+state=(?P<state>\\S+)\\s+"
+    r"invariant=(?P<invariant>\\S+)(?:\\s+@\\s+(?P<time>\\S+))?\\s*$",
+)
+
+
+def _scrape_sos_fail_lines(sim_log: Path) -> list[dict[str, str]]:
+    """Return list of dicts of all SOS-FAIL lines matching this chart.
+
+    Per §6.7 (3): self-filter by chart name so a shared build/
+    directory across charts cannot cross-contaminate.
+    """
+    if not sim_log.is_file():
+        return []
+    hits: list[dict[str, str]] = []
+    for line in sim_log.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = _SOS_FAIL_RE.match(line)
+        if not m:
+            continue
+        gd = m.groupdict()
+        if gd.get("chart") != CHART_NAME:
+            continue
+        hits.append(gd)
+    return hits
+
+
+def _format_chart_vocab(fail: dict[str, str]) -> str:
+    """Single-line chart-vocabulary failure summary per INV-S-HDL-D-5."""
+    pieces = [
+        f"chart={{fail.get('chart')}}",
+        f"region={{fail.get('region')}}",
+        f"transition={{fail.get('transition')}}",
+        f"state={{fail.get('state')}}",
+        f"invariant={{fail.get('invariant')}}",
+    ]
+    if fail.get("time"):
+        pieces.append(f"@ {{fail['time']}}")
+    return " ".join(pieces)
+
+
+def _merge_into_failures(tree: ET.ElementTree,
+                        sos_fails: list[dict[str, str]]) -> None:
+    """Append chart-vocabulary text to each `<failure>` element.
+
+    Per §6.7 (3): match by test appearance order — cocotb's xunit
+    output preserves per-test ordering, so the Nth `<failure>` in the
+    XML corresponds to the Nth SOS-FAIL line in `sim.log` (when both
+    are non-zero). Charts with more SOS-FAIL lines than `<failure>`
+    elements append the remainder to the LAST failure block; charts
+    with fewer leave trailing failures un-augmented (the cocotb-side
+    assertion text remains).
+    """
+    root = tree.getroot()
+    # Walk all <failure> children of <testcase> elements in document
+    # order. JUnit XML places failures as direct children of testcase.
+    failures = []
+    for testsuite in root.iter("testsuite"):
+        for testcase in testsuite.iter("testcase"):
+            for failure in testcase.iter("failure"):
+                failures.append(failure)
+    if not failures:
+        return
+    n = min(len(failures), len(sos_fails))
+    for i in range(n):
+        existing = failures[i].text or ""
+        augmented = (
+            f"{{existing.rstrip()}}\\n\\n[SOS-08-D §6.6 chart-vocabulary] "
+            f"{{_format_chart_vocab(sos_fails[i])}}"
+        )
+        failures[i].text = augmented
+    # Append any trailing SOS-FAIL lines to the last failure element.
+    if len(sos_fails) > len(failures):
+        last = failures[-1]
+        extras = sos_fails[len(failures):]
+        extra_text = "\\n".join(
+            f"[SOS-08-D §6.6 chart-vocabulary] {{_format_chart_vocab(x)}}"
+            for x in extras
+        )
+        last.text = (last.text or "") + "\\n" + extra_text
+
+
+def main(argv: list[str]) -> int:
+    build_dir = Path(argv[1]) if len(argv) > 1 else Path("build")
+    results_xml = build_dir / "results.xml"
+    sim_log     = build_dir / "sim.log"
+    junit_xml   = build_dir / "junit.xml"
+
+    if not results_xml.is_file():
+        sys.stderr.write(
+            f"post_results: {{results_xml!s}} not found — did the cocotb "
+            f"run produce its xunit output?\\n"
+        )
+        return 2
+
+    try:
+        tree = ET.parse(results_xml)
+    except ET.ParseError as exc:
+        sys.stderr.write(
+            f"post_results: cocotb {{results_xml!s}} did not parse as XML "
+            f"({{exc}}); leaving build/ untouched.\\n"
+        )
+        return 3
+
+    sos_fails = _scrape_sos_fail_lines(sim_log)
+    _merge_into_failures(tree, sos_fails)
+
+    # Write to junit.xml — the chart's CI-consumable artifact path.
+    # INV-S-HDL-D-3: results.xml is the cocotb run's audit trail, not
+    # modified by this script.
+    tree.write(junit_xml, encoding="utf-8", xml_declaration=True)
+
+    sys.stdout.write(
+        f"post_results: wrote {{junit_xml!s}} "
+        f"(merged {{len(sos_fails)}} SOS-FAIL line(s) "
+        f"for chart `{{CHART_NAME}}`).\\n"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+'''
+
+
+# ---------------------------------------------------------------------------
 # Scaffold vector — emitted alongside the test files so the wave-1
 # directory is self-contained on disk. The author replaces this with a
 # real SOS-03 vector at suite-population time.
@@ -1249,6 +1472,9 @@ def render_target(chart_ir: dict, config: Any = None) -> dict[str, str]:
     out[f"{prefix}Makefile"] = _emit_makefile(chart, dut_module)
     out[f"{prefix}pytest.ini"] = _emit_pytest_ini(chart)
     out[f"{prefix}README.md"] = _emit_readme(chart, dut_module, cfg)
+    # SOS-08-D wave-2a: per-chart JUnit XML post-processor per §6.7
+    # + PCDN-D-002 (wave-1 deferred, wave-2a lands).
+    out[f"{prefix}post_results.py"] = _emit_post_results_py(chart)
 
     # Scaffold vector files (one per bound vector id) so the emitted
     # directory is end-to-end runnable. Authors replace these with
