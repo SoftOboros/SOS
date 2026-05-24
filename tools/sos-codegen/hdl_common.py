@@ -1815,33 +1815,45 @@ def _emit_chart_top_wrapper_new(
             )
         )
 
-    # SOS-08-C wave-3-b (2026-05-24 §15): per-region event egress
-    # passthrough. Each region_module MAY carry an optional
-    # `raise_events: list[str]` key listing the event names emitted by
-    # `<raise>` elements within that region. For each (region, event)
-    # pair, the chart-top wrapper exposes one
-    # `event_<region>_<name>_send_valid` output and wires it to the
-    # region instance's `event_<name>_send_valid` output port.
+    # SOS-08-C wave-3-c (2026-05-24 §15): per-chart-wide-event message-
+    # channel instantiation. Each region_module MAY carry an optional
+    # `raise_events: list[str]` listing event names this region raises.
+    # The chart-top wrapper collects all chart-wide unique event names
+    # and instantiates ONE `sos_message_channel` per unique name per
+    # SOS-08-C §6.5 + §6.4. Per-region `event_<name>_send_valid`
+    # outputs are OR-aggregated and fed into the channel's
+    # `s_axis_tvalid` (INV-S-HDL-4 cooperative — at most one region
+    # pulses per cycle, so the OR is correct).
     #
-    # Wave-3-c lifts this to per-event aggregation via
-    # `sos_message_channel` instantiation (one channel per chart-wide
-    # unique event name + per-event arbitration across regions). Per
-    # INV-S-HDL-4 (cooperative-only) at most one region can be raising
-    # a given event in a given cycle in any v1 chart, so the
-    # aggregation reduces to an OR-tree even before the channel
-    # instantiation lands; wave-3-b's per-region passthrough is the
-    # minimum that exposes the egress at the wrapper boundary without
-    # making aggregation choices.
+    # Wave-3-c exposes ONLY the channel's downstream-facing handshake
+    # at the boundary: `event_<name>_recv_valid` (output) +
+    # `event_<name>_recv_ready` (input). Payload + event_id at the
+    # boundary, plus the slave-side `tready` and producer-side
+    # backpressure, land in wave-3-d / -3-e per the wave-3-a roadmap.
+    chart_event_set: list[str] = []
+    chart_event_producers: dict[str, list[str]] = {}
     for rm in region_modules:
         for ev in rm.get("raise_events", []) or []:
-            ev_ident = _safe_event_ident_top(ev)
-            boundary_ports.append(
-                HdlPort(
-                    name=f"event_{rm['name']}_{ev_ident}_send_valid",
-                    direction="out",
-                    width=1,
-                )
+            if ev not in chart_event_producers:
+                chart_event_set.append(ev)
+                chart_event_producers[ev] = []
+            chart_event_producers[ev].append(rm["name"])
+    for ev in chart_event_set:
+        ev_ident = _safe_event_ident_top(ev)
+        boundary_ports.append(
+            HdlPort(
+                name=f"event_{ev_ident}_recv_valid",
+                direction="out",
+                width=1,
             )
+        )
+        boundary_ports.append(
+            HdlPort(
+                name=f"event_{ev_ident}_recv_ready",
+                direction="in",
+                width=1,
+            )
+        )
 
     # ---- Emit per dialect. ----
     if dialect is Dialect.VHDL:
@@ -1849,11 +1861,15 @@ def _emit_chart_top_wrapper_new(
             top_name, boundary_ports, region_modules,
             cross_domain_signals, region_index, clock_order,
             _wrapper_port_name,
+            chart_event_set=chart_event_set,
+            chart_event_producers=chart_event_producers,
         )
     return _emit_chart_top_wrapper_sv_new(
         top_name, boundary_ports, region_modules,
         cross_domain_signals, region_index, clock_order,
         _wrapper_port_name,
+        chart_event_set=chart_event_set,
+        chart_event_producers=chart_event_producers,
     )
 
 
@@ -1921,6 +1937,8 @@ def _emit_chart_top_wrapper_vhdl_new(
     region_index: dict[str, dict],
     clock_order: list[str],
     wrapper_port_name,
+    chart_event_set: list[str] | None = None,
+    chart_event_producers: dict[str, list[str]] | None = None,
 ) -> str:
     """VHDL realisation of the new wave-2 wrapper shape
     (`PCDN-SOS-08-C-wave2-wrapper-shape`)."""
@@ -2002,20 +2020,97 @@ def _emit_chart_top_wrapper_vhdl_new(
         port_lines.append(
             f"current_state => current_state_{rm['name']}"
         )
-        # SOS-08-C wave-3-b: connect per-event egress outputs through
-        # to the chart-top boundary `event_<region>_<name>_send_valid`
-        # ports (mirror SV wrapper).
+        # SOS-08-C wave-3-c: connect per-event egress outputs to
+        # INTERNAL signals (wave-3-b passthrough boundary superseded).
+        # The signals feed the per-event sos_message_channel
+        # instance's s_axis_tvalid input via OR-aggregation below.
         for ev in rm.get("raise_events", []) or []:
             ev_ident = _safe_event_ident_top(ev)
             port_lines.append(
                 f"event_{ev_ident}_send_valid => "
-                f"event_{rm['name']}_{ev_ident}_send_valid"
+                f"w_ev_{rm['name']}_{ev_ident}_pulse"
             )
         for j, pl in enumerate(port_lines):
             suffix = "," if j < len(port_lines) - 1 else ""
             lines.append(f"            {pl}{suffix}")
         lines.append("        );")
+    chart_event_set = chart_event_set or []
+    chart_event_producers = chart_event_producers or {}
+    if chart_event_set:
+        lines.append("")
+        lines.append(
+            "    -- ----- SOS-08-C wave-3-c: per-event message channels -----"
+        )
+        # Per-event channel instances.
+        for idx, ev in enumerate(sorted(chart_event_set)):
+            ev_ident = _safe_event_ident_top(ev)
+            producers = chart_event_producers.get(ev, [])
+            agg_terms = " or ".join(
+                f"w_ev_{r}_{ev_ident}_pulse" for r in producers
+            ) or "'0'"
+            lines.append(
+                f"    ev_{ev_ident}_send_valid <= {agg_terms};"
+                f"  -- chart event `{ev}`"
+            )
+            first_dom = clock_order[0] if clock_order else "main"
+            if producers and producers[0] in region_index:
+                first_dom = region_index[producers[0]]["clock_domain"]
+            lines.append(
+                f"    u_chan_{ev_ident} : entity work.sos_message_channel\n"
+                f"        generic map (\n"
+                f"            EVENT_ID_WIDTH => 8,\n"
+                f"            PAYLOAD_WIDTH  => 8,\n"
+                f"            DEPTH          => 4,\n"
+                f"            READ_LATENCY   => 0,\n"
+                f"            RESET_MEM      => '1'\n"
+                f"        )\n"
+                f"        port map (\n"
+                f"            clk              => {clk_port_name(first_dom)},\n"
+                f"            rst              => {rst_port_name(first_dom)},\n"
+                f"            s_axis_tdata     => (others => '0'),\n"
+                f"            s_axis_tevent_id => std_logic_vector(to_unsigned({idx}, 8)),\n"
+                f"            s_axis_tpayload  => (others => '0'),\n"
+                f"            s_axis_tvalid    => ev_{ev_ident}_send_valid,\n"
+                f"            s_axis_tready    => open,\n"
+                f"            m_axis_tdata     => open,\n"
+                f"            m_axis_tevent_id => open,\n"
+                f"            m_axis_tpayload  => open,\n"
+                f"            m_axis_tvalid    => event_{ev_ident}_recv_valid,\n"
+                f"            m_axis_tready    => event_{ev_ident}_recv_ready,\n"
+                f"            full             => open,\n"
+                f"            empty            => open,\n"
+                f"            count            => open\n"
+                f"        );"
+            )
     lines.append("end architecture rtl;")
+    # VHDL declares the per-region pulse signals + per-event aggregated
+    # signal in the architecture's declarative region. We assemble the
+    # final string by injecting the declarations after `architecture
+    # rtl of <top_name> is`.
+    if chart_event_set:
+        decl_block: list[str] = []
+        decl_block.append(
+            "    -- ----- SOS-08-C wave-3-c: event-egress signals -----"
+        )
+        producer_wires_emitted: set[str] = set()
+        for ev in sorted(chart_event_set):
+            ev_ident = _safe_event_ident_top(ev)
+            for region_name in chart_event_producers.get(ev, []):
+                wire_name = f"w_ev_{region_name}_{ev_ident}_pulse"
+                if wire_name in producer_wires_emitted:
+                    continue
+                producer_wires_emitted.add(wire_name)
+                decl_block.append(f"    signal {wire_name} : std_logic;")
+            decl_block.append(
+                f"    signal ev_{ev_ident}_send_valid : std_logic;"
+            )
+        decl_text = "\n".join(decl_block)
+        # Locate the architecture-decl marker (the line right after the
+        # `architecture rtl of <top_name> is` line) and inject.
+        out = "\n".join(lines)
+        marker = f"architecture rtl of {top_name} is"
+        out = out.replace(marker, marker + "\n" + decl_text, 1)
+        return out
     return "\n".join(lines)
 
 
@@ -2027,9 +2122,22 @@ def _emit_chart_top_wrapper_sv_new(
     region_index: dict[str, dict],
     clock_order: list[str],
     wrapper_port_name,
+    chart_event_set: list[str] | None = None,
+    chart_event_producers: dict[str, list[str]] | None = None,
 ) -> str:
     """SystemVerilog realisation of the new wave-2 wrapper shape
-    (`PCDN-SOS-08-C-wave2-wrapper-shape`)."""
+    (`PCDN-SOS-08-C-wave2-wrapper-shape`).
+
+    SOS-08-C wave-3-c (2026-05-24 §15): when chart-wide events are
+    present, instantiates one ``sos_message_channel`` per unique
+    event name + OR-aggregates per-region ``event_<name>_send_valid``
+    pulses into the channel's slave-side ``s_axis_tvalid`` input.
+    Channel parameters default to a v1 baseline (EVENT_ID_WIDTH=8,
+    PAYLOAD_WIDTH=8, DEPTH=4, READ_LATENCY=0, RESET_MEM=1) per
+    SOS-08-B §6.5 + §5.
+    """
+    chart_event_set = chart_event_set or []
+    chart_event_producers = chart_event_producers or {}
     lines: list[str] = []
     lines.append(
         "// SOS-08-C §6.10 chart-top wrapper "
@@ -2096,19 +2204,90 @@ def _emit_chart_top_wrapper_sv_new(
         port_lines.append(
             f".current_state(current_state_{rm['name']})"
         )
-        # SOS-08-C wave-3-b: connect per-event egress outputs through
-        # to the chart-top boundary `event_<region>_<name>_send_valid`
-        # ports. Per-region FSM module emits these per wave-3-a.
+        # SOS-08-C wave-3-c: connect per-event egress outputs to
+        # INTERNAL wires (wave-3-b passthrough boundary ports
+        # superseded). The internal wires feed the per-event
+        # `sos_message_channel` instance's `s_axis_tvalid` input via
+        # OR-aggregation below.
         for ev in rm.get("raise_events", []) or []:
             ev_ident = _safe_event_ident_top(ev)
             port_lines.append(
                 f".event_{ev_ident}_send_valid"
-                f"(event_{rm['name']}_{ev_ident}_send_valid)"
+                f"(w_ev_{rm['name']}_{ev_ident}_pulse)"
             )
         for j, pl in enumerate(port_lines):
             suffix = "," if j < len(port_lines) - 1 else ""
             lines.append(f"        {pl}{suffix}")
         lines.append("    );")
+
+    # SOS-08-C wave-3-c: per-event sos_message_channel instances +
+    # producer-side OR-aggregation. One channel per chart-wide unique
+    # event name (sorted-deterministic order per INV-S-HDL-C-1).
+    if chart_event_set:
+        lines.append("")
+        lines.append(
+            "    // ----- SOS-08-C wave-3-c: per-event message channels -----"
+        )
+        # Per-region pulse wires (declared once, OR-aggregated below).
+        producer_wires_emitted: set[str] = set()
+        for ev in sorted(chart_event_set):
+            ev_ident = _safe_event_ident_top(ev)
+            for region_name in chart_event_producers.get(ev, []):
+                wire_name = f"w_ev_{region_name}_{ev_ident}_pulse"
+                if wire_name in producer_wires_emitted:
+                    continue
+                producer_wires_emitted.add(wire_name)
+                lines.append(f"    wire {wire_name};")
+        # One channel + OR-aggregated valid + hardcoded event_id per
+        # unique event. Channel params per SOS-08-B §5 v1 baseline.
+        for idx, ev in enumerate(sorted(chart_event_set)):
+            ev_ident = _safe_event_ident_top(ev)
+            producers = chart_event_producers.get(ev, [])
+            agg_terms = " | ".join(
+                f"w_ev_{r}_{ev_ident}_pulse" for r in producers
+            ) or "1'b0"
+            lines.append(
+                f"    wire ev_{ev_ident}_send_valid = {agg_terms};"
+                f"  // chart event `{ev}`"
+            )
+            # Choose clock domain: first producer's clock domain.
+            # Multi-domain producers is wave-3-d scope (the channel
+            # needs to become sos_async-flavoured); v1 assumes single
+            # clock domain across producers of a given event.
+            first_dom = clock_order[0] if clock_order else "main"
+            if producers and producers[0] in region_index:
+                first_dom = region_index[producers[0]]["clock_domain"]
+            lines.append(
+                f"    // SOS-08-C wave-3-c channel for event `{ev}` — "
+                f"event_id={idx}\n"
+                f"    // Unconnected outputs (full/empty/count, m_axis_t"
+                f"data/event_id/payload, s_axis_tready) land at\n"
+                f"    // wave-3-d (producer backpressure) + wave-3-e "
+                f"(payload routing).\n"
+                f"    sos_message_channel #(\n"
+                f"        .EVENT_ID_WIDTH(8),\n"
+                f"        .PAYLOAD_WIDTH(8),\n"
+                f"        .DEPTH(4),\n"
+                f"        .READ_LATENCY(0),\n"
+                f"        .RESET_MEM(1)\n"
+                f"    ) u_chan_{ev_ident} (\n"
+                f"        .clk({clk_port_name(first_dom)}),\n"
+                f"        .rst({rst_port_name(first_dom)}),\n"
+                f"        .s_axis_tdata('0),\n"
+                f"        .s_axis_tevent_id(8'd{idx}),\n"
+                f"        .s_axis_tpayload('0),\n"
+                f"        .s_axis_tvalid(ev_{ev_ident}_send_valid),\n"
+                f"        .s_axis_tready(),\n"
+                f"        .m_axis_tdata(),\n"
+                f"        .m_axis_tevent_id(),\n"
+                f"        .m_axis_tpayload(),\n"
+                f"        .m_axis_tvalid(event_{ev_ident}_recv_valid),\n"
+                f"        .m_axis_tready(event_{ev_ident}_recv_ready),\n"
+                f"        .full(),\n"
+                f"        .empty(),\n"
+                f"        .count()\n"
+                f"    );"
+            )
     lines.append("endmodule")
     return "\n".join(lines)
 

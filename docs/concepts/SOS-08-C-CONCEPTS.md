@@ -603,3 +603,45 @@ Wave-3-b surfaces the per-region event-egress outputs (added in wave-3-a) at the
 **Cited PCDNs**: PCDN-SOS-08-C-wave2-wrapper-shape (extended with optional `raise_events` key; legacy callers unaffected); INV-S-HDL-C-1 (deterministic emission preserved across wrapper-level boundary additions).
 
 Status: 🟢 **wave-3-b complete**. Wave-3-c lifts the per-region passthrough to per-event aggregation via `sos_message_channel` instantiation with arbitration. Wave-3-d (event ingress refactor) and wave-3-e (payload data) follow per the wave-3-a §15 entry's roadmap.
+
+### 2026-05-24 — Impl wave-3-c: sos_message_channel instantiation + per-event aggregation (Ira)
+
+Wave-3-c instantiates one `sos_message_channel` per chart-wide unique event name at the chart-top wrapper. Per-region `event_<name>_send_valid` outputs (wave-3-a) become internal wires that OR-aggregate into the channel's slave-side `s_axis_tvalid` input. The wave-3-b per-region boundary ports (`event_<region>_<name>_send_valid`) are **superseded** by the wave-3-c channel-mediated pair (`event_<name>_recv_valid` output + `event_<name>_recv_ready` input).
+
+**Wave-3-c implementation surface (hdl_common.py)**:
+
+- **`emit_chart_top_wrapper` boundary**: collects chart-wide unique event names from each region_module's `raise_events`; emits one `event_<name>_recv_valid` output + one `event_<name>_recv_ready` input per unique event. Wave-3-b's per-region boundary ports removed.
+- **`chart_event_set` + `chart_event_producers`** parameters threaded into the dialect-specific emitters.
+- **SV body**: per-region instance wires `event_<name>_send_valid` to `w_ev_<region>_<name>_pulse` internal wire; per-event aggregated wire `ev_<name>_send_valid = OR of producer pulses`; one `sos_message_channel #(EVENT_ID_WIDTH=8, PAYLOAD_WIDTH=8, DEPTH=4, READ_LATENCY=0, RESET_MEM=1) u_chan_<name>` per unique event with hardcoded 8-bit `s_axis_tevent_id`. Unconnected channel ports bound to empty `()` (SV syntax).
+- **VHDL body**: symmetric — per-region pulse signals + per-event aggregated signal declared in the architecture declarative region; `entity work.sos_message_channel` instances with `open` on unused ports. Decl block spliced via post-pass into the `architecture rtl of <top_name> is` line.
+- **Channel clock domain**: takes the FIRST producer's clock domain. Multi-clock-domain producers of the same event is wave-3-d scope (switch to `sos_message_channel_async`).
+
+**Wave-3-c scope vs wave-3-d/-3-e**:
+
+- ✅ One channel per chart-wide unique event name; OR-tree aggregation across producers.
+- ✅ Boundary contract: `event_<name>_recv_valid` (out) + `event_<name>_recv_ready` (in).
+- ✅ Symmetric VHDL + SV emit (INV-S-HDL-C-1).
+- ⏸ **wave-3-d**: producer backpressure (`s_axis_tready` boundary); multi-clock-domain channel variant (`sos_message_channel_async`); event ingress refactor (per-event receive-face ports per §6.4).
+- ⏸ **wave-3-e**: payload data on `_tpayload` ports + chart `<param>` / `<content>` extension.
+
+**Breaking change from wave-3-b**:
+
+The wave-3-b per-region boundary ports `event_<region>_<name>_send_valid` are GONE — replaced by per-chart-wide-event `event_<name>_recv_valid` + `event_<name>_recv_ready`. This is the planned wave-3-c lift per the wave-3-b §15 entry's documented boundary; downstream consumers bound to wave-3-b's per-region outputs need to switch to the channel's downstream handshake.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-C-1** (deterministic emission): channel instances + aggregation wires emit in `sorted(chart_event_set)` order.
+- **INV-S-HDL-C-3** (cross-domain event consumption uses `sos_message_channel`): NOW OPERATIONAL at the chart-top wrapper.
+- **INV-S-HDL-4** (cooperative-only): OR-tree aggregation correct under cooperative scheduling (at most one region pulses per cycle).
+- **INV-S-HDL-B-1/-2/-3/-4/-5**: channel instantiated as a black-box L1 service per INV-S-HDL-B-2.
+- **INV-SOS-H** (chart-vocabulary traceability): chart-side event names preserved verbatim in per-event aggregated-wire trailing comments + per-region FSM port trailing comments.
+
+**Test count**: net +3 (6 new − 3 wave-3-b tests replaced):
+
+`TestWave3cChartTopChannels` (6 tests): exposes `event_<name>_recv_valid` + `event_<name>_recv_ready` per unique event; instantiates `sos_message_channel` per unique event; per-region pulse wires + OR-aggregation present; wave-3-b per-region ports MUST NOT appear (regression guard); chart without `<raise>` omits all event ports + channels (regression guard); multi-producer event produces ONE channel with OR-aggregated `s_axis_tvalid`.
+
+**Test suite**: 387/387 passing (384 prior + 3 net wave-3-c).
+
+**Cited PCDNs**: SOS-08-B §6.5 (channel contract); SOS-08-B §5 (v1 baseline channel parameters); INV-S-HDL-C-3 (now operational); INV-S-HDL-4 (OR-tree justification).
+
+Status: 🟢 **wave-3-c complete**. Wave-3-d adds producer backpressure + multi-clock-domain channel variant + event ingress refactor. Wave-3-e adds payload data routing.

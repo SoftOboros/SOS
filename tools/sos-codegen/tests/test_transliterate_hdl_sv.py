@@ -806,12 +806,16 @@ class TestWave3Events:
         assert "send_valid" not in src
 
 
-class TestWave3bChartTopEgressPassthrough:
-    """SOS-08-C wave-3-b: chart-top wrapper surfaces per-region event
-    egress as `event_<region>_<name>_send_valid` boundary outputs.
+class TestWave3cChartTopChannels:
+    """SOS-08-C wave-3-c (2026-05-24 §15): chart-top wrapper
+    instantiates one `sos_message_channel` per chart-wide unique
+    event name. Per-region egress pulses become internal wires that
+    OR-aggregate into the channel's `s_axis_tvalid` input.
 
-    Wave-3-c will lift this to per-event aggregation across regions
-    via `sos_message_channel` instantiation.
+    Wave-3-b's per-region `event_<region>_<name>_send_valid`
+    boundary ports are SUPERSEDED by wave-3-c's channel-mediated
+    `event_<name>_recv_valid` + `event_<name>_recv_ready` pair (one
+    per chart-wide unique event name).
     """
 
     def _parallel_with_raise(self):
@@ -840,29 +844,44 @@ class TestWave3bChartTopEgressPassthrough:
         files = transliterate_hdl_sv.render_target(
             self._parallel_with_raise(), {"chart_name": "k"}
         )
-        # The chart-top wrapper file (parallel chart → N region files +
-        # one top wrapper). Find by name suffix.
         candidates = [k for k in files if k.endswith("_top.sv") or k == "k_top.sv"]
         assert candidates, f"chart-top wrapper file not in {sorted(files)}"
         return files[candidates[0]]
 
-    def test_chart_top_exposes_per_region_event_outputs(self):
+    def test_chart_top_exposes_recv_valid_per_unique_event(self):
         top = self._top()
-        # Per-region prefix so multi-region raises of the same event
-        # don't collide at the boundary.
-        assert "event_left_ack_send_valid" in top
-        assert "event_right_done_send_valid" in top
+        assert "event_ack_recv_valid" in top
+        assert "event_done_recv_valid" in top
+        # Wave-3-b per-region passthrough port names MUST NOT appear at
+        # the wave-3-c boundary (replaced by channel-mediated form).
+        assert "event_left_ack_send_valid" not in top
+        assert "event_right_done_send_valid" not in top
 
-    def test_chart_top_wires_region_instance_to_boundary(self):
+    def test_chart_top_exposes_recv_ready_per_unique_event(self):
         top = self._top()
-        # Inside the wrapper body, each region instance's
-        # event_<name>_send_valid port wires to the prefixed boundary.
-        assert ".event_ack_send_valid(event_left_ack_send_valid)" in top
-        assert ".event_done_send_valid(event_right_done_send_valid)" in top
+        assert "input wire event_ack_recv_ready" in top
+        assert "input wire event_done_recv_ready" in top
 
-    def test_chart_top_omits_event_ports_when_no_raise(self):
-        """Parallel chart without <raise>: chart-top wrapper has no
-        event_*_send_valid boundary ports."""
+    def test_chart_top_instantiates_message_channel_per_event(self):
+        top = self._top()
+        assert "u_chan_ack" in top
+        assert "u_chan_done" in top
+        assert "sos_message_channel #(" in top
+
+    def test_chart_top_aggregates_per_region_pulses(self):
+        top = self._top()
+        # Per-region pulse internal wires.
+        assert "w_ev_left_ack_pulse" in top
+        assert "w_ev_right_done_pulse" in top
+        # Region instances wire to the internal pulse, not the
+        # superseded per-region boundary port.
+        assert ".event_ack_send_valid(w_ev_left_ack_pulse)" in top
+        assert ".event_done_send_valid(w_ev_right_done_pulse)" in top
+        # Channel's s_axis_tvalid driven by the aggregated wire.
+        assert ".s_axis_tvalid(ev_ack_send_valid)" in top
+        assert ".s_axis_tvalid(ev_done_send_valid)" in top
+
+    def test_chart_top_omits_channels_when_no_raise(self):
         chart = {
             "initial": "p",
             "parallel": [{
@@ -884,3 +903,38 @@ class TestWave3bChartTopEgressPassthrough:
         )
         top = files.get("x_top.sv", "")
         assert "event_" not in top
+        assert "sos_message_channel" not in top
+
+    def test_multi_producer_event_or_aggregates(self):
+        """Two regions raising the SAME event → ONE channel instance,
+        s_axis_tvalid is the OR of both producers' pulses."""
+        chart = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[
+                            {"target": "L2", "raise_value": [{"event": "shared"}]},
+                        ]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1", "state": [
+                        _state("R1", transitions=[
+                            {"target": "R2", "raise_value": [{"event": "shared"}]},
+                        ]),
+                        _state("R2"),
+                    ]},
+                ],
+            }],
+        }
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "m"}
+        )
+        top = files["m_top.sv"]
+        # ONE channel instance (chart-wide unique event count = 1).
+        assert top.count("u_chan_shared (") == 1
+        # OR-aggregation of both producers' pulse signals.
+        assert ("wire ev_shared_send_valid = "
+                "w_ev_left_shared_pulse | w_ev_right_shared_pulse"
+                in top)
