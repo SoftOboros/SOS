@@ -432,6 +432,12 @@ class TestInvariants:
             "uvm_object_utils", "uvm_object_utils_begin",
             "uvm_object_utils_end", "uvm_field_enum", "uvm_field_int",
             "uvm_field_string",
+            # SOS-08-F wave-2 (2026-05-24 §15) — JSONL vector-IR
+            # parser uses `uvm_warning to surface chart-vocabulary
+            # parse failures (INV-S-HDL-B-5 / INV-S-HDL-F-3
+            # failure-message rendering). Standard UVM 1.2 reporting
+            # macro; unchanged in UVM 2.0.
+            "uvm_warning",
         }
         import re as _re
         tokens = set(_re.findall(r"\buvm_\w+", pkg))
@@ -533,3 +539,97 @@ class TestParallelChartAccepted:
         files = uvm_seq.render_target(parallel, {"chart_name": "p"})
         # Audit passes, files emitted — same shape as single-region.
         assert len(files) == 3
+
+
+class TestWave2JsonlParser:
+    """SOS-08-F wave-2 (2026-05-24 §15): JSONL vector-IR parser
+    replaces the wave-1 `load_vector_ir` stub. Strict row schema:
+
+      {"event_id":<int>,"payload_data":<int>,"chart_state":"<str>",
+       "transition_id":<int>,"invariant_id":<int>}
+
+    Package-level `sos_parse_chart_event_jsonl` function +
+    `sos_load_chart_event_jsonl` task implement the parser; each
+    per-family sequence's `load_vector_ir` invokes the shared task.
+    """
+
+    def _pkg(self) -> str:
+        return uvm_seq.render_target(_simple_chart(), {"chart_name": "demo"})[
+            "uvm/demo/sos_uvm_seq_pkg.sv"
+        ]
+
+    def test_parser_function_emitted(self):
+        pkg = self._pkg()
+        # Package-level parser function with strict schema.
+        assert "function automatic int sos_parse_chart_event_jsonl(" in pkg
+        # Shared task that reads the file and calls the parser per
+        # line.
+        assert "task automatic sos_load_chart_event_jsonl(" in pkg
+
+    def test_parser_uses_strict_sscanf_format(self):
+        """The parser MUST consume only the canonical wave-2 JSONL
+        row format. Whitespace inside the JSON object is rejected
+        by virtue of $sscanf's strict literal matching."""
+        pkg = self._pkg()
+        # The format string (with $sscanf escapes) MUST match the
+        # canonical schema. Verify each escaped field name appears.
+        assert "\\\"event_id\\\":%d" in pkg
+        assert "\\\"payload_data\\\":%d" in pkg
+        assert "\\\"chart_state\\\":\\\"%[^\\\"]" in pkg
+        assert "\\\"transition_id\\\":%d" in pkg
+        assert "\\\"invariant_id\\\":%d" in pkg
+
+    def test_parser_returns_zero_on_malformed(self):
+        """The parser function returns 1 on success, 0 on parse
+        error — the caller skips malformed lines."""
+        pkg = self._pkg()
+        # The `if (rc != 5) return 0;` branch is the malformed-line
+        # check (5 fields expected).
+        assert "if (rc != 5) begin" in pkg
+
+    def test_loader_emits_uvm_warning_on_cannot_open(self):
+        pkg = self._pkg()
+        assert "`uvm_warning(\"SOS-08-F\"" in pkg
+        assert "cannot open" in pkg
+
+    def test_loader_emits_uvm_warning_on_malformed_line(self):
+        pkg = self._pkg()
+        assert "skipping malformed line" in pkg
+
+    def test_loader_strips_trailing_newline(self):
+        """$fgets retains the trailing newline; the loader strips
+        it before parsing so the closing `}` is followed by end-of-
+        string (not `\\n`)."""
+        pkg = self._pkg()
+        assert "if (line.getc(line.len() - 1) == \"\\n\")" in pkg
+
+    @pytest.mark.parametrize(
+        "family",
+        ("task", "sem", "queue", "timer", "event", "tick"),
+    )
+    def test_per_family_load_vector_ir_calls_shared_task(self, family):
+        """Each per-family sequence's `load_vector_ir` MUST call the
+        shared `sos_load_chart_event_jsonl` task. Customer override
+        at the sequence subclass level still works (standard UVM
+        virtual-task override mechanics)."""
+        pkg = self._pkg()
+        idx = pkg.find(f"class sos_{family}_sequence")
+        end = pkg.find(f"endclass : sos_{family}_sequence", idx)
+        block = pkg[idx:end]
+        assert "sos_load_chart_event_jsonl(path, events)" in block, (
+            f"sos_{family}_sequence: load_vector_ir MUST call the "
+            f"shared parser task"
+        )
+        # Wave-1 stub language MUST be gone — load_vector_ir must
+        # NOT empty `events` and return without parsing.
+        assert "Wave-1 stub" not in block
+
+    def test_parser_emitted_before_per_family_sequences(self):
+        """The shared parser is package-level scope; per-family
+        sequences declared later in the same package can invoke it
+        directly (SV elaboration-order). Verify the parser source
+        precedes the first per-family class declaration."""
+        pkg = self._pkg()
+        parser_idx = pkg.find("function automatic int sos_parse_chart_event_jsonl(")
+        first_class_idx = pkg.find("class sos_task_sequence ")
+        assert 0 <= parser_idx < first_class_idx

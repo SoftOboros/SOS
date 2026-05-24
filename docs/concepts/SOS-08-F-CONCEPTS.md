@@ -523,3 +523,63 @@ Wave-1 implementation surface landed under the 2026-05-23 ratification of §15 a
 **Cited PCDNs** (all resolved 2026-05-23 §15 ratification entry above, implementation now in place): PCDN-SOS-08-F-001 (UVM 1.2 + forward-compat to 2.0 — walker uses 1.2 grammar verified by token-allowlist), PCDN-SOS-08-F-002 (six chart event families — frozen in `CHART_EVENT_FAMILIES` tuple), PCDN-SOS-08-F-003 (universal `sos_seq_item` — discriminated-union with `family` tag), PCDN-SOS-08-F-004 (in-package factory registration — `\`uvm_object_utils*` macros emit per class), PCDN-SOS-08-F-005 (empty virtual `pre_body`/`post_body` hooks — emitted as no-ops), PCDN-SOS-08-F-006 (one consolidated package — single `.sv` file containing the whole library).
 
 **Status**: 🟢 **ratified (continuing)** — wave-1 scaffold lands the sequence-library emission path; full vector-IR parser, end-to-end UVM 1.2 worked example, cross-runtime UVM 2.0 smoke test, and pyuvm overlay are wave-2 work.
+
+### 2026-05-24 — Impl wave-2: JSONL vector-IR parser (Ira)
+
+Lands the first of the wave-2 candidates: the full SOS-03 JSONL vector-IR parser, replacing the wave-1 `load_vector_ir` stub. With this commit, each per-family sequence's `body()` actually iterates the chart's bounded-reachability output and emits transactions, end-to-end.
+
+**Canonical JSONL row schema** (this entry is the load-bearing definition):
+
+```
+{"event_id":<int>,"payload_data":<int>,"chart_state":"<str>","transition_id":<int>,"invariant_id":<int>}
+```
+
+- One chart event per line. Lines that don't match are skipped with a UVM warning citing the offending line number + text.
+- Fixed key order (matches `sos_chart_event_s` struct member order); no whitespace inside the JSON object (other than within the quoted `chart_state` value).
+- `event_id`, `payload_data`, `transition_id`, `invariant_id` are bare decimal integers. `payload_data` widens to 64 bits via `longint unsigned` intermediary.
+- `chart_state` is double-quoted; the parser uses `$sscanf`'s `%[^"]` set specifier to capture the bareword cleanly.
+- Empty / blank lines are skipped silently (whitespace-tolerant per author convenience).
+- Trailing `\n` from `$fgets` is stripped before parsing.
+
+**Wave-2 implementation surface**:
+
+- **`_emit_jsonl_parser()` (new emitter)**: emits a package-level `function automatic int sos_parse_chart_event_jsonl(input string line, output sos_chart_event_s evt)` (returns 1 on success / 0 on parse error) plus a `task automatic sos_load_chart_event_jsonl(input string path, ref sos_chart_event_s events[$])` that opens the file with `$fopen`, loops `$fgets`, and appends each parsed row to the queue.
+- **`_emit_per_family_sequence` update**: `load_vector_ir` virtual task body now invokes `sos_load_chart_event_jsonl(path, events)` (replaces the wave-1 stub `events.delete()`). Customer override mechanics unchanged — standard UVM virtual-task override at the sequence subclass level lets a customer plug in a non-JSONL source.
+- **Package layout**: the parser function + loader task sit at package scope, declared after `_emit_baseline_seq_item` (which defines `sos_chart_event_s`) and before the per-family sequence classes. SV elaboration order resolves cleanly because the parser is referenced only inside per-family `load_vector_ir` task bodies.
+- **`uvm_warning` macro** added to the INV-S-HDL-F-5 allowed-UVM-token list. Standard UVM 1.2 reporting macro; unchanged in UVM 2.0 (IEEE 1800.2-2017). Used for chart-vocabulary failure rendering (INV-S-HDL-B-5 / INV-S-HDL-F-3) at both `cannot open '<path>'` and `skipping malformed line N: <text>` failure modes.
+
+**SV-side parser design choices** (informative):
+
+- **`$sscanf` over hand-rolled string scanning**: SV's `$sscanf` with `%[^"]` set specifier reliably extracts the quoted `chart_state` value. The alternative (manual substring search for each `"<key>":` marker, extract value until `,` or `}`) was rejected as more code with no robustness gain — `$sscanf`'s literal-character matching in the format string already enforces strict schema compliance.
+- **Decimal over hex for `payload_data`**: cross-toolchain portability (Verilator + VCS + Questa all accept decimal `%d` with widened target type). Hex `%h` is reserved for a future amendment if 64-bit payloads need a more compact line representation.
+- **Loader is a `task` not a `function`**: file I/O (`$fopen`/`$fgets`/`$fclose`) needs task context, not function context, in SV.
+
+**Wave-2 scope explicitly excludes** (carry-forward to a future wave):
+
+- **Schema discovery / generation**: the chart compiler must emit JSONL in this exact format. No tooling in this commit emits the JSONL itself — SOS-08-D / SOS-08-E will likely be the canonical source when their wave-3 vector-emission lands.
+- **Per-family JSONL splits**: the loader reads whatever path the customer assigns to `vector_path`. The convention `vectors/<family>_chart_bound.jsonl` (per §6.4 §6.5) is customer-side scaffolding — the loader treats every row as one event regardless of family. The per-family `body()` task sets `tx.family = SOS_FAMILY_<UPPER>` from the per-family class context, so the file split is the customer's responsibility.
+- **Whitespace tolerance inside the JSON object**: rejected to keep the parser simple. Vector authors / chart compilers MUST emit minified JSON per line. Loosening this is a future amendment.
+- **`uvm_error` on full-file parse failure**: at v1, a file that fails to open emits a `uvm_warning` and `events` stays empty (the sequence's `body()` then issues zero transactions). Promoting to `uvm_error` is a customer policy decision (override `load_vector_ir` to fatal-on-empty if desired).
+
+**Invariants upheld**:
+
+- **INV-S-HDL-F-1** (sequences only): the new parser is a package-level function + task, not a sequence subclass — no `uvm_env` / `uvm_agent` / `uvm_driver` / etc. emission. The walker's `_audit_all` continues to pass.
+- **INV-S-HDL-F-3** (chart-vocabulary traceability): the parser populates `sos_chart_event_s.chart_state` / `transition_id` / `invariant_id` directly from the JSONL row, preserving the chart-vocabulary fields verbatim into the UVM sequence.
+- **INV-S-HDL-F-4** (no SVA emission): the parser uses neither `assert property` nor `bind`. Pure procedural SV.
+- **INV-S-HDL-F-5** (UVM 1.2 grammar only): `uvm_warning` added to the allowed list — standard 1.2 reporting macro, unchanged in 2.0.
+- **PCDN-009 (vector-IR canonical format)**: the row schema is the operational form of the JSONL-for-traces resolution. Any other consumer (SOS-08-D, SOS-08-E) MUST produce / consume the same schema; cross-consumer schema drift would split the chart-vocabulary failure-rendering story.
+
+**Test count**: net +13 — `TestWave2JsonlParser` (13 tests): parser function emitted; loader task emitted; strict `$sscanf` format string contains each escaped field name; malformed-line return-zero branch present; `uvm_warning` on cannot-open; `uvm_warning` on malformed line; trailing-newline strip; per-family `load_vector_ir` invokes the shared task (parameterised over the six families = 6 tests); wave-1 stub language gone; parser declared before first per-family class (elaboration order).
+
+**Test suite**: 414/414 passing (401 baseline + 13 net wave-2). One pre-existing test updated: `TestInvariants.test_inv_f5_uvm_1_2_grammar_only` allowlist gains `uvm_warning` per the §15 amendment rule the test itself names.
+
+**Wave-2 remaining work** (carry-forward to future commits):
+
+- **Acceptance gate (e)** — end-to-end UVM 1.2 worked example. The customer-side scaffolding (sequencer, agent, driver, scoreboard, test) running a SOS-emitted sequence against a synthetic DUT. With the JSONL parser landed, this is now a packaging + harness-config task, not a walker change.
+- **Acceptance gate (f)** — injected-violation chart-vocabulary check against the (e) worked example.
+- **UVM 2.0 cross-runtime smoke test** (CI job).
+- **pyuvm overlay** (SOS-08-F-A sub-phase, gated on customer demand).
+
+**Cited PCDNs**: PCDN-SOS-08-008/009 (vector-IR canonical format — JSONL operational); SOS-08-F §6.4 (vector-IR row shape — schema now load-bearing); INV-S-HDL-F-5 (UVM 1.2 grammar discipline + `uvm_warning` addition rule).
+
+Status: 🟢 **wave-2 partial** — JSONL parser landed. Remaining wave-2 candidates (gates (e)/(f) worked example, UVM 2.0 cross-runtime, pyuvm overlay) carry forward but the load-bearing per-family `body()`-to-vector-IR connection is now operational.

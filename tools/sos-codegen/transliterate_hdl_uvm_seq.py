@@ -278,16 +278,138 @@ def _emit_per_family_sequence(family: str) -> str:
     virtual task post_body();
     endtask
 
-    // Wave-1 stub — wave-2 ships the full SOS-03 JSONL vector-IR
-    // parser. Customer MAY override load_vector_ir to drive sequences
-    // from a non-JSONL source (in-memory test-author-provided event
-    // list, alternative chart export, regression harness feed) while
-    // the wave-2 parser lands.
+    // Wave-2 (2026-05-24 §15) — JSONL vector-IR parser landed.
+    // Calls the package-level shared sos_load_chart_event_jsonl task
+    // which implements the strict JSONL row schema defined in
+    // SOS-08-F §6.4. Customer MAY override this task at the sequence
+    // subclass level to drive sequences from a non-JSONL source
+    // (in-memory test-author-provided event list, alternative chart
+    // export, regression harness feed) — per §6.5 customer-
+    // integration contract.
     virtual task load_vector_ir(string path, ref sos_chart_event_s events[$]);
       events.delete();
+      sos_load_chart_event_jsonl(path, events);
     endtask
 
   endclass : {cls}
+"""
+
+
+def _emit_jsonl_parser() -> str:
+    """Emit the package-level ``sos_parse_chart_event_jsonl`` function +
+    ``sos_load_chart_event_jsonl`` task per SOS-08-F §6.4 wave-2.
+
+    Implements the load-bearing JSONL vector-IR parser. Each line of the
+    vector-IR file is one chart event; the parser populates a queue of
+    ``sos_chart_event_s`` rows that the per-family sequence's ``body()``
+    iterates. Strict row schema per the wave-2 §15 amendment:
+
+        {"event_id":<int>,"payload_data":<int>,"chart_state":"<str>",
+         "transition_id":<int>,"invariant_id":<int>}
+
+    No whitespace inside the object (other than within the quoted
+    chart_state string). Lines that don't match the schema are skipped
+    with a UVM warning citing the offending line — chart-vocabulary
+    failure rendering per INV-S-HDL-B-5 / INV-S-HDL-F-3.
+
+    SV-side parsing uses ``$sscanf`` with the ``%[^"]`` set specifier
+    to extract the quoted ``chart_state`` value cleanly. Numeric fields
+    use ``%d`` (decimal). For 64-bit payload values, callers MAY emit
+    them as hex in the chart compiler and use ``%h`` — at v1 we
+    standardise on decimal for cross-toolchain portability (Verilator
+    + VCS + Questa all accept decimal width-aware ``%d``).
+    """
+    return r"""  // -------------------------------------------------------------------------
+  // sos_parse_chart_event_jsonl + sos_load_chart_event_jsonl —
+  // SOS-08-F §6.4 wave-2 vector-IR JSONL parser
+  // -------------------------------------------------------------------------
+  //
+  // Per the SOS-08-F §15 2026-05-24 wave-2 amendment, the chart's
+  // bounded-reachability output is canonical JSONL per SOS-08
+  // PCDN-009. Each line is one chart event; the row schema is:
+  //
+  //   {"event_id":<int>,"payload_data":<int>,"chart_state":"<str>",
+  //    "transition_id":<int>,"invariant_id":<int>}
+  //
+  // No whitespace inside the JSON object. The chart_state value is
+  // quoted; other values are bare decimal integers. Lines that don't
+  // match are skipped with a UVM warning citing the offending text.
+  //
+  // The parser is package-level (NOT a sequence-class method) so any
+  // per-family sequence's load_vector_ir() can invoke it without
+  // duplicating the format-string contract.
+
+  // Parse one JSONL line into an sos_chart_event_s. Returns 1 on
+  // success, 0 on parse error (caller should skip the line).
+  function automatic int sos_parse_chart_event_jsonl(
+      input  string line,
+      output sos_chart_event_s evt
+  );
+    int rc;
+    int unsigned ev_id;
+    longint unsigned payload;
+    int unsigned tr_id;
+    int unsigned inv_id;
+    string chart_state_buf;
+    rc = $sscanf(line,
+      "{\"event_id\":%d,\"payload_data\":%d,\"chart_state\":\"%[^\"]\",\"transition_id\":%d,\"invariant_id\":%d}",
+      ev_id, payload, chart_state_buf, tr_id, inv_id);
+    if (rc != 5) begin
+      return 0;
+    end
+    evt.event_id      = ev_id;
+    evt.payload_data  = payload;
+    evt.chart_state   = chart_state_buf;
+    evt.transition_id = tr_id;
+    evt.invariant_id  = inv_id;
+    return 1;
+  endfunction
+
+  // Read a chart-vocabulary JSONL file from `path`, append each parsed
+  // row to `events`. Empty / blank lines are skipped silently;
+  // malformed lines emit a UVM warning and are skipped.
+  //
+  // The shared task is invoked by each per-family sequence's
+  // `load_vector_ir` override. Customer-authored vector sources MAY
+  // bypass the JSONL parser entirely by overriding `load_vector_ir`
+  // at the sequence subclass level (per §6.5 customer-integration
+  // contract).
+  task automatic sos_load_chart_event_jsonl(
+      input  string path,
+      ref    sos_chart_event_s events[$]
+  );
+    int fh;
+    string line;
+    sos_chart_event_s evt;
+    int parsed;
+    int line_no;
+    line_no = 0;
+    fh = $fopen(path, "r");
+    if (fh == 0) begin
+      `uvm_warning("SOS-08-F",
+        $sformatf("sos_load_chart_event_jsonl: cannot open '%s'", path))
+      return;
+    end
+    while (!$feof(fh)) begin
+      void'($fgets(line, fh));
+      line_no++;
+      // Skip empty / whitespace-only lines.
+      if (line.len() < 2) continue;
+      // Strip trailing newline if present ($fgets retains it).
+      if (line.getc(line.len() - 1) == "\n")
+        line = line.substr(0, line.len() - 2);
+      if (line.len() == 0) continue;
+      parsed = sos_parse_chart_event_jsonl(line, evt);
+      if (parsed) begin
+        events.push_back(evt);
+      end else begin
+        `uvm_warning("SOS-08-F",
+          $sformatf("sos_load_chart_event_jsonl: skipping malformed line %0d: %s",
+            line_no, line))
+      end
+    end
+    $fclose(fh);
+  endtask
 """
 
 
@@ -387,6 +509,7 @@ package sos_uvm_seq_pkg;
   `include "uvm_macros.svh"
 
 {_emit_baseline_seq_item()}
+{_emit_jsonl_parser()}
 {families}
 endpackage : sos_uvm_seq_pkg
 """
