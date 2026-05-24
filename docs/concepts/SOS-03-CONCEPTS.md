@@ -861,3 +861,57 @@ SOS-08-D's wave-1 cocotb + SVA walkers consume a per-step record that the SOS-03
 **Consuming use case**: [SOS-08-D §15 — Impl wave-1 PCDN amendments (Ira)](./SOS-08-D-CONCEPTS.md#15-change-log) ratifies PCDN-SOS-08-D-wave1-step-schema as the consumer of this extension. The wave-1 cocotb walker tolerates this shape directly; the SVA walker references `transition_id` for per-transition `INV-D-N` assertion mapping.
 
 Status: 🟢 ratified (continuing) — SOS-03 extension is additive. No frozen-enum value modified. No prior PCDN re-ratified. Existing fixtures (`conformance/vectors/smoke/0001-...0006-...`) remain valid; they predate and do not carry `steps`.
+
+### 2026-05-24 — Vector `steps[]` schema extension: per-region step assertions (co-landing with SOS-08-D wave-3)
+
+The 2026-05-23 `steps[]` extension above named `expected_state` (singular) for single-region charts. SOS-08-D wave-3 lands per-region step-driven vectors for parallel charts; the cocotb walker iterates `vector["steps"]` and asserts EACH region's expected state independently per step. This amendment extends the per-step record schema with two new optional keys:
+
+**New optional keys** (additive — single-region vectors continue to use `expected_state` unchanged):
+
+- `vector["steps"][i].expected_states: dict[<region_name>, <state_id>]` (optional) — per-region targeted assertion map. Each `(region, state)` entry produces one `assert_region_state(dut, region, state, ...)` call in the emitted cocotb test. Regions NOT named in the dict are NOT asserted on that step (vector author opts which regions to check per event — `expected_states` is sparse by design, NOT a complete state snapshot).
+- `vector["steps"][i].cycles_advance: int` (optional, default `1`) — number of clock cycles to advance before the step's assertions. Vector authors MAY request multi-cycle advance for vectors that exercise the period between events (e.g. waiting for a `sos_message_channel_async` CDC to settle, watching a `sos_periodic_task` rate-divider span).
+- `vector["expected_terminal_states"]: dict[<region_name>, <state_id>]` (optional, top-level) — per-region terminal assertion map, mirror of `expected_terminal_state` (singular) for parallel charts. The cocotb walker iterates each region's entry and asserts the named terminal state at end-of-vector. Regions absent from the dict fall back to their declared initial state per the chart's `<parallel>/<state initial="...">`.
+
+**Compatibility rules**:
+
+- Single-region vectors continue to use `expected_state` + `expected_terminal_state` (singular). The wave-1 cocotb walker emission path is unchanged.
+- Parallel-chart vectors MAY use either `expected_states` (plural map) OR `expected_state` (singular — only meaningful when the chart has exactly one region; rejected at lint when parallel). At v1 wave-3, parallel-chart cocotb walker reads only `expected_states`; `expected_state` is silently ignored for parallel charts.
+- Mixing `expected_state` (singular) and `expected_states` (plural) on the same step is allowed; the parallel walker reads only the plural form, the single-region walker reads only the singular form. The lint policy at SOS-03 file-load may reject the mix in a future amendment if confusion emerges in practice.
+- `cycles_advance` defaults to `1` — backwards-identical to wave-2c emission (one rising-edge per step). Vectors with `cycles_advance: 0` are valid but emit a zero-cycle wait (effectively a no-op clock advance — the step's assertions evaluate on the same cycle as the previous step's last edge).
+
+**Example** (parallel-chart vector exercising left-region tick before right-region settles):
+
+```json
+{
+  "name": "parallel-tick-cdc-settle",
+  "category": "Smoke",
+  "origin": "Authored",
+  "tags": ["parallel", "cdc", "tick"],
+  "config": { ... },
+  "steps": [
+    {
+      "index": 0,
+      "inputs": { "evt_tick_in": 1 },
+      "cycles_advance": 1,
+      "expected_states": { "left": "L_TICKED" },
+      "transition_id": 5
+    },
+    {
+      "index": 1,
+      "inputs": { "evt_tick_in": 0 },
+      "cycles_advance": 4,
+      "expected_states": { "right": "R_OBSERVED_TICK" },
+      "transition_id": 9
+    }
+  ],
+  "expected_terminal_states": { "left": "L_TICKED", "right": "R_OBSERVED_TICK" }
+}
+```
+
+The first step pulses `evt_tick_in`, asserts `left` entered `L_TICKED` on the next cycle; the second step deasserts `evt_tick_in`, waits 4 cycles (for the CDC channel to settle), asserts `right` observed the tick. The vector demonstrates per-region targeted assertion — neither step asserts BOTH regions, because at each step only one region's behaviour is the load-bearing claim under test.
+
+**Compatibility with the 2026-05-23 extension**: the new keys layer onto the prior `{index, inputs, expected_state, transition_id}` record non-breakingly. The cocotb walker reads `expected_state` for single-region charts and `expected_states` for parallel charts; the two paths share `inputs`, `transition_id`, and (new) `cycles_advance`. The SVA walker references `transition_id` unchanged for per-transition `INV-D-N` mapping.
+
+**Consuming use case**: [SOS-08-D §15 — Impl wave-3 (Ira)](./SOS-08-D-CONCEPTS.md#15-change-log) ratifies the wave-3 cocotb walker as the consumer of this extension.
+
+Status: 🟢 ratified — additive extension; no frozen-enum value modified; prior amendments unchanged. Existing single-region vectors using `expected_state` (singular) remain valid; new parallel-chart vectors targeting wave-3 use `expected_states` (plural map).

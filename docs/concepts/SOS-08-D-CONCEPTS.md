@@ -614,3 +614,51 @@ Wave-2c closes the cocotb half of the parallel-chart deliverable. The wave-1 par
 - Cross-region transition driving via shared datamodel signals (SOS-08-C cross-region tracking pass).
 
 Status: 🟢 ratified (continuing) — SOS-08-D wave-2 parallel-chart support is now complete on both the SVA bind side (wave-2b) and the cocotb side (wave-2c). Wave-3 lifts the remaining scope to per-region step-driven vectors + multi-clock-domain bind wiring + cross-region invariant SVA properties.
+
+### 2026-05-24 — Impl wave-3: per-region step-driven vectors (Ira)
+
+Wave-2c's parallel-chart cocotb emission stopped at reset + per-region initial-state assertion. Wave-3 lands the load-bearing extension: the parallel-chart test body now walks `vector["steps"]` with per-region targeted `expected_states` assertions, driven by the SOS-03 §15 2026-05-24 schema extension co-landing with this commit.
+
+**Wave-3 implementation surface**:
+
+- **`_emit_parallel_test_function` extension**: the wave-2c reset + initial-state-per-region block is unchanged. Wave-3 adds, after that block:
+  - A `for step_index, step in enumerate(vector.get("steps", []) or [])` loop iterating per-step records.
+  - Per-step `inputs` driver: flat `{port: value}` map, identical convention to the single-region wave-1 emission.
+  - Per-step `cycles_advance` (default 1): the test awaits `RisingEdge(dut.clk)` that many times before the step's assertions.
+  - Per-step `expected_states: {region: state}`: for each `(region, state)` entry, emit `assert_region_state(dut, region, state, format_failure(vector, step))` plus a SOS-08-G annotation via `writer.record_transition(... region=region_name, vector_index=step_index, ...)`.
+  - End-of-vector per-region terminal assertion loop: reads `vector["expected_terminal_states"]` (dict) with per-region fallback to each region's initial state via a `_region_initial` literal-dict embedded into the test body. One `assert_region_state` + annotation per region.
+- **Region-initial map** (`_region_initial = {region: initial_state, ...}`): emitted once per parallel-test function so the terminal loop can resolve fallbacks without consulting the chart IR at runtime. Pure-Python literal; no walker callback.
+- **Backwards compatibility**: a vector lacking `steps` and `expected_terminal_states` produces a test that:
+  - Skips the step loop (empty `vector["steps"]` → loop body never runs).
+  - In the terminal loop, every region asserts its declared initial state via the `_region_initial` fallback.
+  - Net behaviour: reset + initial-state-per-region — identical to wave-2c minimal vector emission.
+
+**Co-landing**: SOS-03-CONCEPTS.md §15 2026-05-24 entry extends the per-step record schema with `expected_states` (plural dict for parallel charts), `cycles_advance`, and top-level `expected_terminal_states`. The extension is additive — single-region vectors using `expected_state` (singular) continue unchanged.
+
+**Wave-3 scope explicitly excludes** (carry-forward to future waves):
+
+- **Multi-clock-domain bind wiring**: parallel charts on `<region clock="...">` distinct domains still emit the wave-2b per-region SVA bind targeting the chart-top wrapper, but the bind file uses a single `clk` / `rst` reference. Wave-4 lifts to per-domain `clk_<dom>` / `rst_<dom>` wiring to match the SOS-08-C wave-3 chart-top wrapper port shape.
+- **Cross-region invariant SVA properties**: a `<chart>_top_sva.sv` module with cross-region `assert property` clauses (e.g. "left.L_TICKED reachable iff right.R_OBSERVED_TICK has been entered at least once") is a future amendment. Wave-3 emits per-region SVA only.
+- **Cross-region transition driving via shared datamodel signals**: when two regions read/write the same chart datamodel signal, SOS-08-C's cross-region tracking pass synthesises a `sos_synchronizer` between them (per PCDN-SOS-08-C-002). The cocotb walker accepts these scenarios but does not yet drive shared-datamodel-mediated cross-region transitions via the step vector schema. Future amendment.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-D-3** (vector-IR read-only at emitter boundary): the wave-3 walker consumes `vector["steps"]` verbatim. No mutation; the schema extension is canonical, not an emitter-local transformation.
+- **INV-S-HDL-D-5** (chart-vocabulary failure messages): per-region `assert_region_state` carries `format_failure(vector, step)` so failures cite the chart-side vector + step context, NOT raw RTL signal traces. Same INV-SOS-H integration as wave-2c.
+- **INV-S-HDL-D-6** (per-vector test attribution): one `@cocotb.test()` per vector preserved — wave-3 extends the test body, NOT the test-to-vector mapping. Per-region failures within a single test still attribute to one vector_id; the JUnit-XML rollup remains per-vector.
+- **PCDN-SOS-08-D-003** (per-vector test isolation): unchanged. `--group-by-region` remains opt-in and is unaffected by wave-3 (the step walker is per-test).
+- **INV-S-HDL-G-2** (annotation-per-transition): wave-3 emits one `writer.record_transition` per (step, region) pair in the step loop, plus one per region in the terminal loop. Annotation overlay is dense (matches the SOS-08-G review-surface contract).
+
+**Backwards compatibility tests**: `test_walker_remains_backward_compatible` verifies that a wave-2c-style minimal vector (no `steps`, no `expected_terminal_states`) produces a test body that:
+- Still parses cleanly (`ast.parse(test)` passes).
+- Still emits the wave-2c initial-state-per-region assertions.
+- Step loop is a no-op (`vector.get("steps", [])` returns `[]`).
+- Terminal loop asserts each region's initial state via the embedded `_region_initial` map.
+
+**Test count**: net +9 — `TestWave3PerRegionStepDrivenVectors` (9 tests): step walker loop emitted; step walker handles `inputs`; step walker honours `cycles_advance`; per-region `expected_states` assertion loop; per-step annotation per region; terminal-states dict reading; per-region terminal assertion loop; backwards compatibility (wave-2c minimal vector); `format_failure(vector, step)` per-step context.
+
+**Test suite**: 423/423 passing (414 baseline + 9 net wave-3).
+
+**Cited PCDNs / amendments**: SOS-03 §15 2026-05-24 (schema extension co-landing); PCDN-SOS-08-D-003 (per-vector test isolation — unchanged); INV-S-HDL-D-3 (vector-IR read-only — preserved); SOS-08-C §6.10 chart-top wrapper convention (per-region `current_state_<region>` port).
+
+Status: 🟢 **wave-3 complete** for the per-region step-driven vector scope. Multi-clock-domain bind wiring + cross-region invariant SVA properties + shared-datamodel cross-region transitions remain wave-4+ work.

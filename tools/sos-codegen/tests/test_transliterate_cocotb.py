@@ -1147,6 +1147,107 @@ class TestParallelChartEmit:
         assert "current_state" in test
 
 
+class TestWave3PerRegionStepDrivenVectors:
+    """SOS-08-D wave-3 (2026-05-24 §15): per-region step-driven
+    vectors. Extends the parallel-chart test body to walk
+    `vector["steps"]` where each step carries `expected_states:
+    {region: state}`. The walker iterates steps, optionally drives
+    `inputs`, advances by `cycles_advance` clocks, asserts each
+    named region's state via `assert_region_state`, and records a
+    SOS-08-G annotation per region. Closes with per-region terminal
+    assertions via `expected_terminal_states` (dict).
+
+    Backwards-compatible with wave-2c minimal vectors (no `steps`
+    → reset + initial-state-only test, identical to wave-2c).
+    """
+
+    def _files(self) -> dict:
+        return render_target(_chart_with_parallel(),
+                             {"chart_name": "parallels"})
+
+    def test_step_walker_loop_emitted(self):
+        """Parallel test body iterates `vector["steps"]` via enumerate."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        assert "for step_index, step in enumerate(vector.get(\"steps\", [])" in test
+
+    def test_step_walker_handles_inputs(self):
+        """Each step optionally drives `inputs` as a flat
+        {port: value} map (mirror of the single-region wave-1
+        emission)."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        assert "(step.get(\"inputs\") or {})" in test
+        assert "getattr(dut, port_name).value = port_value" in test
+
+    def test_step_walker_handles_cycles_advance(self):
+        """`cycles_advance` (default 1) lets vector authors wait
+        multiple clocks between events — e.g. CDC settling."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        assert "cycles_to_advance = int(step.get(\"cycles_advance\", 1)" in test
+        assert "for _ in range(cycles_to_advance):" in test
+
+    def test_step_walker_asserts_per_region_expected_states(self):
+        """Each step's `expected_states: {region: state}` produces
+        one `assert_region_state` call per (region, state) entry."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        assert "expected_states = step.get(\"expected_states\") or {}" in test
+        assert "for region_name, expected_state in expected_states.items():" in test
+        # The assertion uses the wave-2c helper with per-step
+        # context.
+        assert "assert_region_state(\n                    dut, region_name, expected_state," in test
+
+    def test_step_walker_records_annotation_per_region(self):
+        """SOS-08-G integration: each per-region assertion produces
+        a `writer.record_transition` annotation with region= named."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        assert "writer.record_transition(" in test
+        assert "region=region_name" in test
+        assert "vector_index=step_index" in test
+
+    def test_terminal_states_dict_used(self):
+        """`vector["expected_terminal_states"]` (dict) lets per-
+        region terminals differ; falls back to each region's
+        initial state when absent."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        assert (
+            "terminal_states = vector.get(\"expected_terminal_states\") or {}"
+            in test
+        )
+        # Per-region initial-state fallback map declared.
+        assert "_region_initial = {" in test
+
+    def test_per_region_terminal_assertion_loop(self):
+        """After step walking, walker emits per-region
+        `assert_region_state` for each region's terminal state."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        assert (
+            "for region_name, init_state in _region_initial.items():"
+            in test
+        )
+        assert (
+            "terminal = terminal_states.get(region_name, init_state)"
+            in test
+        )
+
+    def test_walker_remains_backward_compatible(self):
+        """The wave-2c minimal-vector (reset + initial-state only)
+        path MUST still work — `vector.get("steps", [])` returns []
+        when absent, so the step loop is a no-op; terminal-state
+        loop falls back to initial states. Verify the test body
+        still parses cleanly and the wave-2c initial-state-per-
+        region assertion block survives."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        ast.parse(test)
+        # Wave-2c initial-state-per-region assertions still emitted.
+        assert "assert_region_state(\n            dut, 'left', 'l_idle'" in test
+        assert "assert_region_state(\n            dut, 'right', 'r_idle'" in test
+
+    def test_format_failure_passes_step_context(self):
+        """Per-step assertion failures MUST surface the step's
+        chart-vocabulary context per INV-S-HDL-D-5."""
+        test = self._files()["tests/parallels/test_parallels_fsm.py"]
+        assert "format_failure(vector, step)" in test
+
+
 # ---------------------------------------------------------------------------
 # SOS-08-G wave-2a: nested chart_path walking (§15 2026-05-23 entry).
 # ---------------------------------------------------------------------------

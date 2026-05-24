@@ -1209,11 +1209,10 @@ def _emit_parallel_test_function(
     """Emit one ``@cocotb.test()`` async function for a parallel chart.
 
     Per SOS-08-D §15 wave-2c (2026-05-23) + SOS-08-C §6.10 chart-top
-    wrapper convention. The emitted test:
+    wrapper convention, extended by wave-3 (2026-05-24) with per-
+    region step-driven vector walking. The emitted test:
 
-      1. Loads the vector (kept for vocabulary parity with the
-         single-region path; per-region step-driven vectors land in
-         wave-3).
+      1. Loads the vector.
       2. Starts the clock + applies reset.
       3. For each region, asserts ``dut.current_state_<region>``
          equals the region's initial-state one-hot value (via the
@@ -1221,19 +1220,22 @@ def _emit_parallel_test_function(
       4. Records a per-region chart-state entry into the SOS-08-G
          annotation overlay so the review surface sees each region's
          post-reset state.
-
-    Per-region step-driven assertions (where each step names the
-    region whose ``expected_state`` is being asserted) are wave-3
-    scope alongside the SOS-03 schema extension that adds
-    ``expected_states: {region: state}`` to each step.
+      5. SOS-08-D wave-3: walks ``vector["steps"]`` (if present)
+         with per-step ``inputs`` (port→value driver) + per-step
+         ``expected_states`` ({{region: state}} per the SOS-03 §15
+         2026-05-24 schema extension). Each step optionally advances
+         the clock via ``cycles_advance`` (default 1) and asserts
+         every region's expected state, recording an annotation per
+         region.
+      6. Asserts per-region terminal states via
+         ``vector["expected_terminal_states"]`` (dict, mirror of the
+         single-region ``expected_terminal_state``; defaults to each
+         region's initial state when absent).
     """
-    # Build the per-region assertion + annotation block.
+    # Build the per-region assertion + annotation block for the
+    # initial-state entry post-reset.
     region_blocks: list[str] = []
     for r in chart.regions:
-        # SOS-08-G wave-2: chart_path uses the walker-computed root-to-
-        # leaf path for the region's initial state per §5.2 +
-        # PCDN-G-002. The path threads chart root → region → initial
-        # state per SOS-12 recursive-dispatch vocabulary.
         per_region_path = chart.chart_paths.get(
             r.initial_state, [chart.name, r.name, r.initial_state]
         )
@@ -1253,36 +1255,46 @@ def _emit_parallel_test_function(
         )
     region_block = "\n".join(region_blocks) if region_blocks else "        pass"
 
+    # Wave-3 terminal-state assertion block: per-region fallback to
+    # each region's initial state when ``expected_terminal_states``
+    # lacks the region.
+    region_initial_map = "{" + ", ".join(
+        f"{r.name!r}: {r.initial_state!r}" for r in chart.regions
+    ) + "}"
+
     return f'''@cocotb.test()
 async def test_vector_{slug}(dut):
-    """SOS-08-D wave-2c — parallel-chart vector {vector_id!r}.
+    """SOS-08-D wave-3 — parallel-chart vector {vector_id!r}.
 
-    Wave-2c parallel-chart scaffold (SOS-08-D §15 2026-05-23 entry +
-    SOS-08-C §6.10 chart-top wrapper convention). The DUT here is
-    the chart-top wrapper (``{_dut_module_name(chart.name)}``); it
-    exposes one ``current_state_<region>`` output port per region.
+    Wave-2c laid the scaffold (reset + initial-state-per-region);
+    wave-3 (SOS-08-D §15 2026-05-24) lands the step-driven walker.
+    SOS-03 §15 2026-05-24 extends the vector schema with per-region
+    targeted assertions:
 
-    This wave-2c test:
-      1. Applies reset against the chart-top wrapper.
-      2. Asserts each region's initial-state entry via
-         ``assert_region_state(dut, <region>, <initial>, ...)``.
-      3. Emits per-region SOS-08-G annotation records for the post-
-         reset state-entry per region.
+        "steps": [
+            {{
+                "inputs":         {{"port": value, ...}},   // optional
+                "cycles_advance": <int>,                    // default 1
+                "expected_states": {{"region": "state", ...}},
+                "transition_id":  <int>                     // optional
+            }},
+            ...
+        ],
+        "expected_terminal_states": {{"region": "state", ...}}  // optional
 
-    Per-region step-driven assertions are wave-3 scope (alongside the
-    SOS-03 schema extension that adds ``expected_states: {{region:
-    state}}`` to each step). Wave-2c keeps the scaffold tight: reset
-    + initial-state-per-region — every region is verified to enter
-    its declared initial state on reset deassertion.
+    Each step asserts every named region's state and records a
+    SOS-08-G annotation per region per INV-S-HDL-G-2. The walker is
+    BACKWARDS-COMPATIBLE with wave-2c vectors (no ``steps`` key →
+    reset + initial-state-only test, identical to wave-2c emission).
     """
     vector = load_vector(_VECTORS_DIR / "{vector_id}.json")
     cocotb.start_soon(Clock(dut.clk, _CLOCK_PERIOD_NS, units="ns").start())
 
-    # SOS-08-G §5.6 (PCDN-G-003): one annotation file per test run;
-    # closed in finally so the file is well-formed on success or
-    # failure.
     writer = AnnotationWriter(test_name="test_vector_{slug}")
     cycle = 0
+    # Per-region map: initial state → fallback when
+    # `expected_terminal_states` lacks a region entry.
+    _region_initial = {region_initial_map}
     try:
         await _apply_reset(dut)
         cycle += _RESET_CYCLES
@@ -1294,6 +1306,70 @@ async def test_vector_{slug}(dut):
         # region's `current_state_<region>` is the chart-top wrapper's
         # observable output for that region.
 {region_block}
+
+        # SOS-08-D wave-3 (2026-05-24): walk `vector["steps"]` if
+        # present. Each step may carry `inputs`, `cycles_advance`,
+        # `expected_states: {{region: state}}`, and `transition_id`.
+        # Backwards-compatible with wave-2c minimal vectors that omit
+        # `steps` entirely (loop body is skipped).
+        for step_index, step in enumerate(vector.get("steps", []) or []):
+            # Drive input stimuli — flat `{{port: value}}` map per
+            # SOS-03 §15 2026-05-24 extension.
+            for port_name, port_value in (step.get("inputs") or {{}}).items():
+                getattr(dut, port_name).value = port_value
+            # `cycles_advance` defaults to 1 — one clock edge per
+            # step. Vector authors MAY request multi-cycle advance
+            # for vectors that exercise the period between events
+            # (e.g. waiting for a CDC channel to settle).
+            cycles_to_advance = int(step.get("cycles_advance", 1) or 1)
+            for _ in range(cycles_to_advance):
+                await RisingEdge(dut.clk)
+                cycle += 1
+            # Per-region expected state assertions. Each region named
+            # in `expected_states` is verified against its own
+            # `dut.current_state_<region>` port. Regions not named in
+            # the step's map are NOT asserted (the step is per-region
+            # targeted by design — vector author opts which regions
+            # to check at each event).
+            expected_states = step.get("expected_states") or {{}}
+            for region_name, expected_state in expected_states.items():
+                assert_region_state(
+                    dut, region_name, expected_state,
+                    format_failure(vector, step),
+                )
+                writer.record_transition(
+                    cycle=cycle,
+                    chart_state=expected_state,
+                    transition_id=step.get("transition_id"),
+                    chart_path=_CHART_PATHS.get(
+                        expected_state, [_CHART_NAME, expected_state]
+                    ),
+                    signal=f"dut.current_state_{{region_name}}",
+                    region=region_name,
+                    vector_index=step_index,
+                )
+
+        # SOS-08-D wave-3: per-region terminal-state assertion.
+        # Defaults to each region's initial state when the vector
+        # lacks `expected_terminal_states` or lacks an entry for a
+        # given region (minimal-vector reset-baseline shape).
+        terminal_states = vector.get("expected_terminal_states") or {{}}
+        for region_name, init_state in _region_initial.items():
+            terminal = terminal_states.get(region_name, init_state)
+            assert_region_state(
+                dut, region_name, terminal,
+                format_failure(vector),
+            )
+            writer.record_transition(
+                cycle=cycle,
+                chart_state=terminal,
+                transition_id=None,
+                chart_path=_CHART_PATHS.get(
+                    terminal, [_CHART_NAME, terminal]
+                ),
+                signal=f"dut.current_state_{{region_name}}",
+                region=region_name,
+            )
     finally:
         writer.close()
 '''
