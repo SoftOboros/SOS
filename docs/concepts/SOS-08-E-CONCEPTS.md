@@ -494,3 +494,61 @@ Wave-2 closes two of the wave-1 deferred candidates: (a) the remaining three of 
 **Cited PCDNs**: PCDN-SOS-08-E-005 (separate wrappers per simulator — wave-2 closes the remaining three of five); §12 gate (h) cross-path equivalence with SOS-08-D (verified at SVA artifact byte-identical level).
 
 Status: 🟢 **ratified (continuing)** — wave-2 closes the simulator-wrapper coverage and the cross-path equivalence gate. Wave-3 lifts parallel-chart support on the SV-testbench side (composing against SOS-08-D wave-2b's already-landed parallel SVA bind support) + the full SOS-03 vector-schema consumer + Verilator deferred-failure stubs + layered class hierarchy opt-in.
+
+### 2026-05-24 — Impl wave-3: parallel-chart support + Verilator deferred-failure stubs (Ira)
+
+Wave-3 closes two of the four wave-2-deferred candidates: (a) parallel-chart support on the SV-testbench side (mirror of SOS-08-D wave-2c's per-region observable shape, composing against the already-landed SOS-08-D wave-2b parallel SVA bind support), and (b) the Verilator deferred-failure-stub policy header ratifying INV-S-HDL-E-6 per PCDN-SOS-08-E-002 resolution. The full SOS-03 vector-schema consumer + layered class hierarchy opt-in remain wave-3-future co-deferred work.
+
+**Wave-3 implementation surface**:
+
+- **Parallel-chart dispatch** in `render_target`: the wave-1 `UnsupportedChartError` raised on `_chart_has_parallel(...)` is now gated on `_collect_regions(chart_ir)`. Non-empty regions → parallel emit path; empty → wave-1 single-region path (unchanged). The single-region path stays byte-identical with wave-2 emission for INV-S-HDL-E-5/-E-6 regression-free conformance.
+
+- **`_collect_regions(chart_ir)`** new helper: returns `[(region_name, initial_state, [state_ids]), ...]` for a parallel chart; empty list for single-region. Mirrors `transliterate_sva_bind._collect_parallel_regions` but also extracts the per-region initial-state + state-list (the SV testbench walker needs both for the per-region checker emit).
+
+- **`_emit_virtual_interface_parallel(chart, regions)`** new emitter: emits `dut_if_<chart>.sv` with per-region `current_state_<region>` output ports + per-region `N_STATES_<REGION>` parameters. Both `driver_mp` and `checker_mp` modports list each per-region observable as an input. Mirrors the SOS-08-C §6.10 chart-top wrapper convention so the SVA bind targets the SAME ports the testbench checker reads.
+
+- **`_emit_checker_class_parallel(chart, regions)`** new emitter: per-region checker logic. The checker reads `vif.current_state_<region>` per region, parses `expected_state_<region>` integer fields from the trace JSONL (mirror of the SOS-03 wave-3 schema extension for per-region expected states), and emits chart-vocabulary failure messages per INV-S-HDL-E-4 that NAME the failing region. The hand-rolled integer-field extractor (`parse_int_field`) from the single-region walker is copied through unchanged so INV-S-HDL-E-1 (no constrained-random) audit passes.
+
+- **`_emit_top_module_parallel(chart, regions)`** new emitter: top-level testbench instantiates the chart-top wrapper (`<chart>_fsm` per SOS-08-C §6.10 — same module name the SVA bind targets), wires per-region observable ports + per-region `N_STATES_<REGION>` parameter overrides, and `\`include`s the new `verilator_stubs.svh` header so the deferred-failure-stub macros are available in the testbench file.
+
+- **`_emit_verilator_stubs_svh(chart)`** new emitter: emits `verilator_stubs.svh` — the deferred-failure-stub policy header per INV-S-HDL-E-6 / PCDN-SOS-08-E-002. Defines `\`SOS_VERILATOR_SKIP_BEGIN/END` macros (wrap a block; commercial sims run it, Verilator stubs it) + `\`SOS_VERILATOR_DEFERRED(<feature>)` single-statement macro form. Branches on `\`ifdef VERILATOR`; the Verilator path's deferred-failure message names the chart per INV-S-HDL-E-4. Always co-emitted (one per chart emit, single-region + parallel both).
+
+- **`_audit_verilator_subset(filename, source)`** new audit function: scans emitted files for SV-2017 constructs outside Verilator's documented subset per the curated `_VERILATOR_UNSUPPORTED_CONSTRUCTS` catalog. Returns SOFT advisories rather than raising — INV-S-HDL-E-6 is the deferred-failure-stub policy, not a rejection. Bind files / Makefiles / Tcl wrappers / the stubs header itself are exempt. Wave-3 emit (single-region + parallel) passes the audit cleanly; the function + catalog are infrastructure for future emit extensions that may land features outside the Verilator subset (e.g. covergroup-based functional coverage per PCDN-SOS-08-E-003).
+
+**Per-chart emit counts (wave-3)**:
+
+| Shape | File count | Composition |
+|---|---|---|
+| Single-region | 12 | 4 SV core (vif/driver/checker/top) + 5 wrappers + 1 wave-3 stubs header + 2 wave-1/-2 SVA bind (sva.sv + bind.sv) |
+| Parallel (N regions) | 10 + 2N | 4 SV core + 5 wrappers + 1 stubs header + 2N per-region SVA bind |
+
+For the canonical 2-region test fixture (`left` + `right`): 14 files. For the SOS-08-A `rtos_kernel` chart with 4 regions: 18 files (the count scales linearly with region count via the SVA bind co-emit; the four SV core files + five wrappers + one stubs header are constant per chart).
+
+**Wave-3-future boundary** (explicit out-of-scope for this wave):
+
+- **Full SOS-03 vector-schema consumer** replacing the LCD integer-field parser. Co-deferred with SOS-08-F wave-3 parser landing (one parser shared across SOS-08-E + SOS-08-F to avoid drift).
+- **Layered class hierarchy opt-in** (PCDN-SOS-08-E-001): wave-3+ if customer-requested.
+- **Per-region SVA datamodel-binding** for parallel charts (mirror of single-region SOS-08-C wave-3-f's `<assign>` lowering). Composes against the wave-3-f single-region work once it lands.
+- **Multi-clock-domain parallel charts** (per-region `clk_<dom>` / `rst_<dom>` on the chart-top wrapper per SOS-08-C §6.10's multi-clock contract). Wave-2b ratified single-clock parallel as the v1 baseline; wave-3 inherits that constraint.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-E-1** (no constrained-random): retained — the parallel-chart checker reuses the hand-rolled `parse_int_field` extractor verbatim from the single-region walker; the audit pass scans all 14 emitted files (parallel case) and returns clean.
+- **INV-S-HDL-E-2** (no UVM imports): retained — no UVM imports anywhere in the parallel emit.
+- **INV-S-HDL-E-3** (no inline `assert property` outside bind files): retained — the parallel checker class carries no `assert property`; all SVA goes through the SOS-08-D wave-2b bind-files mirror.
+- **INV-S-HDL-E-4** (chart-vocabulary failure messages): **strengthened** — parallel-chart failures NAME the region in the failure message (``[FAIL] vector V%0d region `<region>` chart `<chart>`: expected_state=%0d ...``), so a CI failure on a 4-region chart immediately localises which region's transition mispred.
+- **INV-S-HDL-E-5** (per-simulator build wrapper): retained — the five wave-2 wrappers cover both single-region + parallel emit paths (the wrappers are simulator-specific, not emit-shape-specific).
+- **INV-S-HDL-E-6** (Verilator-subset compliance declared not assumed): **RATIFIED via wave-3 stub-policy header** — the catalog + audit + macros are now in place; the wave-3 emit set passes the audit cleanly; future emit extensions that land features outside Verilator's subset MUST wrap them in `\`SOS_VERILATOR_SKIP_BEGIN/END` or use `\`SOS_VERILATOR_DEFERRED(<feature>)`.
+
+**Test count**: 23 new tests across three test classes:
+
+- `TestWave3ParallelChartEmit` (11 tests): file count, per-region SVA bind co-emit, per-region observables on vif, both modports list observables, per-region checker reads + parse calls + failure messages, top instantiates chart-top wrapper, per-region `N_STATES` localparams, chart-vocabulary failure rendering, audit cleanliness, stubs-header inclusion, single-region path unchanged.
+- `TestWave3VerilatorStubsHeader` (6 tests): SKIP_BEGIN/END + DEFERRED macros, `\`ifdef VERILATOR` branch, INV-E-6 + PCDN-E-002 citations, chart-vocabulary message naming, include guards.
+- `TestWave3VerilatorSubsetAudit` (5 tests): wave-3 emit audit-clean; audit catches covergroup; audit exempts bind files / build wrappers / stubs header itself.
+- `TestWave3SvaBindParityWithSOS08D` (1 test): per-region SVA bind files byte-identical between SOS-08-D + SOS-08-E walkers (extends wave-2's single-region byte-identical claim to parallel).
+
+**Test suite**: 527/527 passing (504 prior + 23 wave-3).
+
+**Cited PCDNs**: PCDN-SOS-08-E-002 (Verilator-subset compliance via deferred-failure stubs — wave-3 ratifies); PCDN-SOS-08-E-004 (per-region testbench shape at v1 — wave-3 implements); PCDN-SOS-08-E-001 (flat class hierarchy at v1 — wave-3 preserves); §12 gate (h) cross-path equivalence with SOS-08-D (extended to parallel charts).
+
+Status: 🟢 **wave-3 complete** — parallel charts emit cleanly through the SV-testbench walker; Verilator deferred-failure-stub policy header ratifies INV-S-HDL-E-6. Wave-3-future tracks the full SOS-03 vector-schema consumer + layered class hierarchy opt-in + per-region SVA datamodel-binding + multi-clock-domain parallel-chart wiring.

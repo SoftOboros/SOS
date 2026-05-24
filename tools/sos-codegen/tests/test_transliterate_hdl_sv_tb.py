@@ -66,15 +66,31 @@ def _simple_chart() -> dict:
 
 
 def _parallel_chart() -> dict:
-    """Chart with a top-level <parallel>; wave-1 must reject."""
+    """Parallel chart with two regions, each carrying its own state
+    list. Used for wave-3 parallel-emit acceptance + SVA bind co-emit.
+    """
     return {
         "initial": "regions",
         "parallel": [
             {
                 "id": "regions",
                 "state": [
-                    {"id": "r0_idle"},
-                    {"id": "r1_idle"},
+                    {
+                        "id": "left",
+                        "initial": "l_idle",
+                        "state": [
+                            {"id": "l_idle"},
+                            {"id": "l_active"},
+                        ],
+                    },
+                    {
+                        "id": "right",
+                        "initial": "r_idle",
+                        "state": [
+                            {"id": "r_idle"},
+                            {"id": "r_active"},
+                        ],
+                    },
                 ],
             }
         ],
@@ -92,13 +108,16 @@ class TestFileSet:
     Wave-1: 6 SV files + 2 build wrappers (Verilator, Questa) = 8.
     Wave-2 (2026-05-23 §15): adds 3 more wrappers (VCS, Xcelium,
     Riviera) closing PCDN-E-005's five-of-five gate = 11 total.
+    Wave-3 (2026-05-24 §15): adds 1 Verilator deferred-failure-stub
+    policy header (`verilator_stubs.svh`) per INV-S-HDL-E-6
+    ratification = 12 total.
     """
 
-    def test_emits_eleven_files(self):
+    def test_emits_twelve_files(self):
         files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
-        # Six SV files + five build wrappers = 11 (wave-2).
-        assert len(files) == 11, (
-            f"SOS-08-E §6 + wave-2 §15: expected 11 emitted files, "
+        # Six SV files + five build wrappers + verilator stubs = 12 (wave-3).
+        assert len(files) == 12, (
+            f"SOS-08-E §6 + wave-3 §15: expected 12 emitted files, "
             f"got {len(files)}: {sorted(files)}"
         )
 
@@ -516,16 +535,21 @@ class TestInvariants:
 
 
 # ---------------------------------------------------------------------------
-# Parallel-chart rejection
+# Parallel-chart acceptance (wave-3 lifts the wave-1/wave-2 rejection)
 # ---------------------------------------------------------------------------
 
 
-class TestParallelRejection:
-    """Wave-1: parallel charts MUST raise UnsupportedChartError."""
+class TestParallelChartAccepted:
+    """Wave-3 (2026-05-24 §15): parallel charts emit the per-region
+    testbench split per SOS-08-C §6.10 chart-top wrapper convention.
+    Wave-1 + wave-2 rejected; wave-3 accepts."""
 
-    def test_rejects_parallel_chart(self):
-        with pytest.raises(sv_tb.UnsupportedChartError):
-            sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
+    def test_accepts_parallel_chart(self):
+        """No UnsupportedChartError — parallel charts emit cleanly."""
+        files = sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
+        assert "tb/sv/p/tb_p.sv" in files
+        assert "tb/sv/p/dut_if_p.sv" in files
+        assert "tb/sv/p/sos_checker_p.sv" in files
 
 
 # ---------------------------------------------------------------------------
@@ -781,3 +805,283 @@ class TestCrossPathEquivalenceWithSOS08D:
                         f"SOS-08-D MUST NOT emit SV testbench file "
                         f"{leaf!r}; that's SOS-08-E's territory."
                     )
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-E wave-3 (2026-05-24 §15) — parallel charts + Verilator
+# deferred-failure stubs.
+# ---------------------------------------------------------------------------
+
+
+class TestWave3ParallelChartEmit:
+    """Wave-3 lifts the wave-1/wave-2 parallel-chart rejection. The
+    walker dispatches on `_collect_regions(chart_ir)`; parallel
+    charts emit the per-region observable shape mirroring the SOS-08-D
+    wave-2c cocotb walker."""
+
+    def _files(self) -> dict:
+        return sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
+
+    def test_parallel_emit_keeps_same_artifact_count(self):
+        """Parallel charts emit 12 files (8 wave-1 SV + 5 wave-2
+        wrappers + 1 wave-3 stub header)... wait, wave-1 SV was 6.
+        So: 4 SV + 5 wrappers + 1 stub header + 2 SVA-bind files per
+        region = 4 + 5 + 1 + (2 * regions). For two regions: 14."""
+        files = self._files()
+        # 4 SV core + 5 wrappers + 1 stub header = 10 + 2 regions * 2
+        # SVA files = 14.
+        assert len(files) == 14, (
+            f"Wave-3 parallel emit expected 14 files; got {len(files)}: "
+            f"{sorted(files)}"
+        )
+
+    def test_parallel_emit_per_region_sva_bind(self):
+        """SOS-08-D wave-2b emits one _sva.sv + one _bind.sv per
+        region; the SV-testbench walker mirrors them under tb/sv/."""
+        files = self._files()
+        assert "tb/sv/p/p_region_left_fsm_sva.sv" in files
+        assert "tb/sv/p/p_region_left_fsm_bind.sv" in files
+        assert "tb/sv/p/p_region_right_fsm_sva.sv" in files
+        assert "tb/sv/p/p_region_right_fsm_bind.sv" in files
+
+    def test_parallel_vif_has_per_region_observables(self):
+        """Virtual interface MUST expose one
+        `current_state_<region>` port per region (mirror of the
+        chart-top wrapper per SOS-08-C §6.10)."""
+        vif = self._files()["tb/sv/p/dut_if_p.sv"]
+        assert "current_state_left" in vif
+        assert "current_state_right" in vif
+        # Per-region width parameter.
+        assert "N_STATES_LEFT" in vif
+        assert "N_STATES_RIGHT" in vif
+
+    def test_parallel_vif_modports_carry_per_region_observables(self):
+        """driver_mp + checker_mp both expose the per-region
+        observables (driver as input, checker as input — observables
+        are read-only from the driver too because it doesn't drive
+        them)."""
+        vif = self._files()["tb/sv/p/dut_if_p.sv"]
+        # Driver modport: per-region observables as input (driver
+        # doesn't drive them; reads only for completeness).
+        assert "modport driver_mp" in vif
+        assert "modport checker_mp" in vif
+        # Both modports name each region's observable.
+        for region in ("left", "right"):
+            # Count occurrences of `input  current_state_<region>` —
+            # MUST appear in both modports.
+            assert vif.count(f"input  current_state_{region}") >= 2
+
+    def test_parallel_checker_reads_each_region(self):
+        """Checker class reads `vif.current_state_<region>` per
+        region + parses per-region `expected_state_<region>` field
+        from the trace JSONL."""
+        checker = self._files()["tb/sv/p/sos_checker_p.sv"]
+        # Per-region observable reads.
+        assert "vif.current_state_left" in checker
+        assert "vif.current_state_right" in checker
+        # Per-region field parse calls.
+        assert "expected_state_left" in checker
+        assert "expected_state_right" in checker
+        # Per-region failure messages cite the region name.
+        assert "region `left`" in checker
+        assert "region `right`" in checker
+
+    def test_parallel_top_instantiates_chart_top_wrapper(self):
+        """Top-level testbench MUST instantiate the chart-top wrapper
+        (`<chart>_fsm` per SOS-08-C §6.10), NOT a per-region FSM
+        module. The SVA bind files target the same wrapper."""
+        top = self._files()["tb/sv/p/tb_p.sv"]
+        # DUT is the chart-top wrapper.
+        assert "p_fsm" in top
+        # Per-region observable wires connected to the wrapper.
+        assert ".current_state_left" in top
+        assert ".current_state_right" in top
+        # Includes the wave-3 Verilator stubs header.
+        assert '`include "verilator_stubs.svh"' in top
+
+    def test_parallel_top_has_per_region_n_states_localparams(self):
+        top = self._files()["tb/sv/p/tb_p.sv"]
+        assert "N_STATES_LEFT" in top
+        assert "N_STATES_RIGHT" in top
+
+    def test_parallel_checker_renders_chart_vocabulary_failure(self):
+        """INV-S-HDL-E-4: chart-vocabulary failure message names the
+        region + chart + expected/observed state."""
+        checker = self._files()["tb/sv/p/sos_checker_p.sv"]
+        assert "[FAIL] vector V%0d region" in checker
+        assert "chart `p`" in checker
+        assert "INV-S-HDL-E-4" in checker
+
+    def test_parallel_emit_audit_clean(self):
+        """All emitted parallel-chart files MUST pass the
+        INV-S-HDL-E-1/2/3 audit pass."""
+        files = self._files()
+        # render_target's internal audit raises on hits — if the call
+        # above succeeded, we're clean. But assert explicitly.
+        for fname, source in files.items():
+            hits = sv_tb._audit_emitted_file(fname, source)
+            assert hits == [], (
+                f"{fname}: unexpected audit hits: {hits}"
+            )
+
+    def test_parallel_emit_includes_stubs_header(self):
+        files = self._files()
+        assert "tb/sv/p/verilator_stubs.svh" in files
+
+    def test_single_region_path_unchanged(self):
+        """Wave-3 keeps the single-region emit path intact — the
+        wave-2 file set + wave-3's added stubs header = 12."""
+        files = sv_tb.render_target(
+            _simple_chart(), {"chart_name": "demo"}
+        )
+        # Same 11 wave-2 files + 1 wave-3 stubs header.
+        assert len(files) == 12
+        assert "tb/sv/demo/verilator_stubs.svh" in files
+        # Single-region vif keeps the wave-1 shape.
+        vif = files["tb/sv/demo/dut_if_demo.sv"]
+        assert "current_state" in vif
+        # And does NOT carry per-region observables.
+        assert "current_state_left" not in vif
+
+
+class TestWave3VerilatorStubsHeader:
+    """Wave-3 (§15 2026-05-24): the Verilator deferred-failure-stub
+    policy header (`verilator_stubs.svh`) co-lands per
+    PCDN-SOS-08-E-002 + INV-S-HDL-E-6 ratification."""
+
+    def _stubs(self) -> str:
+        files = sv_tb.render_target(
+            _simple_chart(), {"chart_name": "demo"}
+        )
+        return files["tb/sv/demo/verilator_stubs.svh"]
+
+    def test_header_defines_skip_begin_end_macros(self):
+        s = self._stubs()
+        assert "SOS_VERILATOR_SKIP_BEGIN" in s
+        assert "SOS_VERILATOR_SKIP_END" in s
+
+    def test_header_defines_deferred_macro(self):
+        s = self._stubs()
+        assert "SOS_VERILATOR_DEFERRED" in s
+
+    def test_header_branches_on_verilator_define(self):
+        """Commercial sims and Verilator MUST get distinct
+        expansions; the header branches on `\\`ifdef VERILATOR`."""
+        s = self._stubs()
+        assert "`ifdef VERILATOR" in s
+
+    def test_header_cites_inv_e6(self):
+        s = self._stubs()
+        assert "INV-S-HDL-E-6" in s
+        assert "PCDN-SOS-08-E-002" in s
+
+    def test_header_emits_chart_vocabulary_in_deferred_msg(self):
+        """The Verilator-path deferred-failure message MUST name the
+        chart per INV-S-HDL-E-4 (chart-vocabulary failure messages)."""
+        s = self._stubs()
+        assert "chart `demo`" in s
+
+    def test_header_has_include_guards(self):
+        s = self._stubs()
+        assert "`ifndef SOS_VERILATOR_STUBS_DEMO_SVH" in s
+        assert "`define SOS_VERILATOR_STUBS_DEMO_SVH" in s
+        assert "`endif // SOS_VERILATOR_STUBS_DEMO_SVH" in s
+
+
+class TestWave3VerilatorSubsetAudit:
+    """Wave-3 INV-S-HDL-E-6 audit: scan for SV-2017 constructs outside
+    Verilator's documented subset. Wave-1/wave-2/wave-3 emit is
+    expected to be empty under this audit; the audit is infrastructure
+    for future emit extensions."""
+
+    def test_audit_empty_on_wave3_emit(self):
+        """All wave-3 emitted files MUST pass the Verilator-subset
+        audit cleanly (no constructs in
+        `_VERILATOR_UNSUPPORTED_CONSTRUCTS`)."""
+        files = sv_tb.render_target(
+            _simple_chart(), {"chart_name": "demo"}
+        )
+        for fname, source in files.items():
+            advisories = sv_tb._audit_verilator_subset(fname, source)
+            assert advisories == [], (
+                f"{fname}: unexpected Verilator-subset advisories: "
+                f"{advisories}"
+            )
+
+    def test_audit_catches_covergroup_in_emit(self):
+        """If a future emit extension introduces a covergroup outside
+        a `_SOS_VERILATOR_SKIP_BEGIN block, the audit MUST surface
+        it as an INV-S-HDL-E-6 advisory."""
+        sneaky = """
+covergroup cg @(posedge clk);
+    cp: coverpoint x;
+endgroup
+"""
+        hits = sv_tb._audit_verilator_subset("tb/sv/demo/tb_demo.sv", sneaky)
+        assert any("covergroup" in h for h in hits), hits
+
+    def test_audit_exempts_bind_files(self):
+        """`assert property` lives in SVA bind files by design; the
+        Verilator-subset audit SHOULD NOT flag them (only INV-S-HDL-
+        E-3's bind-file exemption applies there)."""
+        bind_content = """
+property p; @(posedge clk) x |-> y; endproperty
+"""
+        hits = sv_tb._audit_verilator_subset(
+            "tb/sv/demo/demo_fsm_sva.sv", bind_content
+        )
+        assert hits == [], (
+            f"SVA bind files MUST be exempt from -E-6 audit; got {hits}"
+        )
+
+    def test_audit_exempts_build_wrappers(self):
+        """Makefiles / .do / .sh / .tcl are not SV; -E-6 SHOULD NOT
+        scan them."""
+        hits = sv_tb._audit_verilator_subset(
+            "tb/sv/demo/run_verilator.mk",
+            "some makefile text with covergroup in a comment",
+        )
+        assert hits == []
+
+    def test_audit_exempts_stubs_header(self):
+        """The stubs header itself names the gated features by design;
+        the audit MUST exempt it."""
+        files = sv_tb.render_target(
+            _simple_chart(), {"chart_name": "demo"}
+        )
+        stubs = files["tb/sv/demo/verilator_stubs.svh"]
+        hits = sv_tb._audit_verilator_subset(
+            "tb/sv/demo/verilator_stubs.svh", stubs
+        )
+        assert hits == []
+
+
+class TestWave3SvaBindParityWithSOS08D:
+    """Wave-3 parity claim: the SV-testbench walker emits the SAME
+    per-region SVA + per-region bind files as the SOS-08-D cocotb
+    walker (re-keyed under tb/sv/<chart>/ vs tests/<chart>/, content
+    byte-identical). Wave-2 verified this for single-region; wave-3
+    extends it to parallel."""
+
+    def test_parallel_sva_bind_byte_identical_with_sos_08_d(self):
+        """Per-region SVA bind files emitted by the SV-testbench
+        walker MUST match the SOS-08-D walker's parallel-chart emit."""
+        from transliterate_sva_bind import render_target as bind_render
+
+        sv_files = sv_tb.render_target(
+            _parallel_chart(), {"chart_name": "p"}
+        )
+        bind_files = bind_render(_parallel_chart(), {"chart_name": "p"})
+
+        for bind_path, bind_source in bind_files.items():
+            leaf = bind_path.rsplit("/", 1)[-1]
+            sv_key = f"tb/sv/p/{leaf}"
+            assert sv_key in sv_files, (
+                f"SV-testbench walker missed parallel-chart bind "
+                f"artifact {leaf!r}"
+            )
+            assert sv_files[sv_key] == bind_source, (
+                f"{leaf}: parallel-chart bind artifact differs "
+                f"between SOS-08-D + SOS-08-E walkers (gate (h) "
+                f"byte-identical claim)"
+            )
