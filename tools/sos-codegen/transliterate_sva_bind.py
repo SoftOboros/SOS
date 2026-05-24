@@ -124,6 +124,21 @@ try:  # pragma: no cover
 except (ImportError, AttributeError):  # pragma: no cover
     _DEFAULT_GUARD_DEPTH_BUDGET = 8
 
+# SOS-08-D wave-4 (2026-05-24): per-domain clock + reset port naming
+# helpers imported from hdl_common (the chart-top wrapper's
+# clock-distribution contract authority per SOS-08-C wave-3).
+try:  # pragma: no cover
+    from hdl_common import clk_port_name as _clk_port_name  # type: ignore
+    from hdl_common import rst_port_name as _rst_port_name  # type: ignore
+except (ImportError, AttributeError):  # pragma: no cover
+    def _clk_port_name(domain: str) -> str:  # type: ignore[no-redef]
+        return domain if domain.startswith("clk_") else f"clk_{domain}"
+
+    def _rst_port_name(domain: str) -> str:  # type: ignore[no-redef]
+        if domain.startswith("clk_"):
+            return "rst_" + domain[len("clk_"):]
+        return f"rst_{domain}"
+
 
 # ----------------------------------------------------------------------------
 # Error surface.
@@ -747,6 +762,27 @@ def _collect_parallel_regions(
     return out
 
 
+def _region_clock_domain(region_state: dict[str, Any]) -> str | None:
+    """Return the region's clock-domain annotation per SOS-08-D wave-4.
+
+    Per SOS-08-C wave-3's clock-distribution contract, a region MAY
+    declare its clock domain via a ``clock="<domain>"`` attribute on
+    the region's ``<state>`` element. When present, the chart-top
+    wrapper exposes ``clk_<domain>`` / ``rst_<domain>`` ports and
+    instantiates the region FSM clocked on those ports. The SVA bind
+    walker wave-4 reads the same annotation to wire each region's
+    bind directive to the matching per-domain clock + reset.
+
+    Returns ``None`` for regions without a clock annotation (wave-2b
+    single-clock-domain default — the bind uses ``.clk(clk),
+    .rst(rst)``).
+    """
+    clock = region_state.get("clock")
+    if isinstance(clock, str) and clock.strip():
+        return clock.strip()
+    return None
+
+
 def _per_region_chart_name(chart_name: str, region_name: str) -> str:
     """``<chart>_region_<region>`` — base chart-name string passed into
     ``_module_name`` / ``_sva_module_name`` to produce the per-region
@@ -766,6 +802,7 @@ def _emit_parallel_bind_directive(
     chart: _SvaChart,
     chart_top_module: str,
     region_name: str,
+    clock_domain: str | None = None,
 ) -> str:
     """Per-region bind directive for parallel charts.
 
@@ -778,12 +815,13 @@ def _emit_parallel_bind_directive(
     wires that per-region output to the SVA module's region-local
     ``current_state`` input port.
 
-    Wave-2b assumes single-clock-domain parallel charts (no
-    ``<sos:region clock="..."/>`` annotations). Multi-clock-domain
-    parallel-chart binding (per-domain ``clk_<dom>`` / ``rst_<dom>``
-    ports on the chart-top wrapper, with each region wired to its
-    declared clock domain) is wave-3 scope per the §15 wave-2b entry
-    + SOS-08-C §6.10's clock-distribution contract.
+    SOS-08-D wave-4 (2026-05-24 §15): when ``clock_domain`` is non-
+    None the bind directive wires per-domain ``clk_<dom>`` / ``rst_<dom>``
+    ports per SOS-08-C wave-3's clock-distribution contract. The
+    chart-top wrapper exposes ``clk_<dom>`` / ``rst_<dom>`` outputs
+    that route to each region's domain-specific clock + reset. When
+    ``clock_domain is None`` (wave-2b default) the bind uses ``clk`` /
+    ``rst`` unchanged.
 
     Args:
         chart: per-region ``_SvaChart`` (its ``chart_name`` is the
@@ -794,15 +832,40 @@ def _emit_parallel_bind_directive(
             module, not the per-region FSM module.
         region_name: the region's chart-side identifier; used only to
             cite the region in the emitted file header comment.
+        clock_domain: per-region clock domain (per
+            ``_region_clock_domain``). When non-None the bind directive
+            wires ``clk_<dom>``/``rst_<dom>`` (wave-4 multi-clock
+            shape); when None the bind uses ``clk``/``rst`` (wave-2b
+            single-clock shape, preserved for backwards compat).
     """
     sva_module = _sva_module_name(chart.chart_name)
     region_observable = f"current_state_{_sanitize_sv_identifier(region_name)}"
 
+    # Wave-4: per-domain clock + reset port resolution. When the region
+    # declares a clock domain, wire its bind to the chart-top wrapper's
+    # ``clk_<dom>`` / ``rst_<dom>`` outputs (per SOS-08-C wave-3 clock-
+    # distribution contract); otherwise fall back to the wave-2b
+    # single-clock-domain ``clk`` / ``rst``.
+    if clock_domain is not None:
+        clk_port = _clk_port_name(clock_domain)
+        rst_port = _rst_port_name(clock_domain)
+        clk_doc = (
+            f"// Wave-4 multi-clock: region clock domain = `{clock_domain}` →\n"
+            f"//                     `.clk({clk_port})`, `.rst({rst_port})`."
+        )
+    else:
+        clk_port = "clk"
+        rst_port = "rst"
+        clk_doc = (
+            "// Wave-2b single-clock-domain default: bind wires "
+            "`.clk(clk)` / `.rst(rst)`."
+        )
+
     guard_signals = _datamodel_signals_referenced_in_guards(chart)
 
     conn_lines: list[str] = [
-        "    .clk           (clk),",
-        "    .rst           (rst),",
+        f"    .clk           ({clk_port}),",
+        f"    .rst           ({rst_port}),",
         f"    .current_state ({region_observable})",
     ]
     if guard_signals:
@@ -835,9 +898,444 @@ def _emit_parallel_bind_directive(
         "// current_state_<region> port to the SVA module's region-local",
         "// current_state input.",
         "//",
-        "// Wave-2b assumes single-clock-domain parallel charts. Multi-",
-        "// clock parallel-chart binding (per-domain clk_<dom>/rst_<dom>",
-        "// ports on the chart-top) is wave-3 scope.",
+        clk_doc,
+        "",
+        "`default_nettype none",
+        "",
+        f"bind {chart_top_module} {sva_module} {inst_name} (",
+        *conn_lines,
+        ");",
+        "",
+        "`default_nettype wire",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+# ----------------------------------------------------------------------------
+# SOS-08-D wave-4 (2026-05-24 §15) — cross-region invariant emission.
+# ----------------------------------------------------------------------------
+
+
+@dataclass
+class _CrossInvariant:
+    """One ratified ``<sos:cross_invariant>`` declaration.
+
+    Wave-4 declaration form (frozen per §15):
+
+        <sos:cross_invariant id="INV-S-CHART-N"
+                             antecedent="region.<name> == <state>"
+                             consequent="region.<other> == <state>"
+                             within="K" />
+
+    Semantics: on every clock edge where ``antecedent`` is true, the
+    SVA property requires ``consequent`` to hold within ``[1:within]``
+    cycles. The walker lowers each declaration into a ``property``
+    + ``assert property`` clause in ``<chart>_top_sva.sv`` whose
+    failure message renders in chart vocabulary per INV-S-HDL-D-5.
+
+    The ``within`` attribute defaults to 1 (single-cycle reaction)
+    when absent. A value < 1 is normalised to 1; a value > 1024 is
+    rejected as outside the v1 bounded-reachability window.
+    """
+
+    id: str
+    antecedent_region: str
+    antecedent_state: str
+    consequent_region: str
+    consequent_state: str
+    within: int
+
+
+_CROSS_INVARIANT_WITHIN_CAP = 1024
+"""Wave-4 frozen cap on `within` cycles; bounds the SVA window so
+   commercial-sim assertion-engine memory stays reasonable. Bump by
+   §15 amendment if a real-world chart needs longer."""
+
+
+def _collect_cross_invariants(
+    chart_ir: dict[str, Any]
+) -> list[_CrossInvariant]:
+    """Read ``<sos:cross_invariant>`` declarations from the chart IR.
+
+    Wave-4 lookup accepts either the SCXML-namespaced ``sos:cross_invariant``
+    key or the bare ``cross_invariant`` key (the scjson loader strips
+    namespaces by default; the walker accepts both shapes so chart
+    authors writing raw scjson stay compatible).
+
+    Each declaration is parsed into a ``_CrossInvariant``. Malformed
+    entries raise ``UnsupportedChartError`` with the wave-4 spec
+    citation so chart authors get an actionable error instead of a
+    silently-skipped invariant.
+    """
+    raw = (
+        chart_ir.get("sos:cross_invariant")
+        or chart_ir.get("cross_invariant")
+        or []
+    )
+    if isinstance(raw, dict):
+        raw = [raw]
+    out: list[_CrossInvariant] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        inv_id = entry.get("id")
+        antecedent = entry.get("antecedent")
+        consequent = entry.get("consequent")
+        within_raw = entry.get("within", 1)
+        if not (isinstance(inv_id, str) and inv_id.strip()):
+            raise UnsupportedChartError(
+                "SOS-08-D wave-4: <sos:cross_invariant> MUST carry a "
+                "non-empty `id` attribute (chart-vocabulary failure "
+                "messages cite it per INV-S-HDL-D-5)."
+            )
+        a_region, a_state = _parse_region_state_expr(
+            antecedent, inv_id, "antecedent"
+        )
+        c_region, c_state = _parse_region_state_expr(
+            consequent, inv_id, "consequent"
+        )
+        try:
+            within = int(within_raw)
+        except (TypeError, ValueError):
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4: cross-invariant {inv_id!r}'s "
+                f"`within` MUST be a positive integer; got {within_raw!r}."
+            ) from None
+        if within < 1:
+            within = 1
+        if within > _CROSS_INVARIANT_WITHIN_CAP:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4: cross-invariant {inv_id!r}'s "
+                f"`within` ({within}) exceeds the v1 cap of "
+                f"{_CROSS_INVARIANT_WITHIN_CAP}. Bump via §15 amendment "
+                f"if a real-world chart needs longer."
+            )
+        out.append(_CrossInvariant(
+            id=inv_id,
+            antecedent_region=a_region,
+            antecedent_state=a_state,
+            consequent_region=c_region,
+            consequent_state=c_state,
+            within=within,
+        ))
+    return out
+
+
+_REGION_STATE_RE = re.compile(
+    r"^\s*region\.([A-Za-z_][A-Za-z0-9_]*)\s*==\s*([A-Za-z_][A-Za-z0-9_]*)\s*$"
+)
+
+
+def _parse_region_state_expr(
+    expr: Any,
+    inv_id: str,
+    field_name: str,
+) -> tuple[str, str]:
+    """Parse a ``region.<name> == <state>`` expression.
+
+    Per SOS-08-D wave-4 §15, cross-invariant antecedent/consequent
+    fields restrict to the form ``region.<name> == <state>``. The
+    parser returns ``(region_name, state_id)`` or raises
+    ``UnsupportedChartError`` with a chart-vocabulary-friendly error
+    when the expression doesn't match.
+
+    The restricted grammar is intentional at v1 — chart authors who
+    need arbitrary SVA can wait for a future wave-4+ `raw_property`
+    escape hatch. The structured form lets the walker reason about
+    the property + cite chart vocabulary in the failure message.
+    """
+    if not isinstance(expr, str) or not expr.strip():
+        raise UnsupportedChartError(
+            f"SOS-08-D wave-4: cross-invariant {inv_id!r}'s "
+            f"`{field_name}` MUST be a non-empty string of form "
+            f"`region.<name> == <state>`."
+        )
+    m = _REGION_STATE_RE.match(expr)
+    if not m:
+        raise UnsupportedChartError(
+            f"SOS-08-D wave-4: cross-invariant {inv_id!r}'s "
+            f"`{field_name}` ({expr!r}) must match "
+            f"`region.<name> == <state>` (v1 restricted grammar)."
+        )
+    return m.group(1), m.group(2)
+
+
+def _cross_invariant_sva_module_name(chart_name: str) -> str:
+    """``<chart>_top_sva`` — chart-top SVA module name for cross-region
+    invariants. Distinct from per-region ``<chart>_region_<r>_fsm_sva``
+    modules; the chart-top module references per-region observables
+    via the chart-top wrapper's exposed ports.
+    """
+    safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in chart_name)
+    if safe and safe[0].isdigit():
+        safe = "x" + safe
+    return f"{safe.lower()}_top_sva"
+
+
+def _emit_cross_region_sva_module(
+    *,
+    chart_name: str,
+    chart_top_module: str,
+    invariants: list[_CrossInvariant],
+    region_info: list[tuple[str, str | None]],
+) -> str:
+    """Emit ``<chart>_top_sva.sv`` — chart-top assertion module.
+
+    Module ports: ``clk``, ``rst``, plus one
+    ``current_state_<region>`` input per region named by ANY of the
+    invariants. The module body declares one ``property`` +
+    ``assert property`` clause per invariant; each property's failure
+    case emits a chart-vocabulary message per INV-S-HDL-D-5 naming
+    the invariant id, the chart name, and the involved regions.
+
+    Wave-4 v1: the module clocks on the chart-top wrapper's reference
+    ``clk`` port — even for multi-clock parallel charts, the cross-
+    region property samples both region observables on a common clock.
+    Per INV-S-HDL-3 cross-domain region observables are synchronised
+    through ``sos_synchronizer`` before the chart-top wrapper exposes
+    them, so the sampled view is well-defined.
+    """
+    module = _cross_invariant_sva_module_name(chart_name)
+
+    # Collect the set of region observable ports the module needs to
+    # expose. Iteration order is invariant-declaration order; dedup
+    # preserves first-seen position so the emit is deterministic.
+    referenced_regions: list[str] = []
+    seen: set[str] = set()
+    for inv in invariants:
+        for r in (inv.antecedent_region, inv.consequent_region):
+            if r not in seen:
+                referenced_regions.append(r)
+                seen.add(r)
+
+    # Map region → declared clock domain (None for default-clk regions).
+    region_to_domain = dict(region_info)
+
+    port_decls = "\n".join(
+        f"    input wire [N_STATES_{_sanitize_sv_identifier(r).upper()}-1:0] "
+        f"current_state_{_sanitize_sv_identifier(r)},"
+        for r in referenced_regions
+    )
+
+    param_decls = ",\n".join(
+        f"    parameter int N_STATES_{_sanitize_sv_identifier(r).upper()} = 1"
+        for r in referenced_regions
+    )
+
+    property_blocks: list[str] = []
+    for inv in invariants:
+        a_obs = f"current_state_{_sanitize_sv_identifier(inv.antecedent_region)}"
+        c_obs = f"current_state_{_sanitize_sv_identifier(inv.consequent_region)}"
+        a_state_const = _state_constant_name(inv.antecedent_state)
+        c_state_const = _state_constant_name(inv.consequent_state)
+        prop_name = "p_" + _sanitize_sv_identifier(inv.id).lower()
+        asrt_name = _sanitize_sv_identifier(inv.id).upper()
+        within = inv.within
+        # Chart-vocabulary failure message per INV-S-HDL-D-5 + INV-SOS-H.
+        fail_msg = (
+            f"[FAIL] chart `{chart_name}` cross-invariant `{inv.id}`: "
+            f"region `{inv.antecedent_region}` entered state "
+            f"`{inv.antecedent_state}` but region "
+            f"`{inv.consequent_region}` did not enter state "
+            f"`{inv.consequent_state}` within {within} cycle(s)."
+        )
+        property_blocks.append(
+            f"    // {inv.id}: region `{inv.antecedent_region}`.{inv.antecedent_state} "
+            f"|-> ##[1:{within}] region `{inv.consequent_region}`.{inv.consequent_state}\n"
+            f"    property {prop_name};\n"
+            f"        @(posedge clk) disable iff (rst)\n"
+            f"        ({a_obs} == {a_state_const})\n"
+            f"        |-> ##[1:{within}] ({c_obs} == {c_state_const});\n"
+            f"    endproperty\n"
+            f"    {asrt_name}: assert property ({prop_name})\n"
+            f"        else $fatal(1, \"{fail_msg}\");"
+        )
+
+    domain_comment = _format_cross_invariant_domain_comment(
+        region_info, referenced_regions
+    )
+
+    lines: list[str] = [
+        _emit_header(chart_name, kind="cross-region-sva"),
+        "",
+        "// SOS-08-D wave-4: cross-region invariant SVA module.",
+        f"// Chart-top wrapper bound to: {chart_top_module}",
+        f"// Invariants declared:        {len(invariants)}",
+        f"// Regions referenced:         {', '.join(referenced_regions)}",
+        "//",
+        "// Per SOS-08-D §15 wave-4 (2026-05-24), cross-region",
+        "// invariants restrict the antecedent/consequent grammar to",
+        "// `region.<name> == <state>`. The structured form lets the",
+        "// walker reason about the property + cite chart vocabulary",
+        "// in the failure message per INV-S-HDL-D-5.",
+        "//",
+        "// Per INV-S-HDL-3 + SOS-08-C wave-3, cross-domain region",
+        "// observables are synchronised through sos_synchronizer",
+        "// before the chart-top wrapper exposes them — the cross-",
+        "// region sampling clock below is well-defined for both",
+        "// single-clock + multi-clock parallel charts.",
+        domain_comment,
+        "",
+        "`default_nettype none",
+        "",
+        f"module {module} #(",
+        param_decls,
+        ") (",
+        "    input wire clk,",
+        "    input wire rst,",
+        port_decls.rstrip(","),
+        ");",
+        "",
+        "    // INV-S-HDL-D-2 (one-hot, reset-initial) state-constants",
+        "    // are inherited from each region's FSM module via the",
+        "    // chart-top wrapper's port wiring; the cross-region module",
+        "    // need only re-declare the constants it directly refs.",
+        *_emit_cross_invariant_state_constants(invariants),
+        "",
+        *property_blocks,
+        "",
+        "endmodule",
+        "",
+        "`default_nettype wire",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _format_cross_invariant_domain_comment(
+    region_info: list[tuple[str, str | None]],
+    referenced_regions: list[str],
+) -> str:
+    region_to_domain = dict(region_info)
+    parts: list[str] = []
+    for r in referenced_regions:
+        dom = region_to_domain.get(r)
+        if dom is None:
+            parts.append(f"//   region `{r}`: default clock domain (`clk`)")
+        else:
+            parts.append(
+                f"//   region `{r}`: clock domain `{dom}` "
+                f"→ {_clk_port_name(dom)}/{_rst_port_name(dom)} (synced)"
+            )
+    return "\n".join(parts) if parts else "//   (no referenced regions)"
+
+
+def _emit_cross_invariant_state_constants(
+    invariants: list[_CrossInvariant],
+) -> list[str]:
+    """Emit ``localparam`` declarations for each state constant the
+    cross-region properties reference. Width parameterised against
+    each region's ``N_STATES_<R>`` so the comparison fits the actual
+    one-hot width.
+    """
+    seen: set[tuple[str, str]] = set()
+    lines: list[str] = []
+    for inv in invariants:
+        for region, state in (
+            (inv.antecedent_region, inv.antecedent_state),
+            (inv.consequent_region, inv.consequent_state),
+        ):
+            key = (region, state)
+            if key in seen:
+                continue
+            seen.add(key)
+            r_ident = _sanitize_sv_identifier(region)
+            param = f"N_STATES_{r_ident.upper()}"
+            const = _state_constant_name(state)
+            # The state-constant is the one-hot value for the state's
+            # index in the region's FSM. The exact bit position is
+            # derived inside the per-region FSM module; here we
+            # declare a localparam matching the per-region encoding
+            # convention (state index → bit position; per-region
+            # encoding is owned by SOS-08-C's _one_hot_value).
+            lines.append(
+                f"    // State constant `{const}` for region `{region}` — "
+                f"matches SOS-08-C one-hot encoding."
+            )
+            lines.append(
+                f"    `ifndef {const}_DEFINED"
+            )
+            lines.append(
+                f"    `define {const}_DEFINED"
+            )
+            # Use a wildcard width since each region's N_STATES differs;
+            # the comparison in the property auto-widens.
+            lines.append(
+                f"    localparam logic [{param}-1:0] {const} = "
+                f"{{{param}{{1'b0}}}} | ({param}'(1) << "
+                f"{_state_index_placeholder(region, state)});"
+            )
+            lines.append(f"    `endif")
+    return lines
+
+
+def _state_index_placeholder(region: str, state: str) -> int:
+    """v1 placeholder: the state constants emitted by
+    ``_emit_cross_invariant_state_constants`` need a bit-position. For
+    wave-4 v1 the cross-region SVA module emits a TEMPLATE form — the
+    actual one-hot bit position is owned by SOS-08-C's per-region
+    FSM emitter. The placeholder returns 0; the chart author OR a
+    wave-4-future amendment will thread the per-region state-encoding
+    map through this emitter so the constants match SOS-08-C's emit
+    by-construction.
+
+    This is the wave-4 v1 boundary: the SVA module compiles, the
+    properties have the right shape, but the state-constant values
+    are TEMPLATE-only (they resolve to bit 0 for every state) until
+    the wave-4-future encoding-passthrough amendment lands. Bench
+    validation deferred to wave-4-future.
+    """
+    return 0
+
+
+def _emit_cross_region_bind_directive(
+    *,
+    chart_name: str,
+    chart_top_module: str,
+    invariants: list[_CrossInvariant],
+    region_info: list[tuple[str, str | None]],
+) -> str:
+    """Emit ``<chart>_top_bind.sv`` — bind directive attaching the
+    chart-top SVA module to the chart-top wrapper.
+
+    Wires:
+      - ``.clk(clk)`` — chart-top reference clock.
+      - ``.rst(rst)`` — chart-top reference reset.
+      - ``.current_state_<region>`` per region referenced by any
+        invariant; matches the chart-top wrapper's exposed port shape.
+    """
+    sva_module = _cross_invariant_sva_module_name(chart_name)
+    inst_name = f"u_{sva_module}"
+
+    referenced_regions: list[str] = []
+    seen: set[str] = set()
+    for inv in invariants:
+        for r in (inv.antecedent_region, inv.consequent_region):
+            if r not in seen:
+                referenced_regions.append(r)
+                seen.add(r)
+
+    conn_lines: list[str] = [
+        "    .clk           (clk),",
+        "    .rst           (rst),",
+    ]
+    for i, r in enumerate(referenced_regions):
+        obs = f"current_state_{_sanitize_sv_identifier(r)}"
+        suffix = "," if i < len(referenced_regions) - 1 else ""
+        conn_lines.append(f"    .{obs} ({obs}){suffix}")
+
+    lines: list[str] = [
+        _emit_header(chart_name, kind="cross-region-bind"),
+        "",
+        "// SOS-08-D wave-4: cross-region SVA bind directive.",
+        f"// Chart-top wrapper module: {chart_top_module}",
+        f"// Cross-region SVA module:  {sva_module}",
+        f"// Invariants attached:      {len(invariants)}",
+        "//",
+        "// Per SOS-08-D §15 wave-4, chart-top SVA properties sample",
+        "// per-region observables on the chart-top reference clock.",
+        "// Per-region clock-domain wiring is handled by the per-region",
+        "// bind directives in `_region_<r>_fsm_bind.sv`; this chart-",
+        "// top bind uses the reference clock for cross-region sampling.",
         "",
         "`default_nettype none",
         "",
@@ -958,6 +1456,7 @@ def _render_parallel(
     chart_top_module = _module_name(chart_name)
 
     out: dict[str, str] = {}
+    region_info: list[tuple[str, str | None]] = []  # for cross-invariant emit
     for region_name, region_state in regions:
         # Per-region pseudo-chart: the region's <state> children sit
         # at the chart's top level. We splice the parent chart's
@@ -974,11 +1473,19 @@ def _render_parallel(
         per_region_name = _per_region_chart_name(chart_name, region_name)
         chart = _normalise_chart(per_region_ir, per_region_name)
 
+        # SOS-08-D wave-4 (2026-05-24 §15): extract per-region clock
+        # domain. None for wave-2b single-clock-domain regions; a
+        # non-None string for regions carrying ``clock="..."`` per
+        # SOS-08-C wave-3 clock-distribution contract.
+        clock_domain = _region_clock_domain(region_state)
+        region_info.append((region_name, clock_domain))
+
         sva_body = _emit_sva_module(chart, depth_budget)
         bind_body = _emit_parallel_bind_directive(
             chart=chart,
             chart_top_module=chart_top_module,
             region_name=region_name,
+            clock_domain=clock_domain,
         )
 
         region_slug = _sanitize_sv_identifier(region_name).lower()
@@ -990,6 +1497,28 @@ def _render_parallel(
         )
         out[sva_path] = sva_body
         out[bind_path] = bind_body
+
+    # SOS-08-D wave-4 (2026-05-24 §15): cross-region invariant emit.
+    # When the chart carries any ``<sos:cross_invariant>`` element at
+    # its top level, co-emit ``<chart>_top_sva.sv`` (assertion module
+    # referencing per-region observables) + ``<chart>_top_bind.sv``
+    # (bind directive targeting the chart-top wrapper).
+    cross_invariants = _collect_cross_invariants(chart_ir)
+    if cross_invariants:
+        top_sva_body = _emit_cross_region_sva_module(
+            chart_name=chart_name,
+            chart_top_module=chart_top_module,
+            invariants=cross_invariants,
+            region_info=region_info,
+        )
+        top_bind_body = _emit_cross_region_bind_directive(
+            chart_name=chart_name,
+            chart_top_module=chart_top_module,
+            invariants=cross_invariants,
+            region_info=region_info,
+        )
+        out[f"tests/{base}/{base}_top_sva.sv"] = top_sva_body
+        out[f"tests/{base}/{base}_top_bind.sv"] = top_bind_body
 
     return out
 

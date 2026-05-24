@@ -479,3 +479,351 @@ class TestParallelChartEmit:
 def test_chart_ir_must_be_dict():
     with pytest.raises(transliterate_sva_bind.UnsupportedChartError):
         transliterate_sva_bind.render_target(None, {"chart_name": "x"})
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-D wave-4 (2026-05-24 §15) — multi-clock-domain bind wiring +
+# cross-region invariant SVA properties.
+# ---------------------------------------------------------------------------
+
+
+def _multi_clock_parallel_chart():
+    """Parallel chart with two regions on distinct clock domains."""
+    return {
+        "initial": "p",
+        "parallel": [
+            {
+                "id": "p",
+                "state": [
+                    {
+                        "id": "fast",
+                        "clock": "fast",
+                        "initial": "F1",
+                        "state": [
+                            _state("F1", transitions=[{"target": "F2"}]),
+                            _state("F2"),
+                        ],
+                    },
+                    {
+                        "id": "slow",
+                        "clock": "slow",
+                        "initial": "S1",
+                        "state": [
+                            _state("S1", transitions=[{"target": "S2"}]),
+                            _state("S2"),
+                        ],
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def _chart_with_cross_invariants():
+    """Parallel chart carrying two cross-region invariants."""
+    chart = _parallel_chart()
+    chart["sos:cross_invariant"] = [
+        {
+            "id": "INV-S-CHART-1",
+            "antecedent": "region.left == L2",
+            "consequent": "region.right == R2",
+            "within": 8,
+        },
+        {
+            "id": "INV-S-CHART-2",
+            "antecedent": "region.right == R2",
+            "consequent": "region.left == L2",
+            "within": 1,
+        },
+    ]
+    return chart
+
+
+class TestWave4MultiClockBindWiring:
+    """Wave-4 lifts the wave-2b single-clock-domain assumption.
+    Regions carrying a `clock` attribute now wire their bind to the
+    chart-top wrapper's `clk_<dom>` / `rst_<dom>` ports per SOS-08-C
+    wave-3's clock-distribution contract."""
+
+    def _files(self) -> dict:
+        return transliterate_sva_bind.render_target(
+            _multi_clock_parallel_chart(), {"chart_name": "p"}
+        )
+
+    def test_fast_region_bind_uses_fast_clock_ports(self):
+        bind = self._files()["tests/p/p_region_fast_fsm_bind.sv"]
+        # Per-domain clock/reset wiring.
+        assert ".clk           (clk_fast)" in bind
+        assert ".rst           (rst_fast)" in bind
+        # No fallback to the wave-2b shared clk/rst.
+        assert ".clk           (clk)" not in bind
+        assert ".rst           (rst)" not in bind
+
+    def test_slow_region_bind_uses_slow_clock_ports(self):
+        bind = self._files()["tests/p/p_region_slow_fsm_bind.sv"]
+        assert ".clk           (clk_slow)" in bind
+        assert ".rst           (rst_slow)" in bind
+
+    def test_bind_header_cites_wave4_multi_clock(self):
+        """Each per-region bind file's header SHOULD cite the wave-4
+        multi-clock-domain wiring so a reader knows why the ports
+        differ from wave-2b."""
+        bind = self._files()["tests/p/p_region_fast_fsm_bind.sv"]
+        assert "Wave-4 multi-clock" in bind
+        assert "clk_fast" in bind
+        assert "rst_fast" in bind
+
+    def test_single_clock_region_unchanged(self):
+        """Regions without a `clock` attribute keep the wave-2b
+        single-clock shape (`.clk(clk)` / `.rst(rst)`)."""
+        files = transliterate_sva_bind.render_target(
+            _parallel_chart(), {"chart_name": "p"}
+        )
+        bind = files["tests/p/p_region_left_fsm_bind.sv"]
+        assert ".clk           (clk)" in bind
+        assert ".rst           (rst)" in bind
+        # No per-domain ports leaking in.
+        assert "clk_" not in bind.replace("clk_port_name", "")
+
+    def test_mixed_clock_chart(self):
+        """A chart with one region on a clock domain + one region
+        without an annotation: the annotated region gets per-domain
+        wiring; the bare region keeps wave-2b shape."""
+        chart = {
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "fast",
+                            "clock": "fast",
+                            "initial": "F1",
+                            "state": [
+                                _state("F1", transitions=[{"target": "F2"}]),
+                                _state("F2"),
+                            ],
+                        },
+                        {
+                            "id": "ref",
+                            "initial": "X1",
+                            "state": [
+                                _state("X1"),
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+        files = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "mix"}
+        )
+        fast_bind = files["tests/mix/mix_region_fast_fsm_bind.sv"]
+        ref_bind = files["tests/mix/mix_region_ref_fsm_bind.sv"]
+        assert ".clk           (clk_fast)" in fast_bind
+        assert ".clk           (clk)" in ref_bind
+
+
+class TestWave4CrossRegionInvariants:
+    """Wave-4 §15 ratifies the `<sos:cross_invariant>` declaration form
+    + emits `<chart>_top_sva.sv` + `<chart>_top_bind.sv` carrying chart-
+    top SVA properties referencing per-region observables."""
+
+    def _files(self) -> dict:
+        return transliterate_sva_bind.render_target(
+            _chart_with_cross_invariants(), {"chart_name": "p"}
+        )
+
+    def test_top_sva_file_emitted(self):
+        assert "tests/p/p_top_sva.sv" in self._files()
+
+    def test_top_bind_file_emitted(self):
+        assert "tests/p/p_top_bind.sv" in self._files()
+
+    def test_chart_without_cross_invariants_omits_top_files(self):
+        """Wave-2b parallel chart with no `<sos:cross_invariant>` MUST
+        NOT emit the top-sva / top-bind files."""
+        files = transliterate_sva_bind.render_target(
+            _parallel_chart(), {"chart_name": "p"}
+        )
+        assert "tests/p/p_top_sva.sv" not in files
+        assert "tests/p/p_top_bind.sv" not in files
+
+    def test_top_sva_declares_per_region_state_ports(self):
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        assert "input wire [N_STATES_LEFT-1:0] current_state_left" in sva
+        assert "input wire [N_STATES_RIGHT-1:0] current_state_right" in sva
+
+    def test_top_sva_module_name_convention(self):
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        assert "module p_top_sva" in sva
+
+    def test_top_sva_emits_one_property_per_invariant(self):
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        assert "property p_inv_s_chart_1" in sva
+        assert "property p_inv_s_chart_2" in sva
+
+    def test_top_sva_assert_per_invariant(self):
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        assert "INV_S_CHART_1: assert property" in sva
+        assert "INV_S_CHART_2: assert property" in sva
+
+    def test_top_sva_within_window_lowers_to_temporal_range(self):
+        """`within="8"` lowers to `##[1:8]` SVA temporal range."""
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        assert "##[1:8]" in sva
+        # The second invariant has within=1.
+        assert "##[1:1]" in sva
+
+    def test_top_sva_failure_message_chart_vocabulary(self):
+        """INV-S-HDL-D-5: failure messages render in chart vocabulary
+        — name chart, invariant id, regions, states."""
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        assert "chart `p`" in sva
+        assert "INV-S-CHART-1" in sva
+        assert "region `left`" in sva
+        assert "state `L2`" in sva
+        assert "region `right`" in sva
+        assert "state `R2`" in sva
+
+    def test_top_sva_uses_disable_iff_reset(self):
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        assert "disable iff (rst)" in sva
+
+    def test_top_bind_targets_chart_top_wrapper(self):
+        bind = self._files()["tests/p/p_top_bind.sv"]
+        assert "bind p_fsm p_top_sva" in bind
+
+    def test_top_bind_wires_per_region_observables(self):
+        bind = self._files()["tests/p/p_top_bind.sv"]
+        assert ".current_state_left (current_state_left)" in bind
+        assert ".current_state_right (current_state_right)" in bind
+
+    def test_top_bind_uses_reference_clock(self):
+        """Cross-region SVA samples on the chart-top reference clock
+        even for multi-clock charts (per INV-S-HDL-3 — region
+        observables are synced before the chart-top exposes them)."""
+        bind = self._files()["tests/p/p_top_bind.sv"]
+        assert ".clk           (clk)" in bind
+        assert ".rst           (rst)" in bind
+
+    def test_top_bind_default_nettype_guard(self):
+        bind = self._files()["tests/p/p_top_bind.sv"]
+        assert "`default_nettype none" in bind
+        assert "`default_nettype wire" in bind
+
+    def test_within_attribute_defaults_to_1(self):
+        """When `within` is absent the walker defaults to 1 cycle."""
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-S-CHART-X",
+                "antecedent": "region.left == L1",
+                "consequent": "region.right == R1",
+                # No `within` key.
+            },
+        ]
+        files = transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+        sva = files["tests/p/p_top_sva.sv"]
+        assert "##[1:1]" in sva
+
+    def test_cross_invariant_count_in_two_region_emit(self):
+        """Two regions + two invariants → 2 region-sva + 2 region-bind
+        + 1 top-sva + 1 top-bind = 6 files."""
+        files = self._files()
+        assert len(files) == 6
+
+
+class TestWave4CrossInvariantValidation:
+    """Wave-4 rejects malformed `<sos:cross_invariant>` declarations
+    early with chart-vocabulary errors per INV-S-HDL-D-5."""
+
+    def _chart_with_one_invariant(self, **kw):
+        chart = _parallel_chart()
+        inv = {
+            "id": "INV-S-CHART-X",
+            "antecedent": "region.left == L1",
+            "consequent": "region.right == R1",
+        }
+        inv.update(kw)
+        chart["sos:cross_invariant"] = [inv]
+        return chart
+
+    def test_rejects_missing_id(self):
+        chart = self._chart_with_one_invariant(id="")
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match="non-empty `id`",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_rejects_malformed_antecedent(self):
+        chart = self._chart_with_one_invariant(antecedent="left.L1")
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match="must match",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_rejects_malformed_consequent(self):
+        chart = self._chart_with_one_invariant(consequent="bogus")
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match="must match",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_rejects_within_too_large(self):
+        chart = self._chart_with_one_invariant(within=99999)
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match="exceeds the v1 cap",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_rejects_non_integer_within(self):
+        chart = self._chart_with_one_invariant(within="forever")
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match="positive integer",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_normalises_within_zero_to_one(self):
+        """`within=0` is normalised up to 1 (single-cycle reaction is
+        the minimum meaningful temporal window)."""
+        chart = self._chart_with_one_invariant(within=0)
+        files = transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+        sva = files["tests/p/p_top_sva.sv"]
+        assert "##[1:1]" in sva
+
+
+class TestWave4SingleRegionUnchanged:
+    """Wave-4 MUST NOT change single-region emit behavior."""
+
+    def test_single_region_emit_unchanged(self):
+        files = transliterate_sva_bind.render_target(
+            _simple_chart(), {"chart_name": "demo"}
+        )
+        # Same 2 files as wave-1/wave-2b.
+        assert len(files) == 2
+        assert "tests/demo/demo_fsm_sva.sv" in files
+        assert "tests/demo/demo_fsm_bind.sv" in files
+        # Cross-invariants attached at top level have no effect on a
+        # single-region chart — they only fire when the chart has
+        # regions (the cross_invariant collector still parses them
+        # to surface errors, but the parallel-chart path is what
+        # actually emits the chart-top SVA).
+        chart = _simple_chart()
+        chart["sos:cross_invariant"] = [{
+            "id": "INV-S-CHART-Z",
+            "antecedent": "region.left == L1",
+            "consequent": "region.right == R1",
+        }]
+        files = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "demo"}
+        )
+        # Single-region charts ignore cross-invariants (no regions to
+        # reference); the top-sva / top-bind files are NOT emitted.
+        assert "tests/demo/demo_top_sva.sv" not in files
+        assert "tests/demo/demo_top_bind.sv" not in files

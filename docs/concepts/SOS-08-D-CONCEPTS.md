@@ -662,3 +662,68 @@ Wave-2c's parallel-chart cocotb emission stopped at reset + per-region initial-s
 **Cited PCDNs / amendments**: SOS-03 §15 2026-05-24 (schema extension co-landing); PCDN-SOS-08-D-003 (per-vector test isolation — unchanged); INV-S-HDL-D-3 (vector-IR read-only — preserved); SOS-08-C §6.10 chart-top wrapper convention (per-region `current_state_<region>` port).
 
 Status: 🟢 **wave-3 complete** for the per-region step-driven vector scope. Multi-clock-domain bind wiring + cross-region invariant SVA properties + shared-datamodel cross-region transitions remain wave-4+ work.
+
+### 2026-05-24 — Impl wave-4: multi-clock-domain bind + cross-region invariants (Ira)
+
+Wave-4 closes two of the three wave-3+ deferred items:
+
+(a) **Multi-clock-domain bind wiring**: parallel charts whose regions declare `clock="<domain>"` attributes now emit per-region bind directives that wire to the chart-top wrapper's `clk_<dom>` / `rst_<dom>` ports per SOS-08-C wave-3 clock-distribution contract. Wave-2b's single-clock-domain assumption (`.clk(clk), .rst(rst)`) is preserved as the fallback when a region carries no `clock` annotation.
+
+(b) **Cross-region invariant SVA properties**: ratifies the `<sos:cross_invariant>` declaration form + emits `<chart>_top_sva.sv` + `<chart>_top_bind.sv` when the chart carries one or more cross-invariants.
+
+The third deferred item — shared-datamodel cross-region transition driving — remains wave-5+ work.
+
+**Wave-4 declaration form (frozen 2026-05-24 §15)**:
+
+```xml
+<sos:cross_invariant id="INV-S-CHART-N"
+                     antecedent="region.<name> == <state>"
+                     consequent="region.<other> == <state>"
+                     within="K" />
+```
+
+Semantics: on every clock edge where `antecedent` is true, the SVA property requires `consequent` to hold within `[1:K]` cycles. The walker lowers each declaration into a `property` + `assert property` clause in `<chart>_top_sva.sv` whose failure message renders in chart vocabulary per INV-S-HDL-D-5.
+
+Frozen-enumeration registration policy for the declaration field set: **Standards Action** (modifying the field set is a cross-sub-phase contract change; requires §15 amendment + cross-walker review).
+
+**Grammar restriction at v1**: antecedent and consequent restrict to `region.<name> == <state>` (single-region single-state comparison). Compound expressions (`region.A == X && region.B == Y`), negation (`!=`), and chained implications are wave-4-future. Chart authors who need arbitrary SVA can wait for a future `raw_property` escape hatch.
+
+**Wave-4 implementation surface**:
+
+- `_region_clock_domain(region_state)` new helper: extracts the `clock` attribute from a region's `<state>` element; returns `None` for regions without an annotation.
+- `_emit_parallel_bind_directive` extended: accepts `clock_domain: str | None`; emits `.clk(clk_<dom>), .rst(rst_<dom>)` when non-None via `hdl_common.clk_port_name` / `rst_port_name`.
+- `_collect_cross_invariants(chart_ir)` reads `<sos:cross_invariant>` entries; rejects malformed entries with chart-vocabulary errors.
+- `_parse_region_state_expr` regex-parses `region.<name> == <state>`.
+- `_CrossInvariant` dataclass — normalised representation.
+- `_emit_cross_region_sva_module` emits `<chart>_top_sva.sv` with one `property` + `assert property` per invariant; `disable iff (rst)`; chart-vocabulary `$fatal` messages.
+- `_emit_cross_region_bind_directive` emits `<chart>_top_bind.sv` targeting the chart-top wrapper.
+- `_render_parallel` extended: passes per-region `clock_domain`; co-emits `_top_sva.sv` + `_top_bind.sv` when cross-invariants are present.
+
+**Cross-region SVA sampling clock policy**: v1 uses the chart-top reference clock (`clk`) for cross-region property sampling regardless of per-region clock domains. Per INV-S-HDL-3 + SOS-08-C wave-3, cross-domain region observables are synchronised through `sos_synchronizer` before the chart-top wrapper exposes them — the sampled view on `clk` is well-defined.
+
+**State-constant width**: v1 emits `localparam logic [N_STATES_<R>-1:0] ST_<STATE>` declarations inside `_top_sva`. The bit-position derivation is currently a placeholder returning 0 — the actual one-hot bit position is owned by SOS-08-C's per-region FSM emitter, and threading the encoding map through the cross-region SVA module is **wave-4-future**. The wave-4 v1 SVA module compiles + carries property shape + chart-vocabulary failure messages; bench validation of the actual state-comparison match against the per-region encoding is deferred.
+
+**SV-testbench mirror**: SOS-08-E's `_render_sva_bind` call automatically picks up the wave-4 emit (multi-clock bind shape + `_top_sva.sv` + `_top_bind.sv`). No code change in the SV-testbench walker; the parallel-chart emit count grows from `10 + 2N` to `10 + 2N + 2` when the chart carries cross-invariants (still byte-identical with the SOS-08-D emit at the SVA artifact level).
+
+**Wave-4-future boundary** (explicit out-of-scope):
+
+- State-encoding pass-through into `_top_sva.sv` (currently bit-0 placeholder).
+- Compound antecedent/consequent expressions (AND/OR/NOT/chained implications).
+- `raw_property` escape hatch (chart authors writing arbitrary SVA).
+- Per-property multi-clock cross-region sampling.
+- Shared-datamodel cross-region transition driving (the third wave-3+ deferred item).
+
+**Invariants upheld**:
+
+- INV-S-HDL-D-1/-D-2/-D-3 retained unchanged.
+- **INV-S-HDL-D-4 extended**: new `_top_sva.sv` is bind-attached so commercial-sim assertion engines + formal tools both consume it via the bind directive.
+- **INV-S-HDL-D-5 preserved + extended**: cross-region `$fatal` messages name chart + invariant id + both regions + both states + `within`.
+- INV-S-HDL-3 preserved — cross-region SVA reads already-synced observables.
+
+**Test count**: 28 new tests across `TestWave4MultiClockBindWiring` (5) + `TestWave4CrossRegionInvariants` (14) + `TestWave4CrossInvariantValidation` (6) + `TestWave4SingleRegionUnchanged` (1). Wave-4 emit reaches the SOS-08-E SV-testbench walker through the existing mirror loop (verified via direct invocation).
+
+**Test suite**: 555/555 passing (527 prior + 28 wave-4).
+
+**Cited PCDNs / amendments**: §15 wave-4 (this entry) ratifies the `<sos:cross_invariant>` declaration form; SOS-08-C wave-3 clock-distribution contract (consumed for per-domain bind wiring); INV-S-HDL-D-4/-5 extended; PCDN-SOS-08-C-wave3-clk-naming-passthrough (consumed via `hdl_common.clk_port_name` / `rst_port_name`).
+
+Status: 🟢 **wave-4 complete** for multi-clock-domain bind wiring + cross-region invariant declarations. Wave-4-future tracks state-encoding pass-through, compound cross-invariant expressions, `raw_property` escape hatch, multi-clock cross-region sampling, and shared-datamodel cross-region transition driving.
