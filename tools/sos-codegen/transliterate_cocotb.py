@@ -1052,6 +1052,10 @@ from cocotb.triggers import RisingEdge, Timer
 
 from _cocotb_helpers import (
     AnnotationWriter,
+    _CHART_NAME,
+    _CHART_PATHS,
+    _REGION_STATE_ENCODINGS,
+    _STATE_ENCODING,
     assert_region_state,
     assert_state,
     format_failure,
@@ -1071,6 +1075,57 @@ async def _apply_reset(dut) -> None:
     for _ in range(_RESET_CYCLES):
         await RisingEdge(dut.clk)
     dut.rst.value = 0
+
+
+async def _per_cycle_record(dut, writer, region_name=None):
+    """SOS-08-G wave-3a — per-cycle annotation recorder coroutine.
+
+    PCDN-G-005 (cycle-density opt-in) is wave-3a-complete: the
+    `@cocotb.test()` body spawns this coroutine via
+    ``cocotb.start_soon`` when ``writer.density == "cycle"``. Per
+    simulator clock edge the coroutine reads the chart-state
+    observable port, decodes the one-hot RTL value back to the chart
+    state id via the embedded encoding map, and emits one
+    ``writer.record_cycle()`` record naming the currently-active
+    chart state. Sub-region recorders pass ``region_name`` so each
+    record's ``region`` field is populated and the resulting
+    annotations are filterable per-region at the review surface
+    (SOS-08-G §6 (d) chart-path navigation).
+
+    The decoder maps unknown one-hot values to a literal
+    ``<unknown:0bNN>`` chart-state string so decode failures surface
+    in the overlay without dropping records — a record-loss failure
+    mode is invisible at review time, while a literal unknown is
+    legible and actionable.
+
+    Per INV-S-HDL-G-5 this coroutine is co-located with the
+    `@cocotb.test()` body (the call site spawns it inside the test
+    function); it is NOT a post-process step.
+    """
+    if region_name is not None:
+        encoding = _REGION_STATE_ENCODINGS.get(region_name, {{}})
+        port_name = f"current_state_{{region_name}}"
+    else:
+        encoding = _STATE_ENCODING
+        port_name = "current_state"
+    decode = {{value: state_id for state_id, value in encoding.items()}}
+    cycle = 0
+    while True:
+        await RisingEdge(dut.clk)
+        cycle += 1
+        try:
+            observed = int(getattr(dut, port_name).value)
+        except Exception:
+            continue
+        chart_state = decode.get(observed, f"<unknown:0b{{observed:b}}>")
+        path = _CHART_PATHS.get(chart_state, [_CHART_NAME, chart_state])
+        writer.record_cycle(
+            cycle=cycle,
+            chart_state=chart_state,
+            chart_path=path,
+            signal=f"dut.{{port_name}}",
+            region=region_name or "",
+        )
 
 
 {funcs_block}
@@ -1112,6 +1167,16 @@ async def test_vector_{slug}(dut):
     # Created at test start; closed in the `finally` so the file is
     # well-formed even when the test body raises.
     writer = AnnotationWriter(test_name="test_vector_{slug}")
+    # SOS-08-G wave-3a / PCDN-G-005: per-cycle density opt-in. When
+    # the writer's density resolved to "cycle" (env var
+    # `SOS_ANNOTATION_DENSITY=cycle`) spawn the per-cycle recorder
+    # coroutine so every simulator tick emits one annotation record
+    # naming the currently-active chart state. The recorder is killed
+    # implicitly at test teardown (cocotb cancels pending tasks); the
+    # writer's line-buffered file handle ensures every record reaches
+    # disk on its trailing newline per PCDN-G-006.
+    if writer.density == "cycle":
+        cocotb.start_soon(_per_cycle_record(dut, writer))
     cycle = 0
     try:
         await _apply_reset(dut)
@@ -1291,6 +1356,18 @@ async def test_vector_{slug}(dut):
     cocotb.start_soon(Clock(dut.clk, _CLOCK_PERIOD_NS, units="ns").start())
 
     writer = AnnotationWriter(test_name="test_vector_{slug}")
+    # SOS-08-G wave-3a / PCDN-G-005: per-cycle density opt-in for
+    # parallel charts. One recorder per region so each region's
+    # annotation stream is tagged with its own region name and
+    # filterable at the review-surface layer (SOS-08-G §6 (d)).
+    # Recorders read `dut.current_state_<region>` per SOS-08-C §6.10
+    # and decode via the per-region encoding map embedded in
+    # `_REGION_STATE_ENCODINGS`.
+    if writer.density == "cycle":
+        for _region_name in _REGION_STATE_ENCODINGS:
+            cocotb.start_soon(
+                _per_cycle_record(dut, writer, region_name=_region_name)
+            )
     cycle = 0
     # Per-region map: initial state → fallback when
     # `expected_terminal_states` lacks a region entry.

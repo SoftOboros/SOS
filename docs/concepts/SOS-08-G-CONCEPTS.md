@@ -506,3 +506,52 @@ Wave-1 §15 named "full GUI integration" as a wave-2 candidate. Wave-2 does NOT 
 **Cited PCDNs**: PCDN-G-wave1-004 (closed); PCDN-G-wave1-005 (closed); PCDN-G-002 (chart_path max depth = 8, enforced by walker); SOS-08-D §6.6 SOS-FAIL macro emit format (consumed by post_annotations.py); INV-S-HDL-G-2/-3/-4/-6.
 
 Status: 🟢 **wave-2 complete** — nested chart_path walking + SVA invariant_id integration land cleanly. Wave-3 picks up the remaining two wave-1 deferred candidates (per-cycle density actual implementation + filename-prefix coordination by construction) plus full GUI integration (GTKWave TCL extension + Surfer Rust/WASM plugin) as a focused multi-commit family.
+
+### 2026-05-24 — Impl wave-3a: per-cycle density actual implementation (Ira)
+
+Wave-3a closes the first of the two wave-1 deferred candidates:
+
+- **PCDN-G-wave1-002 (per-cycle density actual implementation)** → ✅ landed. The emitted `@cocotb.test()` body now spawns a per-`RisingEdge(dut.clk)` recorder coroutine when `writer.density == "cycle"` (i.e., the `SOS_ANNOTATION_DENSITY=cycle` env var is set). Each tick emits one `writer.record_cycle(...)` record naming the currently-active chart state, decoded from `dut.current_state` (or `dut.current_state_<region>` for parallel charts) via the embedded encoding map.
+
+**Wave-3a implementation surface**:
+
+- **`_per_cycle_record(dut, writer, region_name=None)`** — async coroutine emitted at module level in `test_<chart>_fsm.py` (right after `_apply_reset`). Inverts the encoding map (`_STATE_ENCODING` for single-region; `_REGION_STATE_ENCODINGS[region_name]` for parallel-region recorders), loops `await RisingEdge(dut.clk)`, reads the chart-state observable port, and emits one `writer.record_cycle()` per tick. Unknown one-hot values surface as a literal `<unknown:0bNN>` chart_state string so decode failures are visible at review-surface, never silently dropped.
+- **Encoding-map import**: the emitted test module now imports `_STATE_ENCODING`, `_REGION_STATE_ENCODINGS`, `_CHART_NAME`, `_CHART_PATHS` from `_cocotb_helpers` so the coroutine can decode + path-lookup at runtime.
+- **Spawn site — single-region** (`_emit_one_test_function`): `cocotb.start_soon(_per_cycle_record(dut, writer))` gated by `if writer.density == "cycle":` immediately after the `AnnotationWriter` is constructed.
+- **Spawn site — parallel** (`_emit_parallel_test_function`): one `cocotb.start_soon(_per_cycle_record(dut, writer, region_name=_region_name))` per region (iterating `_REGION_STATE_ENCODINGS`), tagging each region's annotation stream with its own `region` field for per-region filtering at the review surface (SOS-08-G §6 (d)).
+
+**Wave-3b remaining (the other wave-1 deferred candidate)**:
+
+- **PCDN-G-wave1-003 (filename-prefix coordination by construction)**: cocotb Makefile fragment that binds the simulator's dump path to the writer's annotation path. Currently caller-coordinated; wave-3b makes it by construction.
+
+**Wave-3c boundary (full GUI integration)**: GTKWave TCL extension + Surfer Rust/WASM plugin remain wave-3c as named in the wave-2 §15 entry. Wave-3a does NOT cross that boundary.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-G-2** (chart-vocabulary mandatory): retained — per-cycle records carry the same six normative fields as per-event records (`cycle`, `signal`, `chart_state`, `chart_path`, `region`; `transition_id=None` per `record_cycle` shape per §5.2 — per-cycle records do not name a transition, they sample the current state).
+- **INV-S-HDL-G-3** (schema-version header at line 0): preserved by `AnnotationWriter.__init__`; the recorder writes records AFTER the header has been emitted.
+- **INV-S-HDL-G-5** (generation co-located with test body, not a post-process step): preserved — the recorder is spawned INSIDE the `@cocotb.test()` body, runs concurrently with the test coroutine, terminates implicitly at test teardown.
+- **PCDN-G-005** (per-event default; cycle is opt-in): preserved — the spawn is gated by the writer's resolved density attribute, which defaults to `event`. The wave-1 `record_transition` call sites remain untouched, so the default-density emission shape is unchanged.
+- **PCDN-G-006** (line-buffered flush): unchanged — `record_cycle` uses the same line-buffered file handle as `record_transition`, so every per-cycle record reaches disk on its trailing newline.
+
+**Test count**: 14 new tests in `TestWave3aPerCycleDensity`:
+
+- Coroutine emitted at module level + signature matches.
+- Encoding-map imports present.
+- Decode strategy: inverted-map dict comprehension.
+- Unknown-value fallback to literal `<unknown:0bNN>` string.
+- Records emitted via `writer.record_cycle` (not `record_transition`).
+- Loop: `while True: await RisingEdge(dut.clk)`.
+- Single-region spawn: `cocotb.start_soon(_per_cycle_record(dut, writer))` gated by density check.
+- Single-region MUST NOT iterate region encoding map.
+- Parallel: one spawn per region, gated by density check.
+- Per-event default unchanged (`record_transition` still emitted).
+- Single-region + parallel test modules still parse as valid Python.
+- Wave-1 `_DENSITY_ENV_VAR` / `os.environ.get` gate on writer unchanged.
+- Wave-1 `record_cycle` method on `AnnotationWriter` unchanged.
+
+**Test suite**: 451/451 passing (437 prior + 14 wave-3a).
+
+**Cited PCDNs**: PCDN-G-wave1-002 (closed); PCDN-G-005 (per-event default preserved); PCDN-G-006 (line-buffered flush preserved); INV-S-HDL-G-2/-3/-5.
+
+Status: 🟢 **wave-3a complete** — per-cycle density opt-in is wired by construction. Wave-3b picks up filename-prefix coordination (the second deferred candidate); wave-3c picks up full GUI integration.

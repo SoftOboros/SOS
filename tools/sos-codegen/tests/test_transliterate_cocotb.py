@@ -1483,3 +1483,165 @@ class TestPostAnnotationsEndToEnd:
         import json as _json
         assert "_meta" in _json.loads(lines[0])
         assert len(lines) == 3
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-G wave-3a: per-cycle density actual implementation (§15
+# 2026-05-24).
+# ---------------------------------------------------------------------------
+
+
+class TestWave3aPerCycleDensity:
+    """SOS-08-G wave-3a: PCDN-G-005 cycle-density opt-in is now wired
+    by construction.
+
+    Wave-1 + wave-2 read `SOS_ANNOTATION_DENSITY` and exposed
+    `record_cycle` on `AnnotationWriter`, but the emitted
+    `@cocotb.test()` body did NOT spawn a per-`RisingEdge(dut.clk)`
+    callback. Wave-3a lands the callback wiring:
+
+    - The test module imports `_STATE_ENCODING`, `_REGION_STATE_ENCODINGS`,
+      `_CHART_NAME`, `_CHART_PATHS` from `_cocotb_helpers`.
+    - A `_per_cycle_record(dut, writer, region_name=None)` coroutine is
+      emitted at module level (right after `_apply_reset`).
+    - Single-region: `cocotb.start_soon(_per_cycle_record(dut, writer))`
+      when `writer.density == "cycle"`.
+    - Parallel: one `cocotb.start_soon(_per_cycle_record(dut, writer,
+      region_name=...))` per region (iterating `_REGION_STATE_ENCODINGS`).
+
+    Invariants upheld: INV-S-HDL-G-5 (co-located with test body, not a
+    post-process step); INV-S-HDL-G-2 (per-cycle records carry the same
+    chart-vocabulary fields as per-event records); PCDN-G-005 (per-event
+    remains the default; cycle is opt-in).
+    """
+
+    def _single_files(self) -> dict:
+        return render_target(_simple_chart(), {"chart_name": "demo"})
+
+    def _parallel_files(self) -> dict:
+        return render_target(_chart_with_parallel(),
+                             {"chart_name": "parallels"})
+
+    # --- module-level emission --- #
+
+    def test_per_cycle_record_coroutine_emitted(self):
+        """The `_per_cycle_record` coroutine MUST be emitted at module
+        level in the test module so both single-region and parallel
+        test functions can spawn it."""
+        test = self._single_files()["tests/demo/test_demo_fsm.py"]
+        assert "async def _per_cycle_record(dut, writer, region_name=None):" in test
+
+    def test_per_cycle_record_imports_encoding_maps(self):
+        """The test module imports the encoding maps + chart-path
+        helpers from `_cocotb_helpers` so the per-cycle recorder can
+        decode the one-hot RTL value back to chart vocabulary."""
+        test = self._single_files()["tests/demo/test_demo_fsm.py"]
+        assert "from _cocotb_helpers import (" in test
+        assert "_STATE_ENCODING" in test
+        assert "_REGION_STATE_ENCODINGS" in test
+        assert "_CHART_NAME" in test
+        assert "_CHART_PATHS" in test
+
+    def test_per_cycle_record_decodes_one_hot_via_inverted_map(self):
+        """The recorder inverts the encoding map to decode the RTL
+        one-hot value back to chart-state id at runtime."""
+        test = self._single_files()["tests/demo/test_demo_fsm.py"]
+        assert (
+            "decode = {value: state_id for state_id, value in encoding.items()}"
+            in test
+        )
+
+    def test_per_cycle_record_unknown_value_surfaces_literal(self):
+        """Decode failures MUST NOT silently drop records — the
+        recorder emits a literal `<unknown:0bNN>` chart_state so the
+        review surface sees the decode failure."""
+        test = self._single_files()["tests/demo/test_demo_fsm.py"]
+        assert "decode.get(observed, f\"<unknown:0b{observed:b}>\")" in test
+
+    def test_per_cycle_record_calls_writer_record_cycle(self):
+        """The recorder invokes `writer.record_cycle` (NOT
+        `record_transition`) — per-cycle stream is for cycle-density
+        opt-in only."""
+        test = self._single_files()["tests/demo/test_demo_fsm.py"]
+        assert "writer.record_cycle(" in test
+
+    def test_per_cycle_record_loops_on_rising_edge(self):
+        """Inside the coroutine the recording loop awaits
+        `RisingEdge(dut.clk)` per simulator tick."""
+        test = self._single_files()["tests/demo/test_demo_fsm.py"]
+        assert "while True:" in test
+        assert "await RisingEdge(dut.clk)" in test
+
+    # --- single-region spawn site --- #
+
+    def test_single_region_spawns_recorder_when_cycle_density(self):
+        """Single-region test body spawns the per-cycle recorder
+        coroutine via `cocotb.start_soon` gated by
+        `writer.density == "cycle"`."""
+        test = self._single_files()["tests/demo/test_demo_fsm.py"]
+        assert "if writer.density == \"cycle\":" in test
+        assert "cocotb.start_soon(_per_cycle_record(dut, writer))" in test
+
+    def test_single_region_does_not_spawn_per_region_recorders(self):
+        """Single-region test body MUST NOT spawn per-region
+        recorders (no regions to iterate)."""
+        test = self._single_files()["tests/demo/test_demo_fsm.py"]
+        # The single-region spawn site uses the no-region call shape.
+        assert "_per_cycle_record(dut, writer)" in test
+        # And does not iterate the region encoding map.
+        assert "for _region_name in _REGION_STATE_ENCODINGS:" not in test
+
+    # --- parallel-chart spawn site --- #
+
+    def test_parallel_spawns_one_recorder_per_region(self):
+        """Parallel test body iterates `_REGION_STATE_ENCODINGS` and
+        spawns one recorder per region, tagging each with its region
+        name so the resulting annotations are filterable per-region."""
+        test = self._parallel_files()["tests/parallels/test_parallels_fsm.py"]
+        assert "if writer.density == \"cycle\":" in test
+        assert "for _region_name in _REGION_STATE_ENCODINGS:" in test
+        assert (
+            "cocotb.start_soon(\n"
+            "                _per_cycle_record(dut, writer, region_name=_region_name)"
+            in test
+        )
+
+    # --- backwards compatibility (per-event default) --- #
+
+    def test_per_event_default_unchanged(self):
+        """PCDN-G-005 freezes per-event as the default. The default
+        path — no `SOS_ANNOTATION_DENSITY=cycle` env var — MUST still
+        emit the wave-1 `record_transition` calls without the
+        per-cycle recorder running. The gate is runtime; the emitted
+        test body MUST still contain the per-event `record_transition`
+        call sites unchanged."""
+        test = self._single_files()["tests/demo/test_demo_fsm.py"]
+        assert "writer.record_transition(" in test
+
+    def test_emitted_test_module_parses(self):
+        """The emitted test module — with the per-cycle recorder
+        wired in — MUST still parse as valid Python 3.10+ syntax."""
+        test = self._single_files()["tests/demo/test_demo_fsm.py"]
+        ast.parse(test)
+
+    def test_emitted_parallel_test_module_parses(self):
+        """The emitted parallel test module — with per-region
+        recorders wired in — MUST still parse as valid Python 3.10+
+        syntax."""
+        test = self._parallel_files()["tests/parallels/test_parallels_fsm.py"]
+        ast.parse(test)
+
+    # --- writer/helper integration (no walker change required) --- #
+
+    def test_writer_density_env_var_unchanged(self):
+        """The wave-1 env-var read on `AnnotationWriter` MUST remain
+        — wave-3a only adds the consumer side, not the gate."""
+        helpers = self._single_files()["tests/demo/_cocotb_helpers.py"]
+        assert "_DENSITY_ENV_VAR = \"SOS_ANNOTATION_DENSITY\"" in helpers
+        assert "os.environ.get(self._DENSITY_ENV_VAR, \"event\")" in helpers
+
+    def test_helpers_still_expose_record_cycle(self):
+        """The wave-1 `record_cycle` method on `AnnotationWriter`
+        MUST remain — wave-3a wires the caller, not the writer."""
+        helpers = self._single_files()["tests/demo/_cocotb_helpers.py"]
+        assert "def record_cycle(" in helpers
