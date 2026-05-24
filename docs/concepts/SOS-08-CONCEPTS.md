@@ -339,3 +339,29 @@ All 11 PCDNs walked and resolved:
 | **011 — Top-level wrapper generation** | ✅ **Generated parameterized wrapper template** in `build/`, NOT a tracked source. Per-board overrides (Lattice ECP5 dev board, generic FPGA dev board, ASIC tape-out wrapper) are board-specific files the user maintains. Top-level wrapper is a generated artifact per INV-SOS-A. |
 
 Status: 🟢 **ratified**. SOS-08 sub-phase concept-doc cycles (SOS-08-A through SOS-08-H) unblocked. SOS-09 (membrane) depends on SOS-08-A/B existing; that dependency chain begins clearing as SOS-08-A ratifies.
+
+### 2026-05-23 — Wave-1 conformance review (Ira)
+
+All eight sub-phases (SOS-08-A through SOS-08-H) ratified and implemented to wave-1 surface. The §12 acceptance checklist was audited and the result captured in [`SOS-08-WAVE1-CONFORMANCE.md`](./SOS-08-WAVE1-CONFORMANCE.md) — a sibling **informative** status doc that walks each gate against the as-built source tree.
+
+**§12 gate status (summary; full evidence in the conformance doc)**:
+
+| Gate | Status | Note |
+|---|---|---|
+| (a) PCDN-SOS-08-001..011 resolved | ✅ | All 11 resolved in the 2026-05-23 ratification entry above |
+| (b) Each sub-phase concept doc ratified | ✅ | All eight (SOS-08-A through -H) carry `Status: 🟢 ratified 2026-05-23` |
+| (c) ≥1 L0 primitive: portable RTL + cocotb + SVA | ✅✅ | All 16 L0+L1 primitives have `rtl/<primitive>/` + `tb/<primitive>/` (over-satisfied) |
+| (d) Chart→VHDL+SV emission tested on ≥1 chart | ✅ | 45 tests in `test_transliterate_hdl_{vhdl,sv}.py` |
+| (e) Bench validation on Lattice ECP5 dev board | ⏸ | Deferred to dedicated bench session (per §10's gate-(e) wave-2 entry in the conformance doc) |
+| (f) INV-SOS-A..H cited in each sub-phase | ✅ | Counts 4–18 across all eight docs |
+| (g) SOS-06 §15 amendment extending 7 metrics to HDL | ⏸ | Promised in this umbrella's §10; will co-land with gate (e) bench session (per the conformance doc's wave-2 plan) |
+
+**Conformance position**: 5 of 7 gates satisfied; 2 deferred with documented landing plans. Cross-sub-phase invariants INV-S-HDL-1..5 all upheld across the wave-1 surface (§4 of the conformance doc audits each). Cross-walker mirror equivalence (SOS-08-D ↔ SOS-08-E SVA bind file byte-identical) verified by test. The "one chart, three emission paths" claim from §5.4 is operational.
+
+**Wave-1 family stats**:
+- **302/302 codegen + viewer tests passing** across the whole `tools/sos-codegen/` surface.
+- **40+ PCDNs resolved** across the family (11 umbrella + 8 SOS-08-D walkthrough + 5 SOS-08-G walkthrough + per-sub-phase ratification PCDNs).
+- **All five sub-phase walkers** (`transliterate_hdl_{vhdl,sv}.py`, `transliterate_cocotb.py`, `transliterate_sva_bind.py`, `transliterate_hdl_sv_tb.py`, `transliterate_hdl_uvm_seq.py`) plus the SOS-08-G viewer extensions (`tools/sos-codegen/viewers/{gtkwave,surfer}/`) shipped.
+- **Three sub-phase walkers** (SOS-08-E, SOS-08-F, SOS-08-G AnnotationWriter) carry by-construction invariant audits — emitted text violating the named INV-S-HDL-{E,F,G}-N invariants raises `InvariantAuditError` at codegen time rather than at downstream test compile/simulation time.
+
+Status: 🟢 **wave-1 conformance review complete**. SOS-08 umbrella wave-1 landing is closed; wave-2 work proceeds against an unambiguous spec / impl baseline. See the conformance doc §8 for the consolidated wave-2 candidate list.
