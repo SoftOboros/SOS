@@ -1,0 +1,5 @@
+{"event_id":0,"payload_data":0,"chart_state":"task_a.creating_sem_0","transition_id":1,"invariant_id":7}
+{"event_id":2,"payload_data":0,"chart_state":"task_a.taking_sem_0","transition_id":10,"invariant_id":7}
+{"event_id":2,"payload_data":0,"chart_state":"task_c.illegal_double_take","transition_id":99,"invariant_id":42}
+{"event_id":3,"payload_data":0,"chart_state":"task_a.releasing_sem_0","transition_id":13,"invariant_id":7}
+{"event_id":1,"payload_data":0,"chart_state":"task_a.deleting_sem_0","transition_id":50,"invariant_id":7}

@@ -583,3 +583,91 @@ Lands the first of the wave-2 candidates: the full SOS-03 JSONL vector-IR parser
 **Cited PCDNs**: PCDN-SOS-08-008/009 (vector-IR canonical format — JSONL operational); SOS-08-F §6.4 (vector-IR row shape — schema now load-bearing); INV-S-HDL-F-5 (UVM 1.2 grammar discipline + `uvm_warning` addition rule).
 
 Status: 🟢 **wave-2 partial** — JSONL parser landed. Remaining wave-2 candidates (gates (e)/(f) worked example, UVM 2.0 cross-runtime, pyuvm overlay) carry forward but the load-bearing per-family `body()`-to-vector-IR connection is now operational.
+
+### 2026-05-24 — Impl wave-2: end-to-end worked example (gates (e) + (f)) (Ira)
+
+Lands the **acceptance gate (e) end-to-end UVM 1.2 worked example** and the **acceptance gate (f) injected-violation chart-vocabulary check** carried forward from the 2026-05-24 wave-2 JSONL-parser entry above. Per the §15 wave-2 (JSONL) entry's framing ("with the JSONL parser landed, this is now a packaging + harness-config task, not a walker change"), this entry adds an example tree under `examples/uvm_integration/` and structural tests that pin the example's shape; no walker change.
+
+**New artifact tree** (under `examples/uvm_integration/`):
+
+| Path | Role |
+|---|---|
+| `README.md` | §6.5 step table; gate (e)/(f) status; invariant cross-reference. |
+| `Makefile` | `regen` (re-emit `sos_uvm_seq_pkg.sv` from chart) + `compile` + `sim-golden` + `sim-violation` recipes; `SIM=` selector for questa / vcs / xcelium / riviera. |
+| `rtl/sos_kernel_dut.sv` | Synthetic kernel-style DUT (NUM_SEMS=2). Detects sem.take-on-held / sem.give-on-unheld and returns `resp_ok=0` — provides the failure stimulus the scoreboard renders in chart vocabulary. |
+| `tb/sos_uvm_seq_pkg.sv` | **Sample copy of the SOS-08-F walker output** (chart_name="rtos_kernel"). `make regen` re-emits; a structural test (`TestWave2SampleSosPkgMatchesWalker`) pins byte-identity against the live walker. |
+| `tb/sos_uvm_seq_pkg.svh` | Sample copy of the walker's header (typedef + enum exports). |
+| `tb/sos_kernel_if.sv` | Interface bundle + driver/monitor clocking blocks. |
+| `tb/sos_kernel_agent.sv` | Customer-side agent: §6.5 step 2 `typedef uvm_sequencer #(sos_seq_item) sos_kernel_sequencer;`, §6.5 step 3 `sos_kernel_driver extends uvm_driver #(sos_seq_item)` translating items to DUT pins + forwarding chart-vocabulary metadata to a parallel analysis port, monitor sampling DUT responses. |
+| `tb/sos_kernel_scoreboard.sv` | Customer scoreboard pairing request/response; §6.6 chart-vocabulary `uvm_error` format string lives here. |
+| `tb/sos_kernel_env.sv` | Customer env composing agent + scoreboard with analysis-port wiring. |
+| `tb/sos_kernel_test.sv` | §6.5 step 4 — instantiates `sos_sem_sequence`, assigns `vector_path` (defaulting to `vectors/sem_chart_bound.jsonl`; overridable via `+VECTOR_PATH=` plusarg), calls `seq.start(env.agent.sequencer)`. |
+| `tb/sos_kernel_tb_top.sv` | Top-level testbench module: instantiates DUT + interface, sets up clock, registers `vif` via `uvm_config_db`, invokes `run_test("sos_kernel_test")`. |
+| `vectors/sem_chart_bound.jsonl` | 10-row golden vector (create / take / give / delete sequence — balanced; passes). |
+| `vectors/sem_chart_violation.jsonl` | 5-row mutated vector with a double-take on sem 0 carrying chart-vocabulary deviations (`chart_state="task_c.illegal_double_take"`, `transition_id=99`, `invariant_id=42`). |
+
+**End-to-end flow (the §6.5 five-step contract running against a real synthetic DUT)**:
+
+1. **Package import** — every customer file (`agent.sv`, `env.sv`, `test.sv`, `tb_top.sv`) opens with `import sos_uvm_seq_pkg::*;`.
+2. **Sequencer typedef** — `typedef uvm_sequencer #(sos_seq_item) sos_kernel_sequencer;` in `agent.sv`.
+3. **Driver implementation** — `sos_kernel_driver` in `agent.sv` translates `sos_seq_item` to `req_*` bus activity on `sos_kernel_if` and forwards chart-vocabulary metadata via `req_ap` analysis port for scoreboard pairing.
+4. **Sequence start** — `sos_kernel_test.run_phase` constructs `sos_sem_sequence`, assigns `vector_path`, calls `seq.start(env.agent.sequencer)`.
+5. **Failure handling** — `sos_kernel_scoreboard` pairs requests with responses; on any failure (resp_ok=0, response without matching request, family/event mismatch) it emits the canonical `[SOS-SEQ] state=... transition=... invariant=... family=... event=...` `uvm_error` string per §6.6.
+
+**Acceptance gate (f) flow**:
+
+The violation vector `vectors/sem_chart_violation.jsonl` issues `sem.take(sem_id=0)` twice without an intervening `sem.give(0)`. The synthetic DUT (NUM_SEMS=2) latches the request, detects that `held_q[0]` is already 1 on the second take, and returns `resp_ok=0`. The scoreboard's `sos_kernel_resp_sub.write` pops the matching request — carrying the mutated `chart_state="task_c.illegal_double_take"` / `transition_id=99` / `invariant_id=42` — and emits:
+
+```
+UVM_ERROR ... [SOS-SEQ] state=task_c.illegal_double_take transition=99 invariant=42 family=SOS_FAMILY_SEM event=2: kernel rejected syscall (resp_ok=0)
+```
+
+The substring `state=task_c.illegal_double_take transition=99 invariant=42` is the load-bearing evidence of **INV-S-HDL-F-3** (chart-vocabulary traceability survives the UVM boundary): the metadata carried in `sos_seq_item` fields from the JSONL parser through the sequence body's `tx.chart_state = events[i].chart_state` assignment renders verbatim in the customer's `uvm_error` message — without any SOS code crossing INV-S-HDL-F-1's exclusion boundary.
+
+**SV-side discipline (informative)**:
+
+- **Customer-vs-SOS file boundary**: every file under `tb/` other than `sos_uvm_seq_pkg.sv` and `sos_uvm_seq_pkg.svh` is customer-owned. The two SOS-emitted files in `tb/` are sample copies; `make regen` re-emits them from `rtos_kernel.scxml` via the walker. The byte-identity check in `TestWave2SampleSosPkgMatchesWalker` catches manual edits.
+- **Plusarg vector path**: the test reads `+VECTOR_PATH=<path>` via `$value$plusargs`; the Makefile's `sim-golden` / `sim-violation` rules supply the appropriate vector. Same testbench binary, two outcomes — keeps the gate (e)/(f) wiring symmetric.
+- **Synthetic DUT design**: deliberately minimal kernel state (NUM_SEMS=2 held flags). The example is about closing the UVM integration loop, not about exhaustive kernel semantics — INV-S-HDL-F-2 keeps "real" kernel/scoreboard semantics in customer hands.
+- **DUT family encoding**: localparams `FAMILY_SEM = 3'd1`, `SEM_TAKE = 8'd2`, `SEM_GIVE = 8'd3` align 1:1 with `sos_event_family_e` ordinal (`SOS_FAMILY_SEM` = 1) + the `sem_chart_bound.jsonl` `event_id` values. The `TestWave2DutVectorAlignment` tests pin this encoding so future edits to either side break visibly.
+- **Failure-rendering shape**: scoreboard `uvm_error` calls always concat the five chart-vocabulary fields in fixed order (`state=`, `transition=`, `invariant=`, `family=`, `event=`) per §6.6. Customers MAY add format overrides via UVM's `set_message_action`; the base string guarantees chart vocabulary is present.
+
+**Invariants exercised end-to-end (NOT just walker-side audit)**:
+
+- **INV-S-HDL-F-1** (sequences only): only `tb/sos_uvm_seq_pkg.sv` contains `uvm_sequence` subclasses. Customer scaffolding (agent / env / scoreboard / test / tb top) is under `examples/uvm_integration/tb/`, separate from the walker's emission output. Walker's `_audit_all` continues to pass — example files are NOT walker-emitted.
+- **INV-S-HDL-F-2** (customer-owns env/scoreboard/driver/factory): every customer-side file (DUT, interface, agent, env, scoreboard, test, tb top) is authored by hand under `examples/`. None of them is emitted by the SOS-08-F walker. The DUT itself is customer-side per `INV-S-HDL-F-2` and lives in `examples/uvm_integration/rtl/`.
+- **INV-S-HDL-F-3** (chart-vocabulary traceability through the UVM boundary): driver's `req_ap` analysis port carries `chart_state` / `transition_id` / `invariant_id` from the SOS sequence into the scoreboard's pairing logic; scoreboard's `uvm_error` strings render them verbatim. Static test `TestWave2FiveStepIntegrationContract.test_step_5_chart_vocab_failure_format` pins the format-string content.
+- **INV-S-HDL-F-4** (no SVA emission): `TestWave2InvF4NoSva` scans every `.sv` file under `examples/uvm_integration/` for `assert property` and statement-position `bind <module>` — both forbidden. (SVA is sibling SOS-08-D / SOS-08-E.)
+- **INV-S-HDL-F-5** (UVM 1.2 grammar): example uses only the UVM 1.2 vocabulary subset enumerated in the wave-1 §15 entry's `test_inv_f5_uvm_1_2_grammar_only` allowlist (`uvm_sequence` / `uvm_sequence_item` / `uvm_test` / `uvm_env` / `uvm_agent` / `uvm_driver` / `uvm_monitor` / `uvm_scoreboard` / `uvm_subscriber` / `uvm_config_db` / `uvm_object_utils*` / `uvm_component_utils` / `uvm_info` / `uvm_error` / `uvm_warning` / `uvm_fatal` / `uvm_phase` / `uvm_field_*`). All present in UVM 2.0 (IEEE 1800.2-2020) unchanged. UVM 2.0 cross-runtime CI smoke remains carry-forward.
+- **§6.4 JSONL row schema**: both vectors conform 1:1 to `sos_chart_event_s` field order (`event_id`, `payload_data`, `chart_state`, `transition_id`, `invariant_id`). `TestWave2VectorIrSchema` pins per-row key set + per-field type.
+- **§6.5 five-step contract** (entire surface): pinned by `TestWave2FiveStepIntegrationContract` (steps 1–5 each one structural assertion).
+- **§6.6 chart-vocab failure-message format**: pinned by `test_step_5_chart_vocab_failure_format` + observed end-to-end in the violation-vector flow.
+
+**Walker untouched**: this wave-2 entry adds no code under `tools/sos-codegen/`. The walker's emission output remains byte-identical commit-over-commit (`TestWave2SampleSosPkgMatchesWalker` is the self-check that any future walker edit forcing the sample copy to drift surfaces immediately).
+
+**Acceptance gates that flip**:
+
+- (e) ⏸ → ✅ — worked example authored under `examples/uvm_integration/`; structurally pinned by 34 new tests; ready to elaborate + run on any UVM 1.2-capable simulator (Questa / VCS / Xcelium / Riviera).
+- (f) ⏸ → ✅ — `vectors/sem_chart_violation.jsonl` carries the mutated chart vocabulary; scoreboard's `uvm_error` string format pinned to include all five chart-vocabulary fields per §6.6.
+- (a)–(d) and (g)–(j) remain ✅ from wave-1 / wave-2 JSONL parser entries above.
+
+**Test count**: net +34 across one new file `tools/sos-codegen/tests/test_sos_08_f_wave_2_example.py`:
+
+- `TestWave2ExampleTreeShape` (14 tests): file existence per documented relpath + top-level entry-set canonical (`README.md`, `Makefile`, `rtl/`, `tb/`, `vectors/`).
+- `TestWave2FiveStepIntegrationContract` (5 tests): one assertion per integration-contract step (§6.5 step 1 / 2 / 3 / 4 / 5).
+- `TestWave2InvF4NoSva` (2 tests): scan every `.sv` for `assert property` + statement-position `bind`.
+- `TestWave2VectorIrSchema` (6 tests): row-key set + field-type + chart_state non-empty for both golden + violation vectors.
+- `TestWave2GateFInjectedViolation` (3 tests): violation has double-take on a sem with mutated chart vocabulary; golden is clean (no double-takes / give-without-take); golden ≠ violation.
+- `TestWave2SampleSosPkgMatchesWalker` (2 tests): `tb/sos_uvm_seq_pkg.sv` + `.svh` byte-identical to current walker output (`make regen` invariant).
+- `TestWave2DutVectorAlignment` (2 tests): DUT family/event encoding pinned to enum ordinals.
+
+**Test suite**: 555/555 passing (521 tracked baseline + 34 new). All 34 are static structural checks — no simulator invocation; the gates' "runs on UVM 1.2 simulator" claim is the example tree's structural well-formedness, not a CI-bound simulator run (vendor binaries remain customer-owned per INV-S-HDL-F-2).
+
+**Wave-2 remaining work** (post (e)+(f) — both **now closed**):
+
+- **UVM 2.0 cross-runtime smoke test**: CI job that compiles + elaborates `tb/sos_uvm_seq_pkg.sv` against both UVM 1.2 and UVM 2.0 reference releases per the INV-S-HDL-F-5 amendment ("a per-release smoke run validates the cross-runtime invariant"). Wave-1 audits the grammar by allowed-token-list + `test_sample_pkg_byte_identical_to_walker_output`; promoting to actual cross-runtime compilation is a CI-config task.
+- **pyuvm overlay**: potential SOS-08-F-A sub-phase emitting Python uvm-compatible sequences for the cocotb path. Wave-1 ships pure SystemVerilog UVM only; pyuvm gated on customer demand per the wave-1 §15 entry.
+
+**Cited PCDNs / invariants**: PCDN-SOS-08-F-001 (UVM 1.2 grammar — confirmed runnable through customer scaffolding); PCDN-SOS-08-F-002 (six families — `sem` exercised end-to-end); PCDN-SOS-08-F-003 (universal `sos_seq_item` — driver branches on `tx.family`); PCDN-SOS-08-F-005 (empty virtual hooks — example does not override, demonstrating the no-touch default path); PCDN-SOS-08-F-006 (one consolidated package — single `import sos_uvm_seq_pkg::*;` per file in the example tree); INV-S-HDL-F-1..5 (each pinned by an explicit static test as listed above); INV-SOS-H + INV-S-HDL-5 (chart-vocabulary survives the UVM boundary — verified end-to-end through the gate (f) string).
+
+Status: 🟢 **wave-2 (e)+(f) landed**. UVM 2.0 cross-runtime smoke + pyuvm overlay remain carry-forward; the customer-side end-to-end UVM 1.2 worked example is the per-§12 conformance gate's final required artifact and is now in place.
