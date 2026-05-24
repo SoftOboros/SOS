@@ -1314,6 +1314,10 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
                             "direction": direction,
                         }
                     )
+                # SOS-08-C wave-3-b: surface per-region raise events to
+                # the chart-top wrapper so it exposes
+                # `event_<region>_<name>_send_valid` boundary ports.
+                raise_events_list = _collect_region_raise_events(r)
                 region_modules.append(
                     {
                         "name": _safe_ident(r.name),
@@ -1321,6 +1325,7 @@ def _emit_chart_top_wrapper(chart: HdlChart) -> str:
                         "clock_domain": r.clock_domain or "main",
                         "datamodel_signals": signals,
                         "state_width": len(r.states),
+                        "raise_events": raise_events_list,
                     }
                 )
             cross_domain_signals = [

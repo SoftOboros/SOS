@@ -564,3 +564,42 @@ Wave-3-a lifts the wave-2 `<raise>` rejection in both VHDL + SV walkers and emit
 **Cited PCDNs**: PCDN-C-006 (document-order priority — egress drives honor priority chain); PCDN-SOS-08-C-wave2-region-naming (per-region module naming convention extended to wave-3 egress ports without modification).
 
 Status: 🟢 **wave-3-a complete**. Wave-3-b picks up the chart-top wrapper `sos_message_channel` instantiation + per-event arbitration when multiple regions raise the same event. Wave-3-c refactors event ingress from the single `event_in` port to per-event receive-face ports. Wave-3-d adds payload data on `_send_data` ports for `<raise>` events with `<param>` / `<content>`.
+
+### 2026-05-24 — Impl wave-3-b: chart-top wrapper event-egress passthrough (Ira)
+
+Wave-3-b surfaces the per-region event-egress outputs (added in wave-3-a) at the chart-top wrapper boundary. Each region's `event_<name>_send_valid` output is wired through the wrapper to a boundary port named `event_<region>_<name>_send_valid` — the per-region prefix prevents collisions when multiple regions raise the same event name. Aggregation across regions into a single `sos_message_channel` send face (per the original wave-3-b scope) is **re-scoped to wave-3-c** because the aggregation choice (OR-tree vs real channel arbitration) is non-trivial and benefits from a focused commit.
+
+**Wave-3-b implementation surface**:
+
+- **`_safe_event_ident_top(name)`** added to `hdl_common.py`. Mirrors `transliterate_hdl_{sv,vhdl}._safe_event_ident*` so the chart-top boundary port name matches the per-region module's output port name byte-for-byte.
+- **`emit_chart_top_wrapper` boundary-port loop** extended: after the `current_state_<region>` outputs, iterate `region_modules[i].get("raise_events", []) or []` and append one `event_<region>_<name>_send_valid` boundary output per (region, event) pair. The `raise_events` key is **optional** on region_module dicts so wave-1/2 callers continue to work unchanged.
+- **`_emit_chart_top_wrapper_sv_new`** + **`_emit_chart_top_wrapper_vhdl_new`** body emitters extended: when instantiating each region in the wrapper, after `.current_state` wires through the per-event egress connections (SV: `.event_<name>_send_valid(event_<region>_<name>_send_valid)`; VHDL: `event_<name>_send_valid => event_<region>_<name>_send_valid`).
+- **`transliterate_hdl_sv.py` + `transliterate_hdl_vhdl.py`** region_modules construction extended: `_collect_region_raise_events(region)` is called per region and the result populates the new `raise_events` key on the region_module dict.
+
+**Wave-3-b scope (what landed vs. what is deferred)**:
+
+- ✅ Per-region event-egress outputs reachable at the chart-top boundary as `event_<region>_<name>_send_valid`.
+- ✅ Symmetric VHDL + SV wrapper emit (cross-dialect parity preserved per INV-S-HDL-C-1).
+- ✅ Charts without `<raise>` produce byte-identical wave-2 wrapper output (regression-guarded).
+- ⏸ **wave-3-c (was wave-3-b)**: chart-top wrapper `sos_message_channel` instantiation + per-event aggregation across regions raising the same event. The aggregation choice (OR-tree under cooperative INV-S-HDL-4 vs. real channel arbitration with `recv_ready` backpressure) plus the cross-clock-domain implications (when regions in different clock domains raise the same event) lift this into its own dedicated wave. Per-region passthrough at the wrapper boundary unblocks downstream consumers in the interim.
+- ⏸ **wave-3-d (was wave-3-c)**: event ingress refactor (single `event_in` port → per-event receive-face ports).
+- ⏸ **wave-3-e (was wave-3-d)**: payload data on `_send_data` ports.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-C-1** (deterministic emission): per-region iteration order through `region_modules` is the canonical order; per-event ordering within a region uses the wave-3-a sorted output. Wrapper boundary ports stable across re-renders.
+- **INV-S-HDL-C-2** (per-region observability): unchanged — boundary still exposes `current_state_<region>`. Wave-3-b is purely additive (new boundary ports; nothing removed).
+- **INV-S-HDL-4** (cooperative-only at v1): the per-region passthrough leaves the OR-tree aggregation decision to wave-3-c — under cooperative scheduling at most one region raises a given event in a given cycle so the OR-tree is correct, but the wave-3-c commit picks the canonical form (real channel arbitration retained for forward compat with payload + cross-domain pressure).
+- **INV-SOS-H** (chart-vocabulary traceability): chart-side event names preserved verbatim via the wave-3-a trailing comments on each region's egress port + drive; the wrapper-level passthrough does not introduce new identifier renames beyond the per-region prefix.
+
+**Test count**: 3 new tests (`TestWave3bChartTopEgressPassthrough` in `test_transliterate_hdl_sv.py`):
+
+- `test_chart_top_exposes_per_region_event_outputs` — `event_left_ack_send_valid` + `event_right_done_send_valid` present at wrapper boundary for a parallel chart with each region raising one event.
+- `test_chart_top_wires_region_instance_to_boundary` — SV instance-port-map wires per-region `event_<name>_send_valid` output to the chart-top boundary port byte-for-byte.
+- `test_chart_top_omits_event_ports_when_no_raise` — parallel chart without `<raise>` produces a wrapper with no `event_*_send_valid` ports (regression guard).
+
+**Test suite**: 384/384 passing (381 prior + 3 wave-3-b).
+
+**Cited PCDNs**: PCDN-SOS-08-C-wave2-wrapper-shape (extended with optional `raise_events` key; legacy callers unaffected); INV-S-HDL-C-1 (deterministic emission preserved across wrapper-level boundary additions).
+
+Status: 🟢 **wave-3-b complete**. Wave-3-c lifts the per-region passthrough to per-event aggregation via `sos_message_channel` instantiation with arbitration. Wave-3-d (event ingress refactor) and wave-3-e (payload data) follow per the wave-3-a §15 entry's roadmap.

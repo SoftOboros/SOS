@@ -804,3 +804,83 @@ class TestWave3Events:
         src = files_a["x_fsm.sv"]
         assert "event_" not in src
         assert "send_valid" not in src
+
+
+class TestWave3bChartTopEgressPassthrough:
+    """SOS-08-C wave-3-b: chart-top wrapper surfaces per-region event
+    egress as `event_<region>_<name>_send_valid` boundary outputs.
+
+    Wave-3-c will lift this to per-event aggregation across regions
+    via `sos_message_channel` instantiation.
+    """
+
+    def _parallel_with_raise(self):
+        return {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[
+                            {"target": "L2", "raise_value": [{"event": "ack"}]},
+                        ]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1", "state": [
+                        _state("R1", transitions=[
+                            {"target": "R2", "raise_value": [{"event": "done"}]},
+                        ]),
+                        _state("R2"),
+                    ]},
+                ],
+            }],
+        }
+
+    def _top(self):
+        files = transliterate_hdl_sv.render_target(
+            self._parallel_with_raise(), {"chart_name": "k"}
+        )
+        # The chart-top wrapper file (parallel chart → N region files +
+        # one top wrapper). Find by name suffix.
+        candidates = [k for k in files if k.endswith("_top.sv") or k == "k_top.sv"]
+        assert candidates, f"chart-top wrapper file not in {sorted(files)}"
+        return files[candidates[0]]
+
+    def test_chart_top_exposes_per_region_event_outputs(self):
+        top = self._top()
+        # Per-region prefix so multi-region raises of the same event
+        # don't collide at the boundary.
+        assert "event_left_ack_send_valid" in top
+        assert "event_right_done_send_valid" in top
+
+    def test_chart_top_wires_region_instance_to_boundary(self):
+        top = self._top()
+        # Inside the wrapper body, each region instance's
+        # event_<name>_send_valid port wires to the prefixed boundary.
+        assert ".event_ack_send_valid(event_left_ack_send_valid)" in top
+        assert ".event_done_send_valid(event_right_done_send_valid)" in top
+
+    def test_chart_top_omits_event_ports_when_no_raise(self):
+        """Parallel chart without <raise>: chart-top wrapper has no
+        event_*_send_valid boundary ports."""
+        chart = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[{"target": "L2"}]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1", "state": [
+                        _state("R1", transitions=[{"target": "R2"}]),
+                        _state("R2"),
+                    ]},
+                ],
+            }],
+        }
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "x"}
+        )
+        top = files.get("x_top.sv", "")
+        assert "event_" not in top

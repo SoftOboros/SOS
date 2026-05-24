@@ -1699,6 +1699,11 @@ def _build_region_modules_canonical(
                 }
             )
 
+        # SOS-08-C wave-3-b (2026-05-24 §15): per-region raise events
+        # surfaced into the chart-top wrapper's region_modules entry so
+        # the wrapper exposes `event_<region>_<name>_send_valid` per
+        # boundary port.
+        raise_events_list = _collect_region_raise_events(region)
         region_modules.append(
             {
                 "name": _sanitize_sv_identifier(region.name),
@@ -1706,6 +1711,7 @@ def _build_region_modules_canonical(
                 "clock_domain": region.clock_domain or "main",
                 "datamodel_signals": signals,
                 "state_width": max(1, len(region.states)),
+                "raise_events": raise_events_list,
             }
         )
     return region_modules

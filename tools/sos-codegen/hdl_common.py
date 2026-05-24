@@ -1578,6 +1578,29 @@ def emit_sync_inst(
 # ---------------------------------------------------------------------------
 
 
+def _safe_event_ident_top(name: str) -> str:
+    """Sanitise an SCXML event name for chart-top boundary port use.
+
+    SOS-08-C wave-3-b (2026-05-24 §15): chart-top wrapper exposes
+    per-region event egress as `event_<region>_<name>_send_valid`
+    output ports. SCXML event names may contain dots (`sem.give`);
+    we substitute non-alphanumerics with `_` so the resulting port
+    name is a legal identifier in both VHDL and SV. The original
+    event name is preserved in the per-region FSM module's port
+    declaration trailing comment for chart-vocabulary traceability.
+
+    Mirrors `transliterate_hdl_{sv,vhdl}._safe_event_ident*` so the
+    chart-top boundary port name matches the per-region module's
+    output port name byte-for-byte.
+    """
+    out = re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_").lower()
+    if not out:
+        return "ev"
+    if out[0].isdigit():
+        out = "ev_" + out
+    return out
+
+
 def emit_chart_top_wrapper(
     chart_name: str,
     region_modules: list[dict],
@@ -1792,6 +1815,34 @@ def _emit_chart_top_wrapper_new(
             )
         )
 
+    # SOS-08-C wave-3-b (2026-05-24 §15): per-region event egress
+    # passthrough. Each region_module MAY carry an optional
+    # `raise_events: list[str]` key listing the event names emitted by
+    # `<raise>` elements within that region. For each (region, event)
+    # pair, the chart-top wrapper exposes one
+    # `event_<region>_<name>_send_valid` output and wires it to the
+    # region instance's `event_<name>_send_valid` output port.
+    #
+    # Wave-3-c lifts this to per-event aggregation via
+    # `sos_message_channel` instantiation (one channel per chart-wide
+    # unique event name + per-event arbitration across regions). Per
+    # INV-S-HDL-4 (cooperative-only) at most one region can be raising
+    # a given event in a given cycle in any v1 chart, so the
+    # aggregation reduces to an OR-tree even before the channel
+    # instantiation lands; wave-3-b's per-region passthrough is the
+    # minimum that exposes the egress at the wrapper boundary without
+    # making aggregation choices.
+    for rm in region_modules:
+        for ev in rm.get("raise_events", []) or []:
+            ev_ident = _safe_event_ident_top(ev)
+            boundary_ports.append(
+                HdlPort(
+                    name=f"event_{rm['name']}_{ev_ident}_send_valid",
+                    direction="out",
+                    width=1,
+                )
+            )
+
     # ---- Emit per dialect. ----
     if dialect is Dialect.VHDL:
         return _emit_chart_top_wrapper_vhdl_new(
@@ -1951,6 +2002,15 @@ def _emit_chart_top_wrapper_vhdl_new(
         port_lines.append(
             f"current_state => current_state_{rm['name']}"
         )
+        # SOS-08-C wave-3-b: connect per-event egress outputs through
+        # to the chart-top boundary `event_<region>_<name>_send_valid`
+        # ports (mirror SV wrapper).
+        for ev in rm.get("raise_events", []) or []:
+            ev_ident = _safe_event_ident_top(ev)
+            port_lines.append(
+                f"event_{ev_ident}_send_valid => "
+                f"event_{rm['name']}_{ev_ident}_send_valid"
+            )
         for j, pl in enumerate(port_lines):
             suffix = "," if j < len(port_lines) - 1 else ""
             lines.append(f"            {pl}{suffix}")
@@ -2036,6 +2096,15 @@ def _emit_chart_top_wrapper_sv_new(
         port_lines.append(
             f".current_state(current_state_{rm['name']})"
         )
+        # SOS-08-C wave-3-b: connect per-event egress outputs through
+        # to the chart-top boundary `event_<region>_<name>_send_valid`
+        # ports. Per-region FSM module emits these per wave-3-a.
+        for ev in rm.get("raise_events", []) or []:
+            ev_ident = _safe_event_ident_top(ev)
+            port_lines.append(
+                f".event_{ev_ident}_send_valid"
+                f"(event_{rm['name']}_{ev_ident}_send_valid)"
+            )
         for j, pl in enumerate(port_lines):
             suffix = "," if j < len(port_lines) - 1 else ""
             lines.append(f"        {pl}{suffix}")
