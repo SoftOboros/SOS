@@ -92,7 +92,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--target",
         choices=(
             "rust", "c", "both", "hdl-vhdl", "hdl-sv",
-            "cocotb", "sva", "sos-08-d", "sos-08-e",
+            "cocotb", "sva", "sos-08-d", "sos-08-e", "sos-08-f",
         ),
         required=True,
         help=(
@@ -111,8 +111,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "constrained-random-free, UVM-free) under ``tb/sv/<chart>/``, "
             "mirroring the SOS-08-D SVA bind file byte-identically "
             "(ratified 2026-05-23, SOS-08-E §15). "
-            "See SOS-08-D §6.1 / SOS-08-E §6 for the emitted directory "
-            "layouts."
+            "``sos-08-f`` emits the SOS-08-F UVM-sequences-only "
+            "artifact set under ``uvm/<chart>/`` per the 10/80 framing "
+            "(SOS owns the per-family ``uvm_sequence`` subclasses + "
+            "baseline ``sos_seq_item``; customer owns env / agent / "
+            "sequencer / driver / scoreboard / test). Ratified "
+            "2026-05-23, SOS-08-F §15. "
+            "See SOS-08-D §6.1 / SOS-08-E §6 / SOS-08-F §6 for the "
+            "emitted directory layouts."
         ),
     )
     p.add_argument(
@@ -226,7 +232,7 @@ def validate_args(args: argparse.Namespace) -> None:
     """Validate --out vs --target consistency. Exits with code 3 on mismatch."""
     if args.target in (
         "rust", "c", "hdl-vhdl", "hdl-sv", "cocotb", "sva",
-        "sos-08-d", "sos-08-e",
+        "sos-08-d", "sos-08-e", "sos-08-f",
     ):
         if args.out is None and not args.dry_run:
             sys.stderr.write(
@@ -546,6 +552,40 @@ def _render_sos_08_e_target(
     return render_sv_tb(ast.raw_scjson, config)
 
 
+def _render_sos_08_f_target(
+    ast: ChartAst,
+    config: dict,
+) -> dict[str, str]:
+    """Dispatch SOS-08-F UVM-sequence emission to the walker.
+
+    Per SOS-08-F §6 (sequence-emission contract): the walker returns a
+    dict of three artifacts per chart — the consolidated
+    ``sos_uvm_seq_pkg.sv`` (baseline ``sos_seq_item`` + six per-family
+    ``uvm_sequence`` subclasses), the ``.svh`` header for split-
+    compilation drivers, and the informative integration example.
+
+    The 10/80 framing (§0) is load-bearing: SOS owns ONLY the sequence
+    library; the customer's UVM env / agent / sequencer / driver /
+    scoreboard / test classes are not emitted (INV-S-HDL-F-1 +
+    INV-S-HDL-F-2 enforce this). The wave-1 walker audits emitted text
+    by construction.
+
+    Cites: SOS-08-F §15 ratification (2026-05-23); SOS-08-F §6
+    (sequence-emission contract); SOS-08-F §7 (INV-S-HDL-F-1..5).
+    """
+    try:
+        from transliterate_hdl_uvm_seq import (  # noqa: E402
+            render_target as render_uvm_seq,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "sos-codegen: --target=sos-08-f requires "
+            "`transliterate_hdl_uvm_seq.py` next to main.py (SOS-08-F "
+            f"wave-1 module). Import error: {exc}"
+        ) from exc
+    return render_uvm_seq(ast.raw_scjson, config)
+
+
 def render_target(
     target: str,
     ast: ChartAst,
@@ -590,6 +630,8 @@ def render_target(
         return _render_sos_08_d_target(ast, cocotb_sva_config or {})
     if target == "sos-08-e":
         return _render_sos_08_e_target(ast, cocotb_sva_config or {})
+    if target == "sos-08-f":
+        return _render_sos_08_f_target(ast, cocotb_sva_config or {})
     env = _env()
     template_name = {"rust": "scripts.rs.j2", "c": "scripts.c.j2"}[target]
     tpl = env.get_template(template_name)
@@ -761,7 +803,8 @@ def main(argv: list[str]) -> int:
         args.out_rust.write_text(rendered["rust"], encoding="utf-8")
         args.out_c.write_text(rendered["c"], encoding="utf-8")
     elif args.target in (
-        "hdl-vhdl", "hdl-sv", "cocotb", "sva", "sos-08-d", "sos-08-e",
+        "hdl-vhdl", "hdl-sv", "cocotb", "sva",
+        "sos-08-d", "sos-08-e", "sos-08-f",
     ):
         # HDL + SOS-08-D/E walkers return {filename: source}; write each
         # into args.out (treated as a directory). For cocotb / sva /
