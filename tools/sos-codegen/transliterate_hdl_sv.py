@@ -125,6 +125,18 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+# SOS-08-C wave-3-f-future-assign (2026-05-24 §15): shared ECMAScript-
+# subset `<assign>` parser. Used when the regex `_EVENT_PAYLOAD_RE`
+# does NOT match — covers numeric literals, datamodel idents, and
+# binary +/- between them. Rejected forms surface as
+# `UnsupportedChartError` via `_lower_assign_to_sv`.
+from _assign_expr import (
+    AssignExpr,
+    AssignExprError,
+    _parse_assign_expr,
+    _render_sv,
+)
+
 # Sibling module — provides the cross-dialect emit primitives. Wave-2
 # imports the new canonical names alongside the wave-1 surface; missing
 # names degrade to inline fallbacks at the call site.
@@ -363,6 +375,37 @@ class HdlEventPayloadCapture:
     location: str          # chart datamodel signal name (RHS of `data_<X>_q`)
     event_name: str        # consumed event whose `_recv_data` supplies the value
     edge: str = "entry"    # "entry" (default, wave-3-f) or "exit" (wave-3-f-future-A)
+
+
+@dataclass
+class HdlGeneralAssign:
+    """SOS-08-C wave-3-f-future-assign (2026-05-24 §15) — general
+    ECMAScript-subset ``<assign>`` lowering.
+
+    Captures a ``<assign location="<loc>" expr="<expr>"/>`` whose RHS
+    is NOT the ``event.<EV>.value`` form (those become
+    ``HdlEventPayloadCapture``).  Per the §15 wave-3-f-future-assign
+    amendment, the supported subset is: integer literals (decimal +
+    hex), unary minus on a literal, binary ``+``/``-``, datamodel
+    identifier reads, and parenthesised sub-expressions.
+
+    The gating semantics mirror the event-payload-capture shape:
+    ``<onentry>`` lowers as entry-edge
+    ``state_q != ST_S && state_next == ST_S``; ``<onexit>`` lowers as
+    exit-edge ``state_q == ST_S && state_next != ST_S``.
+
+    Width policy (per wave-3-e behaviour cited in
+    `_emit_register_process`): the data-signal register width is taken
+    from `<sos:datamodel_width>` / `<data width=...>` annotations or
+    defaults to 32-bit signed.  The walker does NOT widen on overflow
+    — `data_q + 1` is a width-bound add with implicit truncation,
+    matching the wave-3-e behaviour for non-payload assigns.
+    """
+
+    state_id: str
+    location: str
+    edge: str             # "entry" or "exit"
+    expr: AssignExpr      # parsed expression tree
 
 
 @dataclass
@@ -1285,6 +1328,66 @@ def _collect_region_event_payload_captures(
     return captures
 
 
+def _collect_region_general_assigns(
+    region: HdlRegion,
+) -> list[HdlGeneralAssign]:
+    """SOS-08-C wave-3-f-future-assign (2026-05-24 §15) — walk a region's
+    states and collect ``<assign>`` records whose RHS is NOT the
+    ``event.<EV>.<suffix>`` form.
+
+    The event-payload form is handled upstream by
+    ``_collect_region_event_payload_captures``; this walker runs AFTER
+    that one and skips any assign whose RHS matches
+    ``_EVENT_PAYLOAD_RE``.  Everything remaining is dispatched through
+    the shared `_parse_assign_expr` recursive-descent parser; rejected
+    forms surface as ``UnsupportedChartError`` with the
+    ``wave-3-f-future-assign`` citation prefix.
+
+    Validates each parsed expression's idents against the region's
+    datamodel; unknown idents raise the same chart-vocab error.
+    """
+    out: list[HdlGeneralAssign] = []
+    datamodel_ids = [d.name for d in region.datamodel]
+    datamodel_id_set = set(datamodel_ids)
+
+    def _process(assign: HdlAssign, state: HdlState, edge: str) -> None:
+        if _EVENT_PAYLOAD_RE.match(assign.expr or ""):
+            # Owned by `_collect_region_event_payload_captures`.
+            return
+        if assign.location not in datamodel_id_set:
+            # Wave-1/wave-2 silently dropped writes to undeclared
+            # locations; preserve that behaviour rather than promote
+            # a silent-bug into a hard error here.  An undeclared
+            # location is a chart-vocab issue at the datamodel layer,
+            # not the expression layer.
+            return
+        try:
+            tree = _parse_assign_expr(assign.expr or "", datamodel_ids)
+        except AssignExprError as exc:
+            raise UnsupportedChartError(
+                f"SOS-08-C wave-3-f-future-assign: <on{edge}><assign "
+                f"location='{assign.location}' expr='{assign.expr}'/> "
+                f"{exc}; supported: + -, integer literals "
+                f"(decimal/0x...), datamodel identifiers, parenthesised "
+                f"sub-expressions, and event.<EV>.value forms."
+            ) from exc
+        out.append(
+            HdlGeneralAssign(
+                state_id=state.state_id,
+                location=assign.location,
+                edge=edge,
+                expr=tree,
+            )
+        )
+
+    for state in region.states:
+        for assign in state.onentry_assigns:
+            _process(assign, state, "entry")
+        for assign in state.onexit_assigns:
+            _process(assign, state, "exit")
+    return out
+
+
 def _collect_region_payload_send_events(region: HdlRegion) -> list[str]:
     """Return the sorted, de-duplicated list of event names this
     region raises WITH at least one `<param>` somewhere.
@@ -1495,6 +1598,7 @@ def _emit_register_process(
     region: HdlRegion,
     datamodel_signals: list[_DatamodelSignal],
     event_payload_captures: list[HdlEventPayloadCapture] | None = None,
+    general_assigns: list[HdlGeneralAssign] | None = None,
 ) -> str:
     """Step 1 + step 6: state register + datamodel reset values.
 
@@ -1506,8 +1610,21 @@ def _emit_register_process(
     Captures are walked in document order; multiple captures targeting
     the same datamodel signal are last-write-wins per SCXML §3.13
     onentry execution order.
+
+    SOS-08-C wave-3-f-future-assign (2026-05-24 §15): ``general_assigns``
+    extends the per-signal if/else if chain with the
+    ECMAScript-subset ``<assign>`` lowering — numeric literals,
+    datamodel-to-datamodel reads, and binary ``+``/``-`` between them.
+    Each general assign emits one additional arm in the same chain
+    (gating: entry-edge or exit-edge mirroring the event-payload-capture
+    shape).  Width policy: lowering emits SV at the datamodel
+    register's native width; per wave-3-e behaviour the walker does
+    NOT widen on overflow (``data_q + 1`` is a width-bound add with
+    implicit truncation — chart authors that need wider arithmetic
+    must declare a wider ``<data width=...>`` annotation).
     """
     event_payload_captures = event_payload_captures or []
+    general_assigns = general_assigns or []
     initial_const = _state_constant_name(region.initial_state)
     reset_lines: list[str] = [
         f"            state_q <= {initial_const};",
@@ -1525,12 +1642,23 @@ def _emit_register_process(
     captures_by_location: dict[str, list[HdlEventPayloadCapture]] = {}
     for cap in event_payload_captures:
         captures_by_location.setdefault(cap.location, []).append(cap)
+    # SOS-08-C wave-3-f-future-assign: per-signal general assigns are
+    # appended to the same if/else if chain after event-payload
+    # captures.  Document-order across the chart preserves SCXML §3.13
+    # last-write-wins semantics for charts mixing the two forms.
+    assigns_by_location: dict[str, list[HdlGeneralAssign]] = {}
+    for ga in general_assigns:
+        assigns_by_location.setdefault(ga.location, []).append(ga)
 
     sig_names = {sig.chart_id: sig.sv_name for sig in datamodel_signals}
+    ident_signal_map = {
+        sig.chart_id: sig.sv_name for sig in datamodel_signals
+    }
 
     for sig in datamodel_signals:
         cap_list = captures_by_location.get(sig.chart_id, [])
-        if not cap_list:
+        ga_list = assigns_by_location.get(sig.chart_id, [])
+        if not cap_list and not ga_list:
             # Default: hold current value (wave-1/wave-2 shape preserved).
             update_lines.append(
                 f"            {sig.sv_name}_q <= {sig.sv_name}_q;"
@@ -1545,7 +1673,8 @@ def _emit_register_process(
         #   entry: state_q != ST_S && state_next == ST_S && recv_valid
         #   exit:  state_q == ST_S && state_next != ST_S && recv_valid
         chain_lines: list[str] = []
-        for idx, cap in enumerate(cap_list):
+        arm_idx = 0
+        for cap in cap_list:
             ev_ident = _safe_event_ident(cap.event_name)
             state_const = _state_constant_name(cap.state_id)
             if cap.edge == "exit":
@@ -1560,13 +1689,38 @@ def _emit_register_process(
                     f"state_next == {state_const} && "
                     f"event_{ev_ident}_recv_valid"
                 )
-            keyword = "            if" if idx == 0 else "            end else if"
-            chain_lines.append(
-                f"{keyword} ({cond}) begin"
+            keyword = (
+                "            if" if arm_idx == 0 else "            end else if"
             )
+            chain_lines.append(f"{keyword} ({cond}) begin")
             chain_lines.append(
                 f"                {sig.sv_name}_q <= event_{ev_ident}_recv_data;"
             )
+            arm_idx += 1
+        # Wave-3-f-future-assign arms — same per-signal if/else if
+        # chain, no event-validity term (the gating is purely the
+        # entry/exit edge into the carrying state).
+        for ga in ga_list:
+            state_const = _state_constant_name(ga.state_id)
+            if ga.edge == "exit":
+                cond = (
+                    f"state_q == {state_const} && "
+                    f"state_next != {state_const}"
+                )
+            else:
+                cond = (
+                    f"state_q != {state_const} && "
+                    f"state_next == {state_const}"
+                )
+            keyword = (
+                "            if" if arm_idx == 0 else "            end else if"
+            )
+            chain_lines.append(f"{keyword} ({cond}) begin")
+            rhs = _render_sv(ga.expr, ident_signal_map)
+            chain_lines.append(
+                f"                {sig.sv_name}_q <= {rhs};"
+            )
+            arm_idx += 1
         chain_lines.append(f"            end else begin")
         chain_lines.append(f"                {sig.sv_name}_q <= {sig.sv_name}_q;")
         chain_lines.append(f"            end")
@@ -2085,8 +2239,12 @@ def _render_region_module(
     # location="X" expr="event.<EV>.value"/> records so the register
     # process can route event payload data into datamodel signals.
     event_payload_captures = _collect_region_event_payload_captures(region)
+    # SOS-08-C wave-3-f-future-assign (2026-05-24 §15): collect general
+    # ECMAScript-subset assigns (numeric literals, datamodel idents,
+    # binary +/-) for inclusion in the same per-signal if/else if chain.
+    general_assigns = _collect_region_general_assigns(region)
     register_process = _emit_register_process(
-        region, datamodel_signals, event_payload_captures
+        region, datamodel_signals, event_payload_captures, general_assigns
     )
     transition_block = _emit_combinational_block(region, depth_budget)
     output_drives = _emit_output_drives(datamodel_signals)

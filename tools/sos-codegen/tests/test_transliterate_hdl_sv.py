@@ -1952,3 +1952,235 @@ class TestWave3fFutureBMultiParamRejection:
             "state_q != ST_OBSERVED && state_next == ST_OBSERVED && "
             "event_tick_recv_valid"
         ) in sv
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-C wave-3-f-future-assign (2026-05-24 §15) — general
+# ECMAScript-subset `<assign>` lowering: integer literals, datamodel
+# idents, binary +/-.  These exercise the recursive-descent parser
+# wired up in `_assign_expr.py` + `_collect_region_general_assigns` +
+# the per-signal if/else chain extension in `_emit_register_process`.
+# ---------------------------------------------------------------------------
+
+
+class TestWave3fFutureAssignLowering:
+    """Lowering for `<assign expr="<numeric-literal>"/>`,
+    `<assign expr="<ident>"/>`, `<assign expr="<lhs> + <rhs>"/>`,
+    `<assign expr="<lhs> - <rhs>"/>`, and the existing
+    `event.<EV>.value` form (regression-guarded)."""
+
+    @staticmethod
+    def _chart_with_assign(expr_text, *, edge="onentry", datamodel=None):
+        """Build a minimal chart that lowers a single ``<assign>``
+        carried by `<onentry>` (default) or `<onexit>` on a state
+        named ``hit``.  Datamodel can be overridden to add extra
+        signals; the default has a single i32 `x` with reset 0."""
+        if datamodel is None:
+            datamodel = [{"data": [{"id": "x", "expr": "0", "type": "i32"}]}]
+        hit_state = {
+            "id": "hit",
+            "transition": [{"target": "rest"}],
+        }
+        hit_state[edge] = [{"assign": [
+            {"location": "x", "expr": expr_text},
+        ]}]
+        return {
+            "datamodel": datamodel,
+            "state": [
+                {"id": "start", "transition": [{"target": "hit"}]},
+                hit_state,
+                {"id": "rest"},
+            ],
+            "initial": "start",
+        }
+
+    def _render(self, chart):
+        return transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "a"}
+        )["a_fsm.sv"]
+
+    # --- Supported forms -------------------------------------------------
+
+    def test_numeric_literal_assign_emits_constant_write(self):
+        sv = self._render(self._chart_with_assign("42"))
+        # Entry-edge gating into ST_HIT, RHS is the bare literal.
+        assert "state_q != ST_HIT && state_next == ST_HIT" in sv
+        assert "data_x_q <= 42;" in sv
+
+    def test_hex_literal_assign_emits_constant_write(self):
+        sv = self._render(self._chart_with_assign("0x2A"))
+        # Hex literal lowered to its decimal value (42).
+        assert "data_x_q <= 42;" in sv
+        assert "state_q != ST_HIT && state_next == ST_HIT" in sv
+
+    def test_unary_minus_literal_emits_signed_negative(self):
+        sv = self._render(self._chart_with_assign("-7"))
+        # Unary minus on a literal lowers to a bare negative integer
+        # (SV signed-literal context — the register is `signed [31:0]`).
+        assert "data_x_q <= -7;" in sv
+
+    def test_datamodel_ident_assign_emits_register_copy(self):
+        chart = self._chart_with_assign(
+            "src",
+            datamodel=[{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "5", "type": "i32"},
+            ]}],
+        )
+        sv = self._render(chart)
+        assert "data_x_q <= data_src_q;" in sv
+
+    def test_binary_plus_literal_and_ident_emits_add(self):
+        chart = self._chart_with_assign(
+            "x + 1",
+            datamodel=[{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+            ]}],
+        )
+        sv = self._render(chart)
+        assert "data_x_q <= data_x_q + 1;" in sv
+
+    def test_binary_minus_two_idents_emits_sub(self):
+        chart = self._chart_with_assign(
+            "a - b",
+            datamodel=[{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "a", "expr": "0", "type": "i32"},
+                {"id": "b", "expr": "0", "type": "i32"},
+            ]}],
+        )
+        sv = self._render(chart)
+        assert "data_x_q <= data_a_q - data_b_q;" in sv
+
+    # --- Edge gating ------------------------------------------------------
+
+    def test_onentry_assign_gates_on_entry_edge(self):
+        sv = self._render(self._chart_with_assign("99", edge="onentry"))
+        # Entry-edge gating: state_q != ST_S && state_next == ST_S.
+        assert "state_q != ST_HIT && state_next == ST_HIT" in sv
+        # Exit-edge gating MUST NOT also fire for the same write.
+        assert "state_q == ST_HIT && state_next != ST_HIT" not in sv
+
+    def test_onexit_assign_gates_on_exit_edge(self):
+        sv = self._render(self._chart_with_assign("99", edge="onexit"))
+        assert "state_q == ST_HIT && state_next != ST_HIT" in sv
+        # Entry-edge gating MUST NOT be emitted for the same write.
+        # (`state_q != ST_HIT && state_next == ST_HIT` would be the
+        # entry shape.)
+        # The combinational mux still uses `state_q != ST_HIT` etc.
+        # in unrelated arms, so we check the FULL `data_x_q` write
+        # context — assert the entry shape doesn't appear immediately
+        # above the data_x_q assign.
+        entry_with_assign = (
+            "state_q != ST_HIT && state_next == ST_HIT) begin\n"
+            "                data_x_q"
+        )
+        assert entry_with_assign not in sv
+
+    # --- Regression guards (wave-3-f-future-A still works) ---------------
+
+    def test_event_value_path_still_works_byte_identical(self):
+        """The `event.<EV>.value` form (handled upstream by the regex
+        pre-pass) must continue to emit its standard
+        `_recv_data`-bearing gating shape — NOT the new
+        `_render_sv` lowering path."""
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "y", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"event": "tick", "target": "seen"},
+                ]},
+                {"id": "seen",
+                 "onentry": [{"assign": [
+                     {"location": "y", "expr": "event.tick.value"},
+                 ]}],
+                 "transition": [{"event": "tick", "target": "idle"}]},
+            ],
+            "initial": "idle",
+        }
+        sv = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "ev"}
+        )["ev_fsm.sv"]
+        # Event-payload gating shape — the `_recv_valid` term.
+        assert (
+            "state_q != ST_SEEN && state_next == ST_SEEN && "
+            "event_tick_recv_valid"
+        ) in sv
+        # Lowered to `event_<EV>_recv_data`, NOT the parser path.
+        assert "data_y_q <= event_tick_recv_data;" in sv
+
+    def test_event_dot_value_emit_unchanged_for_charts_without_new_form(self):
+        """A chart that has NO `<assign>` writes (the most common
+        wave-1/wave-2 shape) must still emit the byte-identical
+        wave-1 register-process body."""
+        chart = {
+            "datamodel": [{"data": [{"id": "x", "expr": "0", "type": "i32"}]}],
+            "state": [
+                {"id": "a", "transition": [{"target": "b"}]},
+                {"id": "b"},
+            ],
+            "initial": "a",
+        }
+        sv = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "n"}
+        )["n_fsm.sv"]
+        # Hold-shape from wave-1: `data_x_q <= data_x_q;` with NO if/else.
+        assert "data_x_q <= data_x_q" in sv
+        # No spurious state-edge gating introduced.
+        assert "state_q != ST_" not in sv
+
+    # --- Chart-vocab rejections ------------------------------------------
+
+    def test_unknown_datamodel_ident_raises_chart_vocab_error(self):
+        chart = self._chart_with_assign("unknown_thing")
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"wave-3-f-future-assign.*unknown.*'unknown_thing'",
+        ):
+            transliterate_hdl_sv.render_target(chart, {"chart_name": "a"})
+
+    def test_unsupported_operator_star_raises(self):
+        chart = self._chart_with_assign(
+            "x * 2",
+            datamodel=[{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+            ]}],
+        )
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"wave-3-f-future-assign.*unsupported operator '\*'",
+        ):
+            transliterate_hdl_sv.render_target(chart, {"chart_name": "a"})
+
+    def test_function_call_raises(self):
+        chart = self._chart_with_assign("f(x)")
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"wave-3-f-future-assign.*function call 'f\(\.\.\.\)'",
+        ):
+            transliterate_hdl_sv.render_target(chart, {"chart_name": "a"})
+
+    def test_conditional_expr_raises(self):
+        chart = self._chart_with_assign(
+            "x == 1 ? a : b",
+            datamodel=[{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "a", "expr": "0", "type": "i32"},
+                {"id": "b", "expr": "0", "type": "i32"},
+            ]}],
+        )
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"wave-3-f-future-assign",
+        ):
+            transliterate_hdl_sv.render_target(chart, {"chart_name": "a"})
+
+    def test_string_literal_raises(self):
+        chart = self._chart_with_assign('"hello"')
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"wave-3-f-future-assign.*string literal",
+        ):
+            transliterate_hdl_sv.render_target(chart, {"chart_name": "a"})

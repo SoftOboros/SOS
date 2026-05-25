@@ -91,6 +91,18 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+# SOS-08-C wave-3-f-future-assign (2026-05-24 §15): shared ECMAScript-
+# subset `<assign>` parser. Mirror of the SV walker's import; same
+# tree shape, different lowering helper (`_render_vhdl` wraps integer
+# literals in ``to_signed(N, width)`` so the assignment to a signed
+# register is well-typed).
+from _assign_expr import (
+    AssignExpr,
+    AssignExprError,
+    _parse_assign_expr,
+    _render_vhdl,
+)
+
 # Sibling-agent module. The wave-2 emitter imports the canonical
 # wave-2 surface defensively: helpers that may or may not yet be
 # present in hdl_common at integration time are imported with a
@@ -252,6 +264,25 @@ class HdlEventPayloadCapture:
     location: str
     event_name: str
     edge: str = "entry"
+
+
+@dataclass
+class HdlGeneralAssign:
+    """SOS-08-C wave-3-f-future-assign (2026-05-24 §15) — general
+    ECMAScript-subset ``<assign>`` lowering (VHDL mirror).
+
+    Mirror of the SV walker's ``HdlGeneralAssign`` dataclass; see
+    ``transliterate_hdl_sv.HdlGeneralAssign`` for the normative
+    reference.  VHDL emit wraps integer literals in
+    ``to_signed(N, width)`` so the assignment to the signed datamodel
+    register is well-typed.  Width policy: per wave-3-e behaviour,
+    the walker does NOT widen on overflow.
+    """
+
+    state_id: str
+    location: str
+    edge: str             # "entry" or "exit"
+    expr: AssignExpr      # parsed expression tree
 
 
 @dataclass
@@ -1057,6 +1088,58 @@ def _collect_region_event_payload_captures(
     return captures
 
 
+def _collect_region_general_assigns(
+    region: HdlRegion,
+) -> list[HdlGeneralAssign]:
+    """SOS-08-C wave-3-f-future-assign (2026-05-24 §15) — VHDL mirror
+    of the SV walker's ``_collect_region_general_assigns``.
+
+    Walks each state's ``onentry_assigns`` AND ``onexit_assigns``,
+    skipping any assign whose RHS matches the upstream
+    ``_EVENT_PAYLOAD_RE`` (those belong to
+    ``_collect_region_event_payload_captures``).  Everything else is
+    dispatched through the shared `_parse_assign_expr`; rejected forms
+    surface as ``UnsupportedChartError`` with the
+    ``wave-3-f-future-assign`` citation prefix + the
+    ``(VHDL)`` walker tag.
+    """
+    out: list[HdlGeneralAssign] = []
+    datamodel_ids = [d.name for d in region.datamodel]
+    datamodel_id_set = set(datamodel_ids)
+
+    def _process(assign: HdlAssign, state: HdlState, edge: str) -> None:
+        if _EVENT_PAYLOAD_RE.match(assign.expr or ""):
+            return
+        if assign.location not in datamodel_id_set:
+            return
+        try:
+            tree = _parse_assign_expr(assign.expr or "", datamodel_ids)
+        except AssignExprError as exc:
+            raise UnsupportedChartError(
+                f"SOS-08-C wave-3-f-future-assign (VHDL): "
+                f"<on{edge}><assign location='{assign.location}' "
+                f"expr='{assign.expr}'/> {exc}; supported: + -, "
+                f"integer literals (decimal/0x...), datamodel "
+                f"identifiers, parenthesised sub-expressions, and "
+                f"event.<EV>.value forms."
+            ) from exc
+        out.append(
+            HdlGeneralAssign(
+                state_id=state.state_id,
+                location=assign.location,
+                edge=edge,
+                expr=tree,
+            )
+        )
+
+    for state in region.states:
+        for assign in state.onentry_assigns:
+            _process(assign, state, "entry")
+        for assign in state.onexit_assigns:
+            _process(assign, state, "exit")
+    return out
+
+
 def _collect_region_raise_events(region: HdlRegion) -> list[str]:
     """Sorted, de-duplicated event names this region raises via <raise>.
 
@@ -1404,6 +1487,7 @@ def _emit_register_process(
     datamodel_resets: list[str],
     event_payload_captures: list[HdlEventPayloadCapture] | None = None,
     datamodel_signals: list[HdlDatamodelSignal] | None = None,
+    general_assigns: list[HdlGeneralAssign] | None = None,
 ) -> str:
     """Emit the synchronous active-high reset register process.
 
@@ -1412,14 +1496,25 @@ def _emit_register_process(
     branches that route ``event_<EV>_recv_data`` into the destination
     ``data_<X>_q`` register. Mirrors the SV walker's wave-3-f behavior.
 
-    When ``event_payload_captures`` is empty the function falls back
-    to the wave-1/wave-2 ``emit_register_process`` helper (or its
-    local TypeError fallback), preserving the pre-wave-3-f emit
-    byte-identical for charts without event-payload captures.
+    SOS-08-C wave-3-f-future-assign (2026-05-24 §15): ``general_assigns``
+    extends the per-signal if/elsif chain with the ECMAScript-subset
+    ``<assign>`` lowering — numeric literals, datamodel idents, and
+    binary ``+``/``-`` between them.  Integer literals are wrapped in
+    ``to_signed(N, <register'length>)`` so the assignment to the
+    signed register is well-typed (mirrors the wave-3-f
+    ``signed(event_<EV>_recv_data)`` cast).  Width policy: per
+    wave-3-e behaviour, the walker does NOT widen on overflow.
+
+    When BOTH ``event_payload_captures`` and ``general_assigns`` are
+    empty the function falls back to the wave-1/wave-2
+    ``emit_register_process`` helper (or its local TypeError
+    fallback), preserving the pre-wave-3-f emit byte-identical for
+    charts without ANY datamodel write sites.
     """
     event_payload_captures = event_payload_captures or []
+    general_assigns = general_assigns or []
 
-    if not event_payload_captures:
+    if not event_payload_captures and not general_assigns:
         try:
             return emit_register_process(
                 state_q="state_q",
@@ -1453,8 +1548,17 @@ def _emit_register_process(
     captures_by_location: dict[str, list[HdlEventPayloadCapture]] = {}
     for cap in event_payload_captures:
         captures_by_location.setdefault(cap.location, []).append(cap)
+    # SOS-08-C wave-3-f-future-assign: per-signal general assigns are
+    # appended to the same if/elsif chain after event-payload captures.
+    assigns_by_location: dict[str, list[HdlGeneralAssign]] = {}
+    for ga in general_assigns:
+        assigns_by_location.setdefault(ga.location, []).append(ga)
 
     datamodel_signals = datamodel_signals or []
+    # Map chart-side datamodel id → VHDL register-name base (no `_q`
+    # suffix — `_render_vhdl` appends it).  Mirror of the SV walker's
+    # `ident_signal_map`.
+    ident_signal_map = {sig.name: sig.name for sig in datamodel_signals}
     reset_lines: list[str] = [
         f"                state_q <= {_state_constant_name(region.initial_state)};",
     ]
@@ -1471,13 +1575,19 @@ def _emit_register_process(
     for sig in datamodel_signals:
         reg_name = f"{sig.name}_q"
         cap_list = captures_by_location.get(sig.name, [])
-        if not cap_list:
+        ga_list = assigns_by_location.get(sig.name, [])
+        if not cap_list and not ga_list:
             update_lines.append(
                 f"                {reg_name} <= {reg_name};"
             )
             continue
+        # Width for to_signed wrapping in general-assign lowerings.
+        # Per wave-3-e behaviour the walker does NOT widen — width
+        # follows the datamodel register's declared width.
+        sig_width = _resolve_port_width(sig.scxml_type, sig.name)
+        arm_idx = 0
         # Wave-3-f if/elsif chain: per-capture entry-edge override.
-        for idx, cap in enumerate(cap_list):
+        for cap in cap_list:
             ev_ident = _safe_event_ident_vhdl(cap.event_name)
             state_const = _state_constant_name(cap.state_id)
             # SOS-08-C wave-3-f-future-A (2026-05-24 §15): edge gating
@@ -1495,7 +1605,7 @@ def _emit_register_process(
                     f"event_{ev_ident}_recv_valid = '1'"
                 )
             keyword = (
-                "                if" if idx == 0 else "                elsif"
+                "                if" if arm_idx == 0 else "                elsif"
             )
             update_lines.append(f"{keyword} {cond} then")
             # Wave-3-f: event_<EV>_recv_data is a std_logic_vector of
@@ -1506,6 +1616,31 @@ def _emit_register_process(
                 f"                    {reg_name} <= signed("
                 f"event_{ev_ident}_recv_data);"
             )
+            arm_idx += 1
+        # Wave-3-f-future-assign arms — entry-edge OR exit-edge gating
+        # without an event-validity term (gating is purely the
+        # state-edge into the carrying state).
+        for ga in ga_list:
+            state_const = _state_constant_name(ga.state_id)
+            if ga.edge == "exit":
+                cond = (
+                    f"state_q = {state_const} and "
+                    f"state_next /= {state_const}"
+                )
+            else:
+                cond = (
+                    f"state_q /= {state_const} and "
+                    f"state_next = {state_const}"
+                )
+            keyword = (
+                "                if" if arm_idx == 0 else "                elsif"
+            )
+            update_lines.append(f"{keyword} {cond} then")
+            rhs = _render_vhdl(ga.expr, ident_signal_map, sig_width)
+            update_lines.append(
+                f"                    {reg_name} <= {rhs};"
+            )
+            arm_idx += 1
         update_lines.append("                else")
         update_lines.append(
             f"                    {reg_name} <= {reg_name};"
@@ -2176,11 +2311,16 @@ def _render_region(
     # process can route the event payload data into the datamodel
     # register on the entry-edge into the target state.
     event_payload_captures = _collect_region_event_payload_captures(region)
+    # SOS-08-C wave-3-f-future-assign (2026-05-24 §15): collect general
+    # ECMAScript-subset assigns (numeric literals, datamodel idents,
+    # binary +/-) for inclusion in the same per-signal if/elsif chain.
+    general_assigns = _collect_region_general_assigns(region)
     register_process = _emit_register_process(
         region,
         dm_resets,
         event_payload_captures=event_payload_captures,
         datamodel_signals=region.datamodel,
+        general_assigns=general_assigns,
     )
     transition_block = _emit_combinational_block(region, depth_budget)
 

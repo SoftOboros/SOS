@@ -1062,3 +1062,118 @@ side.
 **Cited invariants / amendments**: §15 wave-3-f (entry shape — extended here to also cover exit edge); INV-S-HDL-C-1..5 (preserved); SCXML §3.13 onentry/onexit execution order (cited for last-write-wins semantics in mixed entry+exit chains).
 
 Status: 🟢 **wave-3-f-future-A complete + wave-3-f-future-B boundary made actionable**. `<onexit>` event-payload captures lower identically across SV + VHDL walkers; multi-`<param>` events surface immediately as chart-vocabulary errors with a workaround citation. Wave-3-f-future-B full implementation, general `<assign>` ECMAScript-subset lowering, and cross-region event-value capture remain on the wave-3-f-future track.
+
+### 2026-05-24 — Impl wave-3-f-future-assign: general ECMAScript-subset `<assign>` lowering (Ira)
+
+Closes the **general `<assign>` ECMAScript-subset lowering** item from the wave-3-f-future remaining boundary (per the prior §15 entry's status line). The wave-3-f walker family handled exactly one `<assign>` RHS form — the canonical `event.<EV>.value` event-payload capture; every other RHS was either silently no-op'd (wave-1/wave-2 baseline) or rejected at the regex pre-pass with "expr form not supported". Real charts need more: per-state counter increments (`<assign expr="counter + 1"/>`), state-reset patterns (`<assign expr="0"/>`), and history retention (`<assign expr="counter"/>`). This entry ratifies a small, normative ECMAScript subset for `<assign expr=>` and lowers it through both walkers.
+
+**Subset — normative**. Per RFC 2119, an `<assign expr=>` body conforming to the wave-3-f-future-assign amendment MUST be one of:
+
+- An **integer literal** — decimal (`42`, `0`) or hex with the `0x` prefix (`0x2A`, `0xff`). The walker MUST parse the literal via Python's `int(text, 0)` and lower it to a signed integer constant at the datamodel register's declared width.
+- A **boolean literal** (`true`, `false`) — lowered to integer constant `1` / `0` respectively. This preserves wave-1/wave-2 boolean-flag charts (`<assign location="flag" expr="true"/>`) which the pre-amendment walkers silently no-op'd.
+- A **unary minus on an integer literal** (`-42`) — lowered to a signed-negative integer constant. Unary minus on a non-literal operand MUST raise (`-counter` is rejected; the workaround is binary minus from zero, `0 - counter`).
+- A **datamodel identifier read** — a bare identifier resolved against the enclosing chart's `<datamodel>`. Unknown identifiers MUST raise with the citation prefix `SOS-08-C wave-3-f-future-assign: ... references unknown datamodel identifier '<ident>'`.
+- A **binary `+` or `-`** between any of the above forms or between two datamodel identifiers (`counter + 1`, `prev - counter`).
+- A **parenthesised sub-expression** for grouping — `(counter + 1) - prev`. Parentheses MAY be used freely; they do not change semantics.
+- The **existing `event.<EV>.value` / `event.<EV>.<suffix>` form**, preserved byte-identical via the upstream `_EVENT_PAYLOAD_RE` regex pre-pass. The new parser is invoked ONLY when the regex does not match.
+
+**Rejected forms — normative**. An `<assign expr=>` body MUST NOT use:
+
+- Multiplication, division, or modulo (`*`, `/`, `%`). Rejection cites the offending operator.
+- Function calls (`f(x)`). Rejection cites the function name.
+- Conditional / ternary expressions (`x ? a : b`). Rejection cites the form.
+- String literals (`"abc"`, `'abc'`). Rejection cites the literal.
+- Comparison or logical operators (`==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`).
+- Bitwise operators (`&`, `|`, `^`, `~`).
+- Member access other than the `event.<EV>.value` form already handled by the upstream regex.
+
+Each rejected form raises `UnsupportedChartError` with the prefix `SOS-08-C wave-3-f-future-assign:` (or `SOS-08-C wave-3-f-future-assign (VHDL):` for the VHDL walker), the offending `<onentry|onexit><assign>` context, a named cause (operator, function name, "string literal", etc.), and the supported-form summary. Chart authors hitting a boundary therefore get an actionable error citing this §15 amendment rather than silent no-op.
+
+**Authority boundary declaration**. Per the standards-integration discipline (§0):
+
+| Concept | Upstream authority | Local representation | Mutation rights | Divergence policy | Downstream consumers | Conformance test owner | Relationship |
+|---|---|---|---|---|---|---|---|
+| `<assign expr=>` ECMAScript-subset grammar | ECMA-262 §11 (expressions) | `_assign_expr.py` recursive-descent parser | Subset narrowing only — no superset additions without §15 amendment | Extensions live in this §15 entry; deviations from ECMA-262 (e.g. our 0x-hex literal handling) MUST cite this section | SV + VHDL register-emit per-signal if/else chain | This phase doc (wave-3-f-future-assign acceptance) | **derive** |
+| Lowering rules to HDL (SV signed literal, VHDL `to_signed(N, width)`) | This phase doc | `_render_sv` / `_render_vhdl` in `_assign_expr.py` | Full mutation rights (this repo authors) | n/a (locally owned) | Generated SV / VHDL register processes | This phase doc | **own** |
+
+**Implementation surface**:
+
+- **`tools/sos-codegen/_assign_expr.py` (new file, ~380 LOC including docstrings + renderers; parser proper ~80 LOC)** — shared between SV and VHDL walkers. Defines `AssignExpr` dataclass (kinds: `literal`, `ident`, `binop`, `neg_literal`, plus reserved `event_payload`), `AssignExprError`, the pure-Python recursive-descent parser `_parse_assign_expr(expr_text, datamodel_ids)`, and dialect-specific lowering helpers `_render_sv` / `_render_vhdl`. The parser has no external dependencies; the tokenizer is a small hand-written scanner producing `INT | IDENT | PLUS | MINUS | LPAREN | RPAREN | OTHER` tokens with `OTHER` carrying the offending lexeme into a named error message.
+- **`HdlGeneralAssign` dataclass (both walkers)** — added alongside `HdlEventPayloadCapture`. Carries the source state, target location, edge tag (`"entry"` / `"exit"`), and the parsed `AssignExpr` tree.
+- **`_collect_region_general_assigns` (both walkers)** — walks `onentry_assigns` + `onexit_assigns`, skips any RHS matching `_EVENT_PAYLOAD_RE` (those remain owned by `_collect_region_event_payload_captures`), dispatches the remainder through `_parse_assign_expr`. Wraps `AssignExprError` into `UnsupportedChartError` with the `wave-3-f-future-assign` citation prefix + the offending `<assign>` location/expr context.
+- **`_emit_register_process` (both walkers)** — extended to accept a `general_assigns` parameter alongside `event_payload_captures`. Each datamodel signal's if/elsif chain now interleaves event-payload arms (when applicable) with general-assign arms; both share the same edge-gating shapes (`state_q != ST_S && state_next == ST_S` for entry, mirrored for exit). General-assign arms do NOT carry the `event_<EV>_recv_valid` term — gating is purely the state-edge into the carrying state.
+
+**Sample emit (SV, per-state counter increment)**:
+
+```sv
+always_ff @(posedge clk) begin
+    if (rst) begin
+        state_q <= ST_A;
+        data_counter_q <= 32'sd0;
+    end else begin
+        state_q <= state_next;
+        if (state_q != ST_A && state_next == ST_A) begin
+            data_counter_q <= data_counter_q + 1;
+        end else begin
+            data_counter_q <= data_counter_q;
+        end
+    end
+end
+```
+
+**Sample emit (VHDL mirror, same chart)**:
+
+```vhdl
+process(clk) is
+begin
+    if rising_edge(clk) then
+        if rst = '1' then
+            state_q <= ST_A;
+            counter_q <= to_signed(0, counter_q'length);
+        else
+            state_q <= state_next;
+            if state_q /= ST_A and state_next = ST_A then
+                counter_q <= counter_q + to_signed(1, 32);
+            else
+                counter_q <= counter_q;
+            end if;
+        end if;
+    end if;
+end process;
+```
+
+**Width handling**. The datamodel register's width is inherited from the wave-3-e width-resolution chain (`<sos:datamodel_width>` annotation, `<data width=N>` attribute, SCXML `type=` mapping, default 32-bit). The walker does NOT widen on overflow per the wave-3-e cited behaviour — `counter_q + 1` is a width-bound add with implicit truncation. Chart authors needing wider arithmetic MUST declare a wider `<data width=...>` annotation; this is consistent with the wave-3-e payload-bearing event-port shape and avoids silent width promotion.
+
+**Cross-walker parity**. Both SV and VHDL walkers import the SAME `_parse_assign_expr` (via `from _assign_expr import ...`); only the lowering helper differs. Rejection messages diverge in one token (`(VHDL)` walker tag in the VHDL variant) to disambiguate which dialect surfaced the error. The single shared parser eliminates the historical drift risk of two near-identical regex-based parsers.
+
+**Rejection example** (chart with `<assign expr="counter * 2"/>`):
+
+```
+UnsupportedChartError: SOS-08-C wave-3-f-future-assign: <onentry><assign
+location='counter' expr='counter * 2'/> uses unsupported operator '*';
+supported: + -, integer literals (decimal/0x...), datamodel identifiers,
+parenthesised sub-expressions, and event.<EV>.value forms.
+```
+
+**Invariants upheld**:
+
+- **INV-S-HDL-C-1** (chart-as-source): preserved — lowering is deterministic from the chart text via a pure-function parser.
+- **INV-S-HDL-C-2** (datamodel signals reach RTL register form): preserved + extended — the per-signal if/elsif chain now admits a strict superset of the wave-3-f shapes; legacy charts emit byte-identically.
+- **INV-S-HDL-C-3** (cross-domain CDC isolation): unchanged — general assigns read only same-region datamodel signals.
+- **INV-S-HDL-C-4** (datamodel-write observability): retained — general-assign arms are the same kind of register-write site as event-payload captures.
+- **INV-S-HDL-C-5** (one-hot encoding deterministic across dialects): unchanged.
+
+**Wave-3-f-future remaining boundary** (still deferred):
+
+- **Wave-3-f-future-B full implementation** (multi-`<param>` events) — unchanged. Still gated on upstream wave-3-e port-shape extension. Rejection-only landing remains in effect.
+- **Cross-region event-value capture** — when a region's `<onentry>`/`<onexit>` references an event consumed by a DIFFERENT region, the walker continues to raise `UnsupportedChartError`. Composing captures across regions requires the chart-top wrapper to expose the channel's `_recv_data` to additional consumers.
+
+**Frozen-enum registration policy**: `AssignExpr.kind` (`literal | ident | binop | neg_literal | event_payload`) is **Specification Required** — adding a value requires a phase-owner walkthrough update; no separate §15 amendment needed because the enum lives entirely inside `_assign_expr.py` and has no cross-phase contract surface.
+
+**Test count**: net +30 across two walkers — 15 each. Test classes `TestWave3fFutureAssignLowering` (SV) and `TestWave3fFutureAssignLoweringVhdl` (VHDL) cover: numeric-literal lowering, hex-literal, unary minus on literal, datamodel-ident copy, binary `+` (literal + ident), binary `-` (two idents), `<onentry>` entry-edge gating, `<onexit>` exit-edge gating, event-value regression guard, datamodel-only-shape regression guard, unknown-ident rejection, `*` rejection, function-call rejection, ternary rejection, string-literal rejection.
+
+**Test suite**: 779/779 passing (749 prior + 30 new wave-3-f-future-assign).
+
+**Cited invariants / amendments**: §15 wave-3-f (entry shape — extended here to admit non-event RHS); §15 wave-3-f-future-A (exit shape — same extension); INV-S-HDL-C-1..5 (preserved); SCXML §3.13 onentry/onexit execution order (cited for ordering of mixed event-payload + general-assign arms in the per-signal if/elsif chain).
+
+Status: 🟢 **general ECMAScript-subset `<assign>` lowering complete**. Wave-3-f-future remaining now narrows to wave-3-f-future-B full implementation + cross-region event-value capture; both deferrals are bounded by upstream port-shape work, not by chart-author ergonomics.
