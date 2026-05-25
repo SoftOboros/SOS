@@ -1980,3 +1980,314 @@ class TestPCDN007PerParamSubBusesVhdl:
             "event_tick_recv_data_payload => "
             "ev_tick_recv_data_payload_w"
         ) in top
+
+
+# ---------------------------------------------------------------------------
+# PCDN-SOS-08-C-008 (2026-05-25 §15) — shared-datamodel HDL wiring (VHDL).
+# VHDL mirror of the SV walker's `TestPCDN008SharedSignalWiring` class.
+# Same chart-vocab, same v1 same-clock-domain rejection, same one-driver
+# SVA invariant preservation by construction.
+# ---------------------------------------------------------------------------
+
+
+class TestPCDN008SharedSignalWiringVhdl:
+    """PCDN-SOS-08-C-008 (2026-05-25 §15) — VHDL chart-top shared-signal
+    declarations + owner-region driving process + concurrent alias.
+    Mirror of the SV walker's `TestPCDN008SharedSignalWiring`.
+    """
+
+    @staticmethod
+    def _parallel_chart_no_shared():
+        return {
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "left",
+                            "initial": "L1",
+                            "state": [
+                                {"id": "L1", "transition": [
+                                    {"target": "L2"},
+                                ]},
+                                {"id": "L2"},
+                            ],
+                        },
+                        {
+                            "id": "right",
+                            "initial": "R1",
+                            "state": [
+                                {"id": "R1", "transition": [
+                                    {"target": "R2"},
+                                ]},
+                                {"id": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+        }
+
+    @staticmethod
+    def _chart_with_shared_signal(
+        *,
+        width: str = "8",
+        writer_expr: str = "42",
+        with_reader: bool = False,
+        cross_domain: bool = False,
+    ):
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "counter", "expr": "0", "type": "i8"},
+            ]}],
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "owner",
+                            "initial": "O1",
+                            "state": [
+                                {
+                                    "id": "O1",
+                                    "onentry": [{"assign": [
+                                        {
+                                            "location": "my_shared",
+                                            "expr": writer_expr,
+                                        },
+                                    ]}],
+                                    "transition": [{"target": "O2"}],
+                                },
+                                {"id": "O2"},
+                            ],
+                        },
+                        {
+                            "id": "reader",
+                            "initial": "R1",
+                            "state": [
+                                {"id": "R1", "transition": [
+                                    {"target": "R2"},
+                                ]},
+                                {"id": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+            "sos:shared_signal": [
+                {
+                    "name": "my_shared",
+                    "width": width,
+                    "owner_region": "owner",
+                },
+            ],
+        }
+        if with_reader:
+            chart["parallel"][0]["state"][1]["state"][0][
+                "sos:shared_signal_ref"
+            ] = [{"name": "my_shared"}]
+        if cross_domain:
+            chart["parallel"][0]["state"][0]["clock"] = "fast"
+            chart["parallel"][0]["state"][1]["clock"] = "slow"
+        return chart
+
+    # ---------- Regression guard --------------------------------------
+
+    def test_byte_identity_for_chart_without_shared_signal(self):
+        files = render_target(
+            self._parallel_chart_no_shared(), {"chart_name": "ns"}
+        )
+        top = files["ns_top.vhd"]
+        assert "PCDN-SOS-08-C-008" not in top
+        assert "shared_" not in top
+
+    # ---------- Declaration + concurrent alias ----------------------
+
+    def test_shared_signal_declared_at_chart_top(self):
+        files = render_target(
+            self._chart_with_shared_signal(), {"chart_name": "sh"}
+        )
+        top = files["sh_top.vhd"]
+        assert (
+            "signal shared_my_shared : "
+            "std_logic_vector(7 downto 0);"
+        ) in top
+        assert (
+            "signal shared_my_shared_q : "
+            "std_logic_vector(7 downto 0);"
+        ) in top
+
+    def test_continuous_assign_from_q_to_combinational(self):
+        files = render_target(
+            self._chart_with_shared_signal(), {"chart_name": "sh"}
+        )
+        top = files["sh_top.vhd"]
+        assert "shared_my_shared <= shared_my_shared_q;" in top
+
+    # ---------- Owner-driver process ---------------------------------
+
+    def test_owner_region_drives_shared_signal_q(self):
+        files = render_target(
+            self._chart_with_shared_signal(), {"chart_name": "sh"}
+        )
+        top = files["sh_top.vhd"]
+        # The owner is on `clk_main`; the process is rising-edge-clocked
+        # with a reset arm and writes `shared_<name>_q`.
+        assert "process(clk_main) is" in top
+        assert "if rising_edge(clk_main) then" in top
+        assert "if rst_main = '1' then" in top
+        assert "shared_my_shared_q <=" in top
+
+    def test_reader_region_reads_shared_signal(self):
+        files = render_target(
+            self._chart_with_shared_signal(with_reader=True),
+            {"chart_name": "sh"},
+        )
+        top = files["sh_top.vhd"]
+        # Reader-validation pass survives; the chart-top wire is
+        # visible to the reader region.
+        assert "shared_my_shared" in top
+        assert (
+            "signal shared_my_shared : "
+            "std_logic_vector(7 downto 0);"
+        ) in top
+
+    # ---------- Cross-clock-domain rejection -------------------------
+
+    def test_cross_clock_domain_owner_reader_raises(self):
+        """v1 same-clock-domain only: cross-domain readers raise."""
+        chart = self._chart_with_shared_signal(
+            with_reader=True, cross_domain=True
+        )
+        with pytest.raises(
+            UnsupportedChartError,
+            match=r"SOS-08-C wave-future-shared-xclk:",
+        ):
+            render_target(chart, {"chart_name": "sh"})
+
+    # ---------- `<sos:shared_signal_ref>` element recognition --------
+
+    def test_shared_signal_ref_in_assign_location_recognised(self):
+        """A `<sos:shared_signal_ref>` element in the reader's subtree
+        is recognised; same-domain configurations pass through cleanly.
+        """
+        chart = self._chart_with_shared_signal(with_reader=True)
+        files = render_target(chart, {"chart_name": "sh"})
+        top = files["sh_top.vhd"]
+        assert "shared_my_shared" in top
+
+    # ---------- Width propagation ------------------------------------
+
+    def test_width_propagates_to_signal_declaration(self):
+        files = render_target(
+            self._chart_with_shared_signal(width="16"),
+            {"chart_name": "sh"},
+        )
+        top = files["sh_top.vhd"]
+        assert (
+            "signal shared_my_shared : "
+            "std_logic_vector(15 downto 0);"
+        ) in top
+        assert (
+            "signal shared_my_shared_q : "
+            "std_logic_vector(15 downto 0);"
+        ) in top
+
+    # ---------- Multiple shared signals ------------------------------
+
+    def test_multiple_shared_signals_emit_independently(self):
+        chart = self._chart_with_shared_signal()
+        chart["sos:shared_signal"] = [
+            {"name": "a", "width": "8", "owner_region": "owner"},
+            {"name": "b", "width": "4", "owner_region": "owner"},
+        ]
+        chart["parallel"][0]["state"][0]["state"][0]["onentry"] = [
+            {"assign": [
+                {"location": "a", "expr": "1"},
+                {"location": "b", "expr": "2"},
+            ]},
+        ]
+        files = render_target(chart, {"chart_name": "sh"})
+        top = files["sh_top.vhd"]
+        assert (
+            "signal shared_a : std_logic_vector(7 downto 0);"
+        ) in top
+        assert (
+            "signal shared_b : std_logic_vector(3 downto 0);"
+        ) in top
+        assert "shared_a <= shared_a_q;" in top
+        assert "shared_b <= shared_b_q;" in top
+
+    # ---------- ECMA-subset lowering ---------------------------------
+
+    def test_owner_region_assign_uses_ecma_subset_lowering(self):
+        """The owner-region's assign RHS lowers via the wave-3-f-future-
+        assign ECMA subset.  VHDL chart-top has no datamodel ports, so
+        ident-bearing RHS expressions defer to a literal-zero fallback
+        with a comment (see module-level note in
+        `transliterate_hdl_vhdl.py`); literal/binop-literal RHS lowers
+        normally.
+        """
+        # Literal RHS.
+        files = render_target(
+            self._chart_with_shared_signal(writer_expr="7"),
+            {"chart_name": "lit"},
+        )
+        top = files["lit_top.vhd"]
+        assert (
+            "shared_my_shared_q <= "
+            "std_logic_vector(to_signed(7, 8));"
+        ) in top
+
+        # Datamodel-ident RHS — deferred to literal-zero fallback with
+        # an explanatory comment.
+        files = render_target(
+            self._chart_with_shared_signal(writer_expr="counter"),
+            {"chart_name": "id"},
+        )
+        top = files["id_top.vhd"]
+        assert "deferred" in top
+        assert (
+            "shared_my_shared_q <= "
+            "std_logic_vector(to_signed(0, 8));"
+        ) in top
+
+        # Binop-on-literals RHS lowers normally.
+        files = render_target(
+            self._chart_with_shared_signal(writer_expr="3 + 4"),
+            {"chart_name": "bn"},
+        )
+        top = files["bn_top.vhd"]
+        # The binop is rendered with signed casts around each operand.
+        assert "shared_my_shared_q <=" in top
+
+        # Boolean literal (`true`) lowers to integer 1 via the parser.
+        files = render_target(
+            self._chart_with_shared_signal(
+                width="1", writer_expr="true"
+            ),
+            {"chart_name": "bool"},
+        )
+        top = files["bool_top.vhd"]
+        assert "shared_my_shared_q <=" in top
+
+    # ---------- D walker invariant preservation ----------------------
+
+    def test_d_walker_one_driver_invariant_preserved_by_construction(self):
+        """Exactly ONE driver of ``shared_<name>_q`` (the owner-region
+        driving process).  SOS-08-D's `_emit_shared_signal_invariants`
+        SVA assertion is structurally satisfied.
+        """
+        files = render_target(
+            self._chart_with_shared_signal(), {"chart_name": "inv"}
+        )
+        top = files["inv_top.vhd"]
+        # Exactly one banner comment for the shared signal → exactly
+        # one driver process.
+        assert top.count(
+            "-- <sos:shared_signal name=\"my_shared\""
+        ) == 1
+        # The concurrent alias reads (does not drive) the _q register.
+        assert "shared_my_shared <= shared_my_shared_q;" in top

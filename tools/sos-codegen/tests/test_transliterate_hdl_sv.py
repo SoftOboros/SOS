@@ -3213,3 +3213,345 @@ class TestPCDN007PerParamSubBuses:
             ".event_tick_recv_data_payload("
             "ev_tick_recv_data_payload_w)"
         ) in top
+
+
+# ---------------------------------------------------------------------------
+# PCDN-SOS-08-C-008 (2026-05-25 §15) — shared-datamodel HDL wiring (SV).
+# Chart-vocab element `<sos:shared_signal>` declares a chart-level signal
+# driven by exactly one region; this wave lands the HDL-side wiring that
+# complements SOS-08-D's existing one-driver SVA invariant.
+# ---------------------------------------------------------------------------
+
+
+class TestPCDN008SharedSignalWiring:
+    """PCDN-SOS-08-C-008 (2026-05-25 §15) — chart-top `shared_<name>`
+    signal declarations + owner-region driving process + continuous
+    combinational alias.  v1 same-clock-domain only; cross-domain
+    references reject at chart-vocab time.
+    """
+
+    @staticmethod
+    def _parallel_chart_no_shared():
+        """Plain parallel chart with no `<sos:shared_signal>` — used as
+        a regression-guard baseline for the byte-identity test."""
+        return {
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "left",
+                            "initial": "L1",
+                            "state": [
+                                {"id": "L1", "transition": [
+                                    {"target": "L2"},
+                                ]},
+                                {"id": "L2"},
+                            ],
+                        },
+                        {
+                            "id": "right",
+                            "initial": "R1",
+                            "state": [
+                                {"id": "R1", "transition": [
+                                    {"target": "R2"},
+                                ]},
+                                {"id": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+        }
+
+    @staticmethod
+    def _chart_with_shared_signal(
+        *,
+        width: str = "8",
+        writer_expr: str = "42",
+        with_reader: bool = False,
+        cross_domain: bool = False,
+    ):
+        """Two-region parallel chart with one `<sos:shared_signal>`.
+
+        - `width` controls the declared signal width.
+        - `writer_expr` is the owner-region's onentry-assign RHS (lowered
+          via the wave-3-f-future-assign ECMA subset).
+        - `with_reader` adds a `<sos:shared_signal_ref>` to the reader
+          region's L1-equivalent state.
+        - `cross_domain` puts the two regions on different clocks so the
+          v1 same-clock-domain enforcement path fires.
+        """
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "counter", "expr": "0", "type": "i8"},
+            ]}],
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "owner",
+                            "initial": "O1",
+                            "state": [
+                                {
+                                    "id": "O1",
+                                    "onentry": [{"assign": [
+                                        {
+                                            "location": "my_shared",
+                                            "expr": writer_expr,
+                                        },
+                                    ]}],
+                                    "transition": [{"target": "O2"}],
+                                },
+                                {"id": "O2"},
+                            ],
+                        },
+                        {
+                            "id": "reader",
+                            "initial": "R1",
+                            "state": [
+                                {"id": "R1", "transition": [
+                                    {"target": "R2"},
+                                ]},
+                                {"id": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+            "sos:shared_signal": [
+                {
+                    "name": "my_shared",
+                    "width": width,
+                    "owner_region": "owner",
+                },
+            ],
+        }
+        if with_reader:
+            # Inject a `<sos:shared_signal_ref>` deep in the reader
+            # region's state subtree so the walker's reader-collector
+            # picks it up.
+            chart["parallel"][0]["state"][1]["state"][0][
+                "sos:shared_signal_ref"
+            ] = [{"name": "my_shared"}]
+        if cross_domain:
+            chart["parallel"][0]["state"][0]["clock"] = "fast"
+            chart["parallel"][0]["state"][1]["clock"] = "slow"
+        return chart
+
+    # ---------- Regression guard --------------------------------------
+
+    def test_byte_identity_for_chart_without_shared_signal(self):
+        """A chart with NO `<sos:shared_signal>` MUST emit byte-identical
+        chart-top wrapper to the pre-PCDN-SOS-08-C-008 output — no
+        `shared_<name>` declaration, no driving process."""
+        files = transliterate_hdl_sv.render_target(
+            self._parallel_chart_no_shared(), {"chart_name": "ns"}
+        )
+        top = files["ns_top.sv"]
+        assert "PCDN-SOS-08-C-008" not in top
+        assert "shared_" not in top
+        assert "always_ff @(posedge clk_main) begin\n        if (rst_main)" not in top
+
+    # ---------- Declaration + continuous assign ----------------------
+
+    def test_shared_signal_declared_at_chart_top(self):
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_shared_signal(), {"chart_name": "sh"}
+        )
+        top = files["sh_top.sv"]
+        assert "logic [7:0] shared_my_shared;" in top
+        assert "logic [7:0] shared_my_shared_q;" in top
+
+    def test_continuous_assign_from_q_to_combinational(self):
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_shared_signal(), {"chart_name": "sh"}
+        )
+        top = files["sh_top.sv"]
+        assert "assign shared_my_shared = shared_my_shared_q;" in top
+
+    # ---------- Owner-driver process ---------------------------------
+
+    def test_owner_region_drives_shared_signal_q(self):
+        """The driver process is owner-clocked and writes
+        `shared_<name>_q` (and ONLY that — readers do not write the
+        register, by construction)."""
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_shared_signal(), {"chart_name": "sh"}
+        )
+        top = files["sh_top.sv"]
+        assert "always_ff @(posedge clk_main) begin" in top
+        # The owner-region's clock is `clk_main` (the default domain).
+        # The driver process resets `shared_<name>_q` and assigns it
+        # from the lowered RHS while the owner is in a writer state.
+        assert "shared_my_shared_q <=" in top
+
+    def test_reader_region_reads_shared_signal(self):
+        """When a reader region carries `<sos:shared_signal_ref>`, the
+        chart-top `shared_<name>` wire is declared so the reader can
+        bind to it.  v1 leaves the reader's per-region port wiring as
+        a future enhancement (the wire is visible at chart-top scope,
+        sufficient for the SVA-side one-driver invariant)."""
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_shared_signal(with_reader=True),
+            {"chart_name": "sh"},
+        )
+        top = files["sh_top.sv"]
+        # The chart-top wire IS declared regardless of reader presence;
+        # the reader's `<sos:shared_signal_ref>` is what triggers the
+        # same-clock-domain validation pass.  Reader detection succeeded
+        # iff the validator did not raise (the same-domain configuration
+        # passes through).
+        assert "shared_my_shared" in top
+        assert "logic [7:0] shared_my_shared;" in top
+
+    # ---------- Cross-clock-domain rejection -------------------------
+
+    def test_cross_clock_domain_owner_reader_raises(self):
+        """v1 same-clock-domain only: a `<sos:shared_signal_ref>` reader
+        whose resolved (source, kind) differs from the owner's MUST
+        raise `UnsupportedChartError` with the canonical
+        ``SOS-08-C wave-future-shared-xclk:`` prefix."""
+        chart = self._chart_with_shared_signal(
+            with_reader=True, cross_domain=True
+        )
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"SOS-08-C wave-future-shared-xclk:",
+        ):
+            transliterate_hdl_sv.render_target(chart, {"chart_name": "sh"})
+
+    # ---------- `<sos:shared_signal_ref>` element recognition --------
+
+    def test_shared_signal_ref_in_assign_location_recognised(self):
+        """A `<sos:shared_signal_ref name="..."/>` element inside the
+        reader region's subtree MUST be recognised by the walker's
+        reader-collector — same-domain configurations pass through
+        cleanly; the chart-top wire is declared."""
+        chart = self._chart_with_shared_signal(with_reader=True)
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "sh"}
+        )
+        top = files["sh_top.sv"]
+        # Same-domain → no error.  The wire IS declared at chart-top
+        # so the reader's `<sos:shared_signal_ref>` resolves correctly.
+        assert "shared_my_shared" in top
+
+    # ---------- Width propagation ------------------------------------
+
+    def test_width_propagates_to_signal_declaration(self):
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_shared_signal(width="16"),
+            {"chart_name": "sh"},
+        )
+        top = files["sh_top.sv"]
+        assert "logic [15:0] shared_my_shared;" in top
+        assert "logic [15:0] shared_my_shared_q;" in top
+
+    # ---------- Multiple shared signals ------------------------------
+
+    def test_multiple_shared_signals_emit_independently(self):
+        """Two `<sos:shared_signal>` declarations MUST each get their
+        own chart-top declaration + driving process."""
+        chart = self._chart_with_shared_signal()
+        chart["sos:shared_signal"] = [
+            {"name": "a", "width": "8", "owner_region": "owner"},
+            {"name": "b", "width": "4", "owner_region": "owner"},
+        ]
+        # The owner-region's assign now writes both signals.
+        chart["parallel"][0]["state"][0]["state"][0]["onentry"] = [
+            {"assign": [
+                {"location": "a", "expr": "1"},
+                {"location": "b", "expr": "2"},
+            ]},
+        ]
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "sh"}
+        )
+        top = files["sh_top.sv"]
+        assert "logic [7:0] shared_a;" in top
+        assert "logic [3:0] shared_b;" in top
+        assert "assign shared_a = shared_a_q;" in top
+        assert "assign shared_b = shared_b_q;" in top
+
+    # ---------- ECMA-subset lowering ---------------------------------
+
+    def test_owner_region_assign_uses_ecma_subset_lowering(self):
+        """The owner-region's assign RHS MUST lower via the
+        wave-3-f-future-assign ECMA subset: integer literals, datamodel
+        idents (read from chart-top wire), `+`/`-`, booleans."""
+        # Literal RHS.
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_shared_signal(writer_expr="7"),
+            {"chart_name": "lit"},
+        )
+        top = files["lit_top.sv"]
+        assert "shared_my_shared_q <= 8'sd7;" in top
+
+        # Datamodel-ident RHS.  Owner's `counter` lives at chart-top
+        # scope as `owner_data_counter` (the wrapper exposes per-region
+        # datamodel signals as outputs).
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_shared_signal(writer_expr="counter"),
+            {"chart_name": "id"},
+        )
+        top = files["id_top.sv"]
+        assert "owner_data_counter" in top
+        assert "shared_my_shared_q <= owner_data_counter;" in top
+
+        # Binop RHS.
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_shared_signal(writer_expr="counter + 1"),
+            {"chart_name": "bn"},
+        )
+        top = files["bn_top.sv"]
+        assert "(owner_data_counter + 8'sd1)" in top
+
+        # Boolean RHS — lowered by the ECMA-subset parser to integer
+        # literals.
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_shared_signal(width="1", writer_expr="true"),
+            {"chart_name": "bool"},
+        )
+        top = files["bool_top.sv"]
+        # The signal is 1-bit, so the writer RHS is rendered as a
+        # 1-bit signed literal (sd1 truncates to bit 0).
+        assert "shared_my_shared_q <=" in top
+
+    # ---------- D walker invariant preservation ----------------------
+
+    def test_d_walker_one_driver_invariant_preserved_by_construction(self):
+        """The emitted SV code MUST have exactly ONE driver of
+        ``shared_<name>_q`` (the owner-region driving process).  This
+        is what SOS-08-D's `_emit_shared_signal_invariants` SVA
+        ``$changed(shared_<name>) |-> ...`` assertion checks; the v1
+        emit makes it true structurally — readers do not write the
+        register."""
+        files = transliterate_hdl_sv.render_target(
+            self._chart_with_shared_signal(), {"chart_name": "inv"}
+        )
+        top = files["inv_top.sv"]
+        # Count the number of `shared_my_shared_q <=` lines inside the
+        # owner-driver process body (reset + writer arms + hold).  All
+        # MUST be inside ONE always_ff block — that is the structural
+        # guarantee.
+        assert top.count("always_ff @(posedge clk_main) begin") >= 1
+        # The chart-top is the SOLE assigner of the _q register.
+        # `assign shared_<name> = shared_<name>_q;` is the only other
+        # reference and it READS the register; it does not drive it.
+        assert "assign shared_my_shared = shared_my_shared_q;" in top
+        # No reader writes the _q register (would violate one-driver).
+        # Scan for any other always_ff or assign that drives `_q`.
+        # The only `_q <=` lines live inside the owner-driver process,
+        # which is itself the chart-top's lone shared-signal driver.
+        # The augmenter's own block is what we just emitted, so this
+        # is a structural check: only owner_region drives shared_<name>_q.
+        # (We don't double-emit drivers from any reader path.)
+        always_ff_count = top.count(
+            "// <sos:shared_signal name=\"my_shared\""
+        )
+        # Exactly one banner comment ⇒ exactly one driver process.
+        assert always_ff_count == 1

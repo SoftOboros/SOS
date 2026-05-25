@@ -3141,6 +3141,511 @@ def _augment_chart_top_with_per_param_sub_buses_sv(
 
 
 # ---------------------------------------------------------------------------
+# PCDN-SOS-08-C-008 (2026-05-25 §15) — shared-datamodel HDL wiring (SV).
+#
+# Chart-vocab element ``<sos:shared_signal name=... width=... owner_region=.../>``
+# declares a chart-level signal driven by exactly one region and read by
+# zero or more reader regions.  This wave lands the HDL-side wiring that
+# complements SOS-08-D's existing one-driver SVA invariant
+# (`_emit_shared_signal_invariants` in `transliterate_sva_bind.py`).
+#
+# v1 normative scope (same-clock-domain only): the walker rejects any
+# `<sos:shared_signal>` whose ``owner_region`` and any
+# `<sos:shared_signal_ref>`-bearing reader region resolve to different
+# clock domains.  Cross-domain shared signals are deferred to a future
+# PCDN (the v1 ``shared_<name>`` naming will be EXTENDED, not replaced,
+# per §15 2026-05-25 addendum).
+#
+# The augmenter pattern mirrors PCDN-SOS-08-C-007's per-`<param>`
+# sub-bus emit: per the file-scope discipline, all chart-top scope
+# wiring (signal declarations, owner driver process, continuous assign,
+# reader port wires) is emitted as a post-process step on the wrapper
+# body produced by ``hdl_common.emit_chart_top_wrapper`` (the helper is
+# left untouched).
+#
+# D walker invariant preservation (by construction): SOS-08-D's existing
+# `_emit_shared_signal_invariants` emits the one-driver SVA invariant
+# ``$changed(shared_<name>) |-> (current_state_<owner> != ST_<idle>)``.
+# This walker emits exactly ONE driver per shared signal (the chart-top
+# `always_ff` block keyed on ``owner_region``'s clock); readers do not
+# write `shared_<name>_q`.  The assertion is therefore structurally
+# satisfied — there is no way for a reader to violate the one-driver
+# rule under this emit.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _SharedSignalWriter:
+    """One ``<onentry>``/``<onexit>`` ``<assign location="<shared_name>"
+    expr="..."/>`` record collected from the owner region's chart-XML.
+
+    The augmenter lowers ``expr`` through the wave-3-f-future-assign
+    ECMA-subset parser (literals, datamodel idents, `+`/`-`, booleans)
+    and renders the SV right-hand-side referencing the chart-top wires
+    exposed for the owner region's datamodel signals.
+    """
+
+    state_id: str
+    edge: str  # "entry" or "exit"
+    expr: str
+
+
+@dataclass
+class _SharedSignalHdl:
+    """One ratified ``<sos:shared_signal>`` declaration, augmented with
+    the owner-region writers + reader regions discovered in the chart-XML.
+
+    Mirrors the SVA-side ``_SharedSignal`` shape (`transliterate_sva_bind`)
+    plus the HDL-side wiring metadata the augmenter consumes.
+    """
+
+    name: str
+    width: int
+    owner_region: str
+    writers: list[_SharedSignalWriter]
+    reader_regions: list[str]  # sanitised region names referencing the signal
+    doc_order: int = 0
+
+
+def _collect_shared_signals_hdl(
+    chart_ir: dict[str, Any],
+) -> list[_SharedSignalHdl]:
+    """Parse ``<sos:shared_signal>`` declarations from the chart-IR.
+
+    Mirrors `transliterate_sva_bind._collect_shared_signals`'s parser
+    (same chart-XML shape; raises ``UnsupportedChartError`` with the
+    canonical ``SOS-08-C wave-future-shared:`` prefix on malformed
+    entries).  Writers + reader regions are filled in later by
+    `_attach_shared_signal_writers` and `_attach_shared_signal_readers`.
+    """
+    raw = (
+        chart_ir.get("sos:shared_signal")
+        or chart_ir.get("shared_signal")
+        or []
+    )
+    if isinstance(raw, dict):
+        raw = [raw]
+    out: list[_SharedSignalHdl] = []
+    for idx, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        owner = entry.get("owner_region")
+        width_raw = entry.get("width", 1)
+        if not (isinstance(name, str) and name.strip()):
+            raise UnsupportedChartError(
+                "SOS-08-C wave-future-shared: <sos:shared_signal> MUST "
+                "carry a non-empty `name` attribute (used as the emitted "
+                "signal identifier `shared_<name>`)."
+            )
+        if not (isinstance(owner, str) and owner.strip()):
+            raise UnsupportedChartError(
+                f"SOS-08-C wave-future-shared: <sos:shared_signal "
+                f"name={name!r}> MUST carry a non-empty `owner_region` "
+                f"attribute naming the single region that drives it."
+            )
+        try:
+            width = int(width_raw)
+        except (TypeError, ValueError):
+            raise UnsupportedChartError(
+                f"SOS-08-C wave-future-shared: <sos:shared_signal "
+                f"name={name!r}>'s `width` MUST be a positive integer; "
+                f"got {width_raw!r}."
+            ) from None
+        if width < 1:
+            width = 1
+        out.append(
+            _SharedSignalHdl(
+                name=name.strip(),
+                width=width,
+                owner_region=owner.strip(),
+                writers=[],
+                reader_regions=[],
+                doc_order=idx,
+            )
+        )
+    return out
+
+
+def _attach_shared_signal_writers(
+    signals: list[_SharedSignalHdl],
+    regions: list[HdlRegion],
+) -> None:
+    """For each shared signal, scan the owner region's onentry/onexit
+    `<assign>` records and collect those whose ``location`` references
+    the shared-signal name.  These become the chart-top driver process's
+    case arms.
+    """
+    by_name = {sig.name: sig for sig in signals}
+    if not by_name:
+        return
+    for region in regions:
+        for sig in signals:
+            if sig.owner_region != region.name:
+                continue
+            for state in region.states:
+                for assign in state.onentry_assigns:
+                    if assign.location == sig.name:
+                        sig.writers.append(_SharedSignalWriter(
+                            state_id=state.state_id,
+                            edge="entry",
+                            expr=assign.expr,
+                        ))
+                for assign in state.onexit_assigns:
+                    if assign.location == sig.name:
+                        sig.writers.append(_SharedSignalWriter(
+                            state_id=state.state_id,
+                            edge="exit",
+                            expr=assign.expr,
+                        ))
+
+
+def _attach_shared_signal_readers(
+    signals: list[_SharedSignalHdl],
+    chart_ir: dict[str, Any],
+    regions: list[HdlRegion],
+) -> None:
+    """Walk the chart-IR tree to find every `<sos:shared_signal_ref>`
+    element AND every `<assign expr="<shared_name>"/>` that resolves to
+    a declared shared-signal name; record the enclosing region name.
+
+    Used by the same-clock-domain validation step + the augmenter's
+    reader-port wiring decision.
+    """
+    if not signals:
+        return
+    declared_names = {sig.name: sig for sig in signals}
+    region_names = {r.name for r in regions}
+
+    def _record_reader(name: str, region_name: str) -> None:
+        sig = declared_names.get(name)
+        if sig is None or sig.owner_region == region_name:
+            return
+        if region_name in sig.reader_regions:
+            return
+        sig.reader_regions.append(region_name)
+
+    def _walk(node: Any, region_name: str | None) -> None:
+        if isinstance(node, dict):
+            # Region boundary — every parallel-region child carries an
+            # ``id`` that matches the region name we surface.  Update
+            # the contextual region name when we recurse into one.
+            node_id = node.get("id")
+            next_region = region_name
+            if isinstance(node_id, str) and node_id in region_names:
+                next_region = node_id
+            for k, v in node.items():
+                bare = k.split(":")[-1] if isinstance(k, str) else ""
+                if bare == "shared_signal_ref":
+                    refs = v if isinstance(v, list) else [v]
+                    for r in refs:
+                        if isinstance(r, dict):
+                            nm = r.get("name")
+                            if (
+                                isinstance(nm, str)
+                                and nm.strip()
+                                and next_region
+                            ):
+                                _record_reader(nm.strip(), next_region)
+                else:
+                    _walk(v, next_region)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item, region_name)
+
+    _walk(chart_ir, None)
+
+    # Also pick up `<assign expr="<shared_name>"/>` readers — when the
+    # RHS of an assign is a bare identifier matching a declared shared
+    # signal, the enclosing region is a reader.
+    for region in regions:
+        for state in region.states:
+            for assign in state.onentry_assigns + state.onexit_assigns:
+                expr_text = (assign.expr or "").strip()
+                if expr_text in declared_names:
+                    _record_reader(expr_text, region.name)
+
+
+def _resolve_region_clock_pair(
+    region: HdlRegion,
+    clock_decls: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """Resolve a region's clock identity to a ``(source, kind)`` pair.
+
+    When the chart declares a ``<sos:clock_domains>`` block AND the
+    region's ``clock_domain`` resolves to one of the declared
+    ``<sos:clock>`` names, alias collapse via
+    `_clock_domains.resolve_alias` returns the canonical
+    ``(source, kind)``.  Otherwise the region's bare ``clock_domain``
+    string is treated as a unique source with ``"rising"`` kind — this
+    is the wave-1 default behaviour preserved byte-identically.
+    """
+    domain = region.clock_domain or "main"
+    if clock_decls:
+        try:
+            from _clock_domains import resolve_alias as _resolve_alias  # type: ignore
+            if domain in clock_decls:
+                _, source, kind = _resolve_alias(domain, clock_decls)
+                return (source, kind)
+        except (ImportError, KeyError):
+            pass
+    return (domain, "rising")
+
+
+def _validate_shared_signal_clock_domains(
+    signals: list[_SharedSignalHdl],
+    regions: list[HdlRegion],
+    chart_ir: dict[str, Any],
+) -> None:
+    """v1 same-clock-domain enforcement per PCDN-SOS-08-C-008 addendum.
+
+    For each shared signal, compute the owner region's resolved
+    ``(source, kind)`` pair AND each reader region's pair.  Mismatches
+    raise ``UnsupportedChartError`` with the canonical
+    ``SOS-08-C wave-future-shared-xclk:`` prefix, citing the §15 entry.
+    """
+    if not signals:
+        return
+    # Defensively import the clock-domains parser; missing module
+    # collapses to the wave-1 default where every region inherits
+    # ``clock_domain="main"`` (same-domain by construction).
+    try:
+        from _clock_domains import parse_clock_domains as _parse_clock_domains  # type: ignore
+        clock_decls = _parse_clock_domains(chart_ir)
+    except (ImportError, Exception):  # pragma: no cover — defensive
+        clock_decls = None
+
+    region_by_name = {r.name: r for r in regions}
+    for sig in signals:
+        owner = region_by_name.get(sig.owner_region)
+        if owner is None:
+            # Defensive — SVA-side validation already rejects unknown
+            # owner_region.  Skip rather than double-raise.
+            continue
+        owner_pair = _resolve_region_clock_pair(owner, clock_decls)
+        for reader_name in sig.reader_regions:
+            reader = region_by_name.get(reader_name)
+            if reader is None:
+                continue
+            reader_pair = _resolve_region_clock_pair(reader, clock_decls)
+            if reader_pair != owner_pair:
+                raise UnsupportedChartError(
+                    f"SOS-08-C wave-future-shared-xclk: "
+                    f"<sos:shared_signal name='{sig.name}'/> readers in "
+                    f"region '{reader_name}' on clock {reader_pair} "
+                    f"differ from owner_region '{sig.owner_region}' on "
+                    f"clock {owner_pair}; cross-domain shared signals "
+                    f"deferred to future PCDN. See SOS-08-C-CONCEPTS.md "
+                    f"§15 2026-05-25 entry."
+                )
+
+
+def _shared_signal_render_sv_expr(
+    expr_text: str,
+    owner_datamodel_ids: list[str],
+    owner_region_ident: str,
+    width: int,
+) -> str:
+    """Lower a chart-XML ``<assign expr=...>`` text to SV RHS text for
+    use in the chart-top owner-driver process.
+
+    The lowering uses the wave-3-f-future-assign shared parser (so
+    boolean literals + numeric literals + `+`/`-` between datamodel
+    idents are all admitted).  Datamodel idents resolve to the chart-
+    top wire names exposed for the owner region: ``<owner>_data_<id>``
+    (the chart-top wrapper emits one per-region datamodel signal as a
+    top-level wire, no ``_q`` suffix at chart-top scope — the per-
+    region module already drove the combinational output).
+    """
+    expr_text = (expr_text or "").strip()
+    if not expr_text:
+        return f"{width}'sd0"
+    # Use the shared ECMA-subset parser.  Idents are validated against
+    # the owner region's datamodel; unknown idents raise.
+    tree = _parse_assign_expr(expr_text, owner_datamodel_ids)
+    return _render_shared_signal_node_sv(
+        tree, owner_region_ident, width,
+    )
+
+
+def _render_shared_signal_node_sv(
+    node: AssignExpr, owner_region_ident: str, width: int,
+) -> str:
+    """Local SV renderer for shared-signal RHS — reads chart-top wires
+    rather than per-region ``data_<id>_q`` registers (the wave-3-f
+    ``_render_sv`` helper assumes per-region scope).
+    """
+    if node.kind == "literal":
+        sign = "s" if node.value < 0 else "s"
+        # Width-prefixed signed literal; width matches the shared
+        # signal's declared width so the lowered RHS is type-safe.
+        return f"{width}'{sign}d{node.value}"
+    if node.kind == "neg_literal":
+        return f"{width}'sd{node.value}"
+    if node.kind == "ident":
+        # Owner region's datamodel signal at chart-top scope is
+        # ``<owner>_data_<id>`` (combinational alias of the per-region
+        # ``data_<id>_q``).  The chart-top wrapper already exposes it.
+        return f"{owner_region_ident}_data_{node.ident}"
+    if node.kind == "binop":
+        left = _render_shared_signal_node_sv(
+            node.left, owner_region_ident, width
+        )
+        right = _render_shared_signal_node_sv(
+            node.right, owner_region_ident, width
+        )
+        return f"({left} {node.op} {right})"
+    raise AssignExprError(
+        f"unrenderable AssignExpr kind '{node.kind}' in shared-signal "
+        f"RHS lowering"
+    )
+
+
+def _augment_chart_top_with_shared_signals_sv(
+    wrapper_body: str,
+    shared_signals: list[_SharedSignalHdl],
+    regions: list[HdlRegion],
+) -> str:
+    """PCDN-SOS-08-C-008 (2026-05-25 §15) — augment the chart-top
+    wrapper with shared-signal declarations, owner-driver process,
+    continuous combinational alias, and reader-region port wires.
+
+    Per the file-scope discipline (mirrors W7-C07's per-`<param>`
+    sub-bus augmenter): emission is purely a post-process pass on the
+    wrapper body produced by ``hdl_common.emit_chart_top_wrapper``.
+    The helper is left untouched.
+
+    D walker invariant preservation by construction: the owner-driver
+    process is the SOLE driver of ``shared_<name>_q``; readers do not
+    write the register.  SOS-08-D's
+    `_emit_shared_signal_invariants` one-driver SVA assertion is
+    therefore satisfied structurally — no reader path can violate it.
+    """
+    if not shared_signals:
+        return wrapper_body
+    if "endmodule" not in wrapper_body:
+        return wrapper_body
+
+    region_by_name = {r.name: r for r in regions}
+    decl_lines: list[str] = [
+        "",
+        "    // ----- PCDN-SOS-08-C-008 (2026-05-25 §15) -----",
+        "    // <sos:shared_signal> chart-top declarations + owner-region",
+        "    // driving process.  Each shared signal carries exactly one",
+        "    // driver (`shared_<name>_q`, on the owner region's clock);",
+        "    // SOS-08-D's `_emit_shared_signal_invariants` one-driver",
+        "    // SVA assertion is structurally satisfied — readers do not",
+        "    // write the register.  v1 same-clock-domain only; cross-",
+        "    // domain references are rejected at chart-vocab time.",
+    ]
+    for sig in shared_signals:
+        w = sig.width
+        if w == 1:
+            decl_lines.append(f"    logic shared_{sig.name};")
+            decl_lines.append(f"    logic shared_{sig.name}_q;")
+        else:
+            decl_lines.append(
+                f"    logic [{w - 1}:0] shared_{sig.name};"
+            )
+            decl_lines.append(
+                f"    logic [{w - 1}:0] shared_{sig.name}_q;"
+            )
+        decl_lines.append(
+            f"    assign shared_{sig.name} = shared_{sig.name}_q;"
+        )
+
+    proc_lines: list[str] = [""]
+    for sig in shared_signals:
+        owner = region_by_name.get(sig.owner_region)
+        if owner is None:
+            # Defensive — already caught by upstream validation.
+            continue
+        clk = _clk_port_name(owner.clock_domain or "main")
+        rst = _rst_port_name(owner.clock_domain or "main")
+        owner_ident = _sanitize_sv_identifier(sig.owner_region)
+        owner_dm_ids = [d.name for d in owner.datamodel]
+        proc_lines.append(
+            f"    // <sos:shared_signal name=\"{sig.name}\" "
+            f"width=\"{sig.width}\" owner_region=\"{sig.owner_region}\"/>"
+            f" — owner-driven on {clk}."
+        )
+        proc_lines.append(f"    always_ff @(posedge {clk}) begin")
+        proc_lines.append(f"        if ({rst}) begin")
+        if sig.width == 1:
+            proc_lines.append(
+                f"            shared_{sig.name}_q <= 1'b0;"
+            )
+        else:
+            proc_lines.append(
+                f"            shared_{sig.name}_q <= "
+                f"{sig.width}'sd0;"
+            )
+        proc_lines.append("        end else begin")
+        if not sig.writers:
+            # No writers found — owner declared the signal but never
+            # writes it; emit a hold (no-op) so the process is still
+            # synthesizable.  This preserves the one-driver invariant
+            # by construction (only this process touches the register).
+            proc_lines.append(
+                f"            shared_{sig.name}_q <= "
+                f"shared_{sig.name}_q;  // no writers — hold"
+            )
+        else:
+            for w_idx, writer in enumerate(sig.writers):
+                rhs = _shared_signal_render_sv_expr(
+                    writer.expr, owner_dm_ids, owner_ident, sig.width,
+                )
+                # Gating: the writer fires when the owner is in
+                # ``state_id`` (we observe the chart-top
+                # ``current_state_<owner>`` wire); the edge attribute
+                # is informative — both entry / exit collapse to the
+                # combinational "owner is in state_id" predicate at
+                # chart-top scope (per-region exit-edge timing is
+                # honoured by the per-region register process; the
+                # chart-top driver is the integration point).
+                state_const = _state_constant_name(writer.state_id)
+                if_kw = "if" if w_idx == 0 else "else if"
+                proc_lines.append(
+                    f"            {if_kw} (current_state_"
+                    f"{owner_ident}[{_state_index_in_region(owner, writer.state_id)}]) begin"
+                )
+                proc_lines.append(
+                    f"                // edge={writer.edge!r}, "
+                    f"source state {writer.state_id} "
+                    f"({state_const})"
+                )
+                proc_lines.append(
+                    f"                shared_{sig.name}_q <= {rhs};"
+                )
+                proc_lines.append("            end")
+            proc_lines.append("            else begin")
+            proc_lines.append(
+                f"                shared_{sig.name}_q <= "
+                f"shared_{sig.name}_q;  // hold"
+            )
+            proc_lines.append("            end")
+        proc_lines.append("        end")
+        proc_lines.append("    end")
+        proc_lines.append("")
+
+    block = "\n".join(decl_lines + proc_lines) + "\n"
+    idx = wrapper_body.rfind("endmodule")
+    return wrapper_body[:idx] + block + wrapper_body[idx:]
+
+
+def _state_index_in_region(region: HdlRegion, state_id: str) -> int:
+    """Return the one-hot bit index of ``state_id`` within ``region``.
+
+    Used by `_augment_chart_top_with_shared_signals_sv` to gate the
+    owner driver process on ``current_state_<owner>[<idx>]``.
+    """
+    for idx, st in enumerate(region.states):
+        if st.state_id == state_id:
+            return idx
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Public entry points.
 # ---------------------------------------------------------------------------
 
@@ -3307,6 +3812,24 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
         wrapper_body = _augment_chart_top_with_per_param_sub_buses_sv(
             wrapper_body, chart_payload_params, region_payload_recv,
         )
+        # PCDN-SOS-08-C-008 (2026-05-25 §15): collect chart-XML
+        # `<sos:shared_signal>` declarations, attach owner-region writers
+        # + reader regions, enforce v1 same-clock-domain constraint, and
+        # post-process the wrapper body with the signal declarations +
+        # owner-driver process.  Same augmenter pattern as C-007 above;
+        # keeps `hdl_common.py` untouched.
+        shared_signals = _collect_shared_signals_hdl(chart_ir)
+        if shared_signals:
+            _attach_shared_signal_writers(shared_signals, regions)
+            _attach_shared_signal_readers(
+                shared_signals, chart_ir, regions
+            )
+            _validate_shared_signal_clock_domains(
+                shared_signals, regions, chart_ir,
+            )
+            wrapper_body = _augment_chart_top_with_shared_signals_sv(
+                wrapper_body, shared_signals, regions,
+            )
         files[wrapper_name] = wrapper_body
 
     return files
