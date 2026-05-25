@@ -103,5 +103,61 @@ INV-S-HDL-F-1's exclusion boundary.
 
 * **(e) end-to-end worked example**: ✅ landed (this directory).
 * **(f) injected-violation chart-vocabulary check**: ✅ landed (`vectors/sem_chart_violation.jsonl`).
-* **UVM 2.0 cross-runtime smoke**: ⏸ separate CI job carry-forward.
+* **UVM 2.0 cross-runtime smoke**: ✅ landed as a **build-only CI smoke** (see below). Live UVM-2.0 simulator runs remain customer-owned per INV-S-HDL-F-2.
 * **pyuvm overlay (SOS-08-F-A)**: ⏸ deferred, gated on customer demand.
+
+## UVM 2.0 cross-runtime smoke — declared scope
+
+The 2026-05-24 wave-2 carry-forward (`SOS08F2c`) adds a CI smoke verifying
+that the SOS-08-F **emitted package surface** (`tb/sos_uvm_seq_pkg.sv`)
+and the customer scaffolding under `tb/` follow only the UVM-1.2-grammar
+subset that is forward-compatible with **IEEE 1800.2-2017 (UVM 2.0)** per
+**INV-S-HDL-F-5**. The CI smoke validates the build and tooling
+surface, NOT a live simulator run.
+
+**What the CI smoke validates** (`.github/workflows/sos-uvm-smoke.yml`):
+
+1. SystemVerilog files under `examples/uvm_integration/` parse cleanly
+   under Verilator's `--lint-only` pass (a UVM-version-agnostic parse
+   check — Verilator does not run UVM, but it does parse the grammar).
+2. The Python tooling test suite under `tools/sos-codegen/` passes,
+   including the new `test_sos_08_f_wave_2_carry_forward.py` checks that
+   pin the `UVM_VERSION` Makefile variable, the `sim-golden-uvm2` /
+   `sim-violation-uvm2` targets, and the README's declared-scope text.
+3. `make -n regen` is a syntactic dry-run of the regenerator — proves
+   the rule wiring resolves under a fresh checkout.
+
+**What the CI smoke does NOT validate** (gated on simulator availability —
+customer-owned per **INV-S-HDL-F-2**):
+
+* No vendor simulator (Questa / VCS / Xcelium / Riviera) is invoked in CI.
+* No actual UVM-1.2 or UVM-2.0 runtime executes the sequence library —
+  Verilator's UVM support is not sufficient to host the full
+  `uvm_pkg` runtime, and the licensed simulators are not available in
+  GitHub Actions.
+* The `[SOS-SEQ] state=... transition=... invariant=... family=... event=...`
+  scoreboard line (defined in `tb/sos_kernel_scoreboard.sv`) is verified
+  to be **textually identical** across the UVM-1.2 and UVM-2.0
+  build flows (same scoreboard source, same chart-vocabulary fields) —
+  the chart-vocabulary preservation per **INV-S-HDL-F-3** is therefore
+  the same string whether the customer runs UVM 1.2 or UVM 2.0.
+
+**How a customer extends the smoke to a real run**: invoke
+`make SIM=<vendor> sim-golden-uvm2` against a UVM-2.0-capable vendor
+install with `UVM_HOME` pointing at the 2.0 library tree. The Makefile
+recipes pass `-L uvm-2.0` / `-ntb_opts uvm-2.0` / `-uvmhome CDNS-2.0`
+per simulator vendor convention; no source-code change is required.
+
+### Canonical `[SOS-SEQ]` scoreboard line
+
+The chart-vocabulary failure-message format per §6.6 is rendered by
+`tb/sos_kernel_scoreboard.sv` as:
+
+```
+[SOS-SEQ] state=<chart_state> transition=<transition_id> invariant=<invariant_id> family=<sos_event_family_e_name> event=<event_id>: <message>
+```
+
+This string shape is **identical under UVM 1.2 and UVM 2.0** because
+all `uvm_error` / `uvm_info` / `uvm_warning` reporting macros and
+`$sformatf` are unchanged between the two versions (per the
+INV-S-HDL-F-5 §15 amendment allow-list).

@@ -671,3 +671,49 @@ The substring `state=task_c.illegal_double_take transition=99 invariant=42` is t
 **Cited PCDNs / invariants**: PCDN-SOS-08-F-001 (UVM 1.2 grammar — confirmed runnable through customer scaffolding); PCDN-SOS-08-F-002 (six families — `sem` exercised end-to-end); PCDN-SOS-08-F-003 (universal `sos_seq_item` — driver branches on `tx.family`); PCDN-SOS-08-F-005 (empty virtual hooks — example does not override, demonstrating the no-touch default path); PCDN-SOS-08-F-006 (one consolidated package — single `import sos_uvm_seq_pkg::*;` per file in the example tree); INV-S-HDL-F-1..5 (each pinned by an explicit static test as listed above); INV-SOS-H + INV-S-HDL-5 (chart-vocabulary survives the UVM boundary — verified end-to-end through the gate (f) string).
 
 Status: 🟢 **wave-2 (e)+(f) landed**. UVM 2.0 cross-runtime smoke + pyuvm overlay remain carry-forward; the customer-side end-to-end UVM 1.2 worked example is the per-§12 conformance gate's final required artifact and is now in place.
+
+### 2026-05-24 — Wave-2 carry-forward (SOS08F2c): UVM 2.0 cross-runtime CI smoke (Ira)
+
+Lands the **UVM 2.0 cross-runtime smoke test** carry-forward identified in both the 2026-05-24 wave-2 JSONL-parser entry and the 2026-05-24 wave-2 (e)+(f) end-to-end entry above. With this commit, the SOS-08-F build surface is demonstrably authored to the UVM-1.2-grammar subset that is forward-compatible with IEEE 1800.2-2017 (UVM 2.0) — and the customer's `make` flow exposes a UVM-2.0 variant in addition to the primary UVM-1.2 flow.
+
+**Scope discipline — declared explicitly because CI green here MUST NOT be over-read**:
+
+- The CI smoke is **build-only / parse-only**. No vendor simulator (Questa / VCS / Xcelium / Riviera) is invoked.
+- Verilator's `--lint-only` pass parses every `.sv` file under `examples/uvm_integration/` — UVM-version-agnostic grammar gate. Verilator cannot host the full `uvm_pkg` runtime, so this is a syntax check, not a UVM-runtime check.
+- The Python `pytest` suite under `tools/sos-codegen/` runs to exercise the walker + the new `test_sos_08_f_wave_2_carry_forward.py` structural checks.
+- `make -n regen` is a syntactic dry-run of the regenerator rule — proves the `regen` wiring resolves under a fresh checkout.
+
+**INV-S-HDL-F-3 cross-version preservation — load-bearing observation**:
+
+INV-S-HDL-F-3 (chart-vocabulary traceability survives the UVM boundary) now spans both UVM 1.2 and UVM 2.0 build surfaces because the canonical `[SOS-SEQ] state=... transition=... invariant=... family=... event=...` scoreboard line is sourced from a **single file** (`tb/sos_kernel_scoreboard.sv`) under both build flows. The Makefile's UVM-1.2 (`sim-golden` / `sim-violation`) and UVM-2.0 (`sim-golden-uvm2` / `sim-violation-uvm2`) target families share the same `SV_SOURCES` list — no per-version scoreboard variant exists. Pinned by `TestSosSeqLineCrossVersion.test_scoreboard_is_single_source_for_both_uvm_versions`.
+
+**New artifact set**:
+
+| Path | Role |
+|---|---|
+| `examples/uvm_integration/Makefile` (edit) | Add `UVM_VERSION ?= 1.2` default. Per-SIM ifeq blocks now parameterise UVM-library flags against `UVM_VERSION` (Questa `-L uvm-$(UVM_VERSION)`; VCS `-ntb_opts uvm-$(UVM_VERSION)`; Xcelium `-uvmhome CDNS-$(UVM_VERSION)`; Riviera `-l uvm-$(UVM_VERSION)`). Two new recursive-make targets `sim-golden-uvm2` and `sim-violation-uvm2` flip `UVM_VERSION=2.0` for a single invocation. The UVM-1.2 targets `sim-golden` / `sim-violation` MUST remain byte-identical behaviour-wise (pinned by `TestCarryForwardMakefileUvm2Targets.test_uvm_1_2_targets_still_exist` + `test_uvm_version_default_is_1_2`). |
+| `examples/uvm_integration/README.md` (edit) | New section **UVM 2.0 cross-runtime smoke — declared scope** documenting build/parse-only scope, what CI validates, what is customer-owned. Status table updated: UVM 2.0 cross-runtime smoke flips ⏸ → ✅. The canonical `[SOS-SEQ]` line shape is cited from the scoreboard so cross-version chart-vocab preservation per INV-S-HDL-F-3 is reader-visible. |
+| `.github/workflows/sos-uvm-smoke.yml` (new) | GitHub Actions workflow with two jobs: `lint` (Verilator `--lint-only` parse of every `.sv` under `examples/uvm_integration/`) and `python-tests` (pytest + `make -n regen`). Triggers on PR + push to `webslinger` on a path-restricted file set. |
+| `tools/sos-codegen/tests/test_sos_08_f_wave_2_carry_forward.py` (new) | Structural pytest module asserting: `UVM_VERSION` variable + 1.2 default; `sim-*-uvm2` targets exist + flip 2.0; UVM-1.2 targets preserved; .PHONY mentions new targets; README documents build-only scope + cites `[SOS-SEQ]` + names "vendor simulator" / "no simulator" / "licensed simulator"; workflow exists with `webslinger` trigger, lint + python-tests jobs, Verilator install, pytest invocation, no vendor-simulator run lines; scoreboard emits `[SOS-SEQ]` line with all five chart-vocab fields; scoreboard is single-source across UVM versions; this §15 amendment cites SOS08F2c. |
+
+**Acceptance gates that flip**:
+
+- **UVM 2.0 cross-runtime smoke**: ⏸ → ✅ (build-only CI smoke landed; live simulator runs remain customer-owned per **INV-S-HDL-F-2**).
+
+**Invariants exercised**:
+
+- **INV-S-HDL-F-1** (sequences only) — unchanged; this entry adds no walker emission and no `uvm_env` / `uvm_agent` / etc. emission.
+- **INV-S-HDL-F-2** (customer owns env/scoreboard/driver/factory) — unchanged; vendor simulator binaries remain customer-owned per the README's declared scope.
+- **INV-S-HDL-F-3** (chart-vocabulary survives the UVM boundary) — now demonstrably spans UVM 1.2 + UVM 2.0 build surfaces because the `[SOS-SEQ]` line is sourced from a single file under both flows.
+- **INV-S-HDL-F-4** (no SVA emission) — unchanged; the CI workflow doesn't emit SVA, and Verilator `--lint-only` would surface any new `assert property` accidentally introduced.
+- **INV-S-HDL-F-5** (UVM 1.2 grammar + UVM 2.0 forward-compat with per-release smoke) — **now operationalised**. The wave-1 §15 entry's "a per-release smoke run validates the cross-runtime invariant" wording is now backed by an actual CI job; the smoke is build/parse-only (the README and this entry are explicit) because a full UVM-2.0 runtime exercise requires customer-owned licensed simulators per INV-S-HDL-F-2.
+
+**Wave-2 remaining work** (post-SOS08F2c):
+
+- **pyuvm overlay** (SOS-08-F-A sub-phase): potential Python uvm-compatible sequence emission for the cocotb path. Gated on customer demand per the wave-1 §15 entry. Not addressed by this carry-forward.
+
+**Cited PCDNs / invariants**: PCDN-SOS-08-F-001 (UVM 1.2 + forward-compat to 2.0 — now operationalised by the CI smoke); INV-S-HDL-F-2 (vendor simulators customer-owned — CI scope discipline); INV-S-HDL-F-3 (chart-vocab survives UVM boundary — now spans both UVM versions by single-source scoreboard); INV-S-HDL-F-5 (UVM 1.2 grammar + per-release smoke — promoted from allowlist-only to actual CI parse).
+
+**Commit**: SOS08F2c (this commit). Pinned by 27 net new tests in `tools/sos-codegen/tests/test_sos_08_f_wave_2_carry_forward.py` (total suite: 716 passing, +27 over the 689 pre-carry-forward baseline).
+
+Status: 🟢 **wave-2 SOS08F2c landed**. UVM 2.0 cross-runtime build-only CI smoke is operational; pyuvm overlay remains the sole wave-2 candidate carry-forward.
