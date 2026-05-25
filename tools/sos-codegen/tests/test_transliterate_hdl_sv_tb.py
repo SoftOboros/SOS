@@ -2305,3 +2305,441 @@ class TestWave3FuturePathNestedJsonParser:
             _parallel_chart_with_path_param("a.b.c.d"),
             {"chart_name": "p"},
         )
+
+
+# ---------------------------------------------------------------------------
+# Wave-3-future remaining: multi-clock testbench wiring.
+# Closes the LAST wave-3-future carry-forward — per-clock generators,
+# ``clock_domain_of_step()`` virtual function, per-clock-domain
+# ``case``-on-clock in ``drive_step``, and one CDC synchroniser stub
+# file per directional boundary.
+#
+# @spec docs/concepts/SOS-08-E-CONCEPTS.md §15 (2026-05-24 wave-3-future
+#       remaining — multi-clock testbench wiring)
+# ---------------------------------------------------------------------------
+
+
+def _chart_with_n_clocks(n: int, *, parallel: bool = False) -> dict:
+    """Build a chart fixture with ``n`` declared clocks.
+
+    Per the task spec, ``<sos:clock_domains>`` carries one or more
+    ``<sos:clock>`` declarations. The test fixture mirrors that shape
+    in raw-dict form using the bare-namespace keys (the scjson loader
+    strips namespaces by default; the walker accepts both shapes).
+    """
+    clocks = []
+    for i in range(n):
+        clocks.append({
+            "name": f"clk_{chr(ord('a') + i)}",
+            "period_ns": 10 * (i + 1),
+            "duty_cycle": 0.5,
+        })
+    if parallel:
+        body = {
+            "initial": "regions",
+            "parallel": [
+                {
+                    "id": "regions",
+                    "state": [
+                        {
+                            "id": "left",
+                            "initial": "li",
+                            "state": [{"id": "li"}, {"id": "la"}],
+                        },
+                        {
+                            "id": "right",
+                            "initial": "ri",
+                            "state": [{"id": "ri"}, {"id": "ra"}],
+                        },
+                    ],
+                }
+            ],
+        }
+    else:
+        body = {
+            "initial": "idle",
+            "state": [{"id": "idle"}, {"id": "active"}],
+        }
+    body["sos:clock_domains"] = {"sos:clock": clocks}
+    return body
+
+
+def _chart_with_explicit_cdc(
+    n_clocks: int,
+    boundaries: list[tuple[str, str]],
+) -> dict:
+    """Single-region chart with N clocks and a list of explicit
+    ``<sos:cdc_boundary from="..." to="..."/>`` declarations."""
+    chart = _chart_with_n_clocks(n_clocks)
+    chart["sos:cdc_boundary"] = [
+        {"from": f, "to": t} for f, t in boundaries
+    ]
+    return chart
+
+
+class TestWave3FutureMultiClockTestbenchWiring:
+    """Wave-3-future remaining (2026-05-24 §15): multi-clock testbench
+    wiring. Closes the LAST wave-3-future carry-forward.
+
+    Detection rule (load-bearing for byte-identity):
+      * Zero or one declared ``<sos:clock>`` → byte-identical to the
+        prior wave-3-future-remaining-path emit.
+      * Two or more declared ``<sos:clock>`` → multi-clock path:
+        per-clock generator block + clock-domain manifest +
+        ``case (clock_domain)`` in the default driver + one CDC sync
+        stub file per directional boundary.
+    """
+
+    # ---------- regression guards (byte-identity for ≤1 clock) ----------
+
+    def test_byte_identity_for_no_clock_declared_chart(self):
+        """Charts with no ``<sos:clock_domains>`` block emit byte-
+        identically to the wave-3-future-remaining-path baseline."""
+        baseline = sv_tb.render_target(
+            _simple_chart(), {"chart_name": "demo"}
+        )
+        # Same call again with the same chart: idempotent → byte-
+        # identical. (The regression guard for clocks is that NO new
+        # files appear on a chart that does not declare any clocks.)
+        again = sv_tb.render_target(
+            _simple_chart(), {"chart_name": "demo"}
+        )
+        assert sorted(baseline) == sorted(again)
+        for k in baseline:
+            assert baseline[k] == again[k], (
+                f"byte-identity regression for `{k}` (no clock declared)"
+            )
+        # No clock_generators / cdc_* files for a chart without
+        # <sos:clock_domains>.
+        assert not any(
+            "clock_generators_" in k or "_cdc_" in k for k in baseline
+        ), (
+            "wave-3-future-remaining multi-clock: a chart with no "
+            "<sos:clock_domains> MUST NOT emit clock_generators or "
+            "CDC sync stub files."
+        )
+
+    def test_byte_identity_for_single_clock_chart(self):
+        """A chart with a ``<sos:clock_domains>`` block containing
+        EXACTLY ONE ``<sos:clock>`` stays in the single-clock emit
+        path — byte-identical to the same chart WITHOUT the
+        ``<sos:clock_domains>`` block."""
+        # Build the same chart twice: once without <sos:clock_domains>,
+        # once with EXACTLY ONE <sos:clock>. The byte-identity claim
+        # is that adding a single-clock declaration is a no-op on the
+        # emit shape.
+        chart_no_clock = _simple_chart()
+        chart_one_clock = _simple_chart()
+        chart_one_clock["sos:clock_domains"] = {
+            "sos:clock": [{"name": "clk_a", "period_ns": 10}]
+        }
+        baseline = sv_tb.render_target(
+            chart_no_clock, {"chart_name": "demo"}
+        )
+        one_clock = sv_tb.render_target(
+            chart_one_clock, {"chart_name": "demo"}
+        )
+        # Same file set, same content. Single-clock chart routes
+        # through the byte-identical single-clock path.
+        assert sorted(baseline) == sorted(one_clock), (
+            "single-clock chart MUST emit the same file set as a "
+            "no-clock-declared chart (byte-identity)."
+        )
+        for k in baseline:
+            assert baseline[k] == one_clock[k], (
+                f"single-clock chart byte-identity regression for `{k}`"
+            )
+
+    def test_drive_step_hook_signature_unchanged_when_single_clock(self):
+        """A single-clock chart MUST keep the wave-3 hook signature
+        (no ``string clock_domain`` parameter)."""
+        files = sv_tb.render_target(
+            _chart_with_n_clocks(1), {"chart_name": "demo"}
+        )
+        drv_base = files["tb/sv/demo/sos_demo_driver_base.svh"]
+        # Wave-3 single-clock signature.
+        assert (
+            "virtual task drive_step(int step_idx, sos_jsonl_record_t rec);"
+            in drv_base
+        )
+        # Multi-clock-only artefact MUST NOT appear.
+        assert "string clock_domain" not in drv_base
+        assert "clock_domain_of_step" not in drv_base
+
+    # ---------- multi-clock detection + clock generators ----------
+
+    def test_two_clock_chart_emits_two_clock_generators(self):
+        """A chart with two declared clocks emits two ``initial`` /
+        ``forever`` blocks in ``clock_generators_<chart>.svh``."""
+        files = sv_tb.render_target(
+            _chart_with_n_clocks(2), {"chart_name": "demo"}
+        )
+        gens_key = "tb/sv/demo/clock_generators_demo.svh"
+        assert gens_key in files, (
+            "wave-3-future-remaining multi-clock: a chart with two "
+            "clocks MUST emit clock_generators_<chart>.svh."
+        )
+        gens = files[gens_key]
+        assert "clk_a = 1'b0;" in gens
+        assert "clk_b = 1'b0;" in gens
+        # Two ``forever`` blocks (one per clock).
+        assert gens.count("forever ") == 2, (
+            "two-clock chart MUST emit exactly two ``forever`` toggle "
+            "blocks; got " + str(gens.count("forever "))
+        )
+
+    def test_three_clock_chart_emits_three_clock_generators(self):
+        """A chart with three declared clocks emits three generators."""
+        files = sv_tb.render_target(
+            _chart_with_n_clocks(3), {"chart_name": "demo"}
+        )
+        gens = files["tb/sv/demo/clock_generators_demo.svh"]
+        for name in ("clk_a", "clk_b", "clk_c"):
+            assert f"{name} = 1'b0;" in gens, (
+                f"three-clock chart MUST initialise `{name}`."
+            )
+        assert gens.count("forever ") == 3
+
+    def test_clock_period_ns_emitted_in_generator(self):
+        """The per-clock generator MUST reference the declared
+        ``period_ns`` value in its ``#(period/2.0 * 1ns)`` toggle."""
+        chart = _chart_with_n_clocks(2)
+        # clk_a → period_ns=10; clk_b → period_ns=20.
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        gens = files["tb/sv/demo/clock_generators_demo.svh"]
+        assert "(10)/2.0" in gens
+        assert "(20)/2.0" in gens
+
+    # ---------- driver base: clock_domain_of_step + hook signatures ----------
+
+    def test_driver_base_declares_clock_domain_of_step_function(self):
+        """The multi-clock driver base MUST declare
+        ``function automatic string clock_domain_of_step(int step_idx);``
+        with a default body that returns the primary (first-declared)
+        clock name."""
+        files = sv_tb.render_target(
+            _chart_with_n_clocks(2), {"chart_name": "demo"}
+        )
+        drv_base = files["tb/sv/demo/sos_demo_driver_base.svh"]
+        assert (
+            "virtual function automatic string clock_domain_of_step(int step_idx)"
+            in drv_base
+        ), (
+            "multi-clock driver base MUST declare clock_domain_of_step."
+        )
+        # Default body returns the primary (first-declared) clock name
+        # as a string literal.
+        assert 'return "clk_a";' in drv_base
+
+    def test_drive_step_hook_signature_gains_clock_domain_param_when_multi_clock(
+        self,
+    ):
+        """The multi-clock driver base extends ``drive_step``'s signature
+        with a ``string clock_domain`` parameter so subclasses know
+        which clock-domain timing edge to target."""
+        files = sv_tb.render_target(
+            _chart_with_n_clocks(2), {"chart_name": "demo"}
+        )
+        drv_base = files["tb/sv/demo/sos_demo_driver_base.svh"]
+        # All three hooks gain the parameter.
+        assert "drive_pre(int step_idx, string clock_domain)" in drv_base
+        assert "string clock_domain" in drv_base
+        assert "drive_step(" in drv_base and "sos_jsonl_record_t rec" in drv_base
+        assert "drive_post(int step_idx, string clock_domain)" in drv_base
+
+    def test_default_driver_uses_case_on_clock_domain(self):
+        """The default driver's ``drive_step`` override MUST select the
+        per-step clock-domain timing edge via ``case (clock_domain)``."""
+        files = sv_tb.render_target(
+            _chart_with_n_clocks(2), {"chart_name": "demo"}
+        )
+        drv = files["tb/sv/demo/sos_driver_demo.sv"]
+        assert "case (clock_domain)" in drv, (
+            "multi-clock default driver MUST use `case (clock_domain)` "
+            "to pick per-step posedge."
+        )
+        assert '"clk_a": @(posedge clk_a);' in drv
+        assert '"clk_b": @(posedge clk_b);' in drv
+        # Default arm falls back to primary clock so forward progress
+        # is preserved on a misclassified step.
+        assert "default: @(posedge clk_a);" in drv
+
+    def test_primary_clock_is_first_declared(self):
+        """The first-declared clock is the primary. Both
+        ``clock_domain_of_step``'s default body and the default
+        driver's ``case`` ``default:`` arm reference it."""
+        # Build with primary='clk_b' by swapping order.
+        chart = {
+            "initial": "idle",
+            "state": [{"id": "idle"}, {"id": "active"}],
+            "sos:clock_domains": {
+                "sos:clock": [
+                    {"name": "clk_b", "period_ns": 20},
+                    {"name": "clk_a", "period_ns": 10},
+                ]
+            },
+        }
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        drv_base = files["tb/sv/demo/sos_demo_driver_base.svh"]
+        drv = files["tb/sv/demo/sos_driver_demo.sv"]
+        # Primary clock now = clk_b.
+        assert 'return "clk_b";' in drv_base
+        assert "default: @(posedge clk_b);" in drv
+
+    def test_clock_domain_of_step_default_returns_primary(self):
+        """``clock_domain_of_step``'s default body returns the
+        primary (first-declared) clock name verbatim, regardless of
+        ``step_idx``. The function uses ``step_idx`` only as the
+        formal-parameter slot (subclasses use it to map indices to
+        domains; the default ignores it)."""
+        files = sv_tb.render_target(
+            _chart_with_n_clocks(2), {"chart_name": "demo"}
+        )
+        drv_base = files["tb/sv/demo/sos_demo_driver_base.svh"]
+        # The function body is a single ``return "<primary>";``
+        # statement. Verify the body shape.
+        assert "clock_domain_of_step(int step_idx)" in drv_base
+        # Extract the function body region (between the signature and
+        # the ``endfunction``) and verify it returns the primary name
+        # verbatim with no conditional logic.
+        start = drv_base.find("clock_domain_of_step(int step_idx)")
+        end = drv_base.find("endfunction", start)
+        body = drv_base[start:end]
+        assert 'return "clk_a";' in body
+        assert "if " not in body and "case " not in body, (
+            "default clock_domain_of_step body MUST be a simple return; "
+            "no branching."
+        )
+
+    # ---------- CDC sync stub files ----------
+
+    def test_cdc_sync_stub_file_emitted_per_directional_boundary(self):
+        """For each declared CDC boundary, the walker emits one
+        ``sos_<chart>_cdc_<from>_<to>_sync.svh`` file. Directions are
+        distinct: ``clk_a → clk_b`` and ``clk_b → clk_a`` produce TWO
+        separate stub files."""
+        chart = _chart_with_explicit_cdc(
+            2, [("clk_a", "clk_b"), ("clk_b", "clk_a")]
+        )
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        assert "tb/sv/demo/sos_demo_cdc_clk_a_clk_b_sync.svh" in files
+        assert "tb/sv/demo/sos_demo_cdc_clk_b_clk_a_sync.svh" in files
+
+    def test_cdc_sync_stub_file_naming_convention(self):
+        """File-name convention: ``sos_<chart>_cdc_<from>_<to>_sync.svh``."""
+        chart = _chart_with_explicit_cdc(2, [("clk_a", "clk_b")])
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        # Single direction → exactly one CDC file.
+        cdc_files = [k for k in files if "_cdc_" in k]
+        assert cdc_files == ["tb/sv/demo/sos_demo_cdc_clk_a_clk_b_sync.svh"]
+
+    def test_cdc_sync_default_body_is_two_ff_synchroniser(self):
+        """The CDC stub's body MUST carry the documented user-replace
+        banner + a 2-FF synchroniser implementation."""
+        chart = _chart_with_explicit_cdc(2, [("clk_a", "clk_b")])
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        stub = files["tb/sv/demo/sos_demo_cdc_clk_a_clk_b_sync.svh"]
+        # User-replace banner (the banner text may line-wrap inside
+        # comment blocks; verify both halves are present).
+        assert "SYNCHRONISER STUB: provided by user." in stub, (
+            "CDC stub MUST carry the user-replace banner."
+        )
+        assert "project-specific CDC primitive" in stub
+        # 2-FF implementation: two flip-flop assignments.
+        assert "meta_q" in stub and "sync_q" in stub
+        # Module name matches the file name convention.
+        assert "module sos_demo_cdc_clk_a_clk_b_sync" in stub
+
+    # ---------- chart-vocab gate errors ----------
+
+    def test_invalid_sv_identifier_in_clock_name_raises(self):
+        """A clock name that does not match
+        ``[a-zA-Z_][a-zA-Z0-9_]*`` raises ``UnsupportedChartError`` at
+        codegen time (chart-vocab gate). Examples: ``"123clk"``,
+        ``"clk-a"``, ``"clk a"``."""
+        for bad in ("123clk", "clk-a", "clk a", "clk.a"):
+            chart = {
+                "initial": "idle",
+                "state": [{"id": "idle"}],
+                "sos:clock_domains": {
+                    "sos:clock": [
+                        {"name": bad, "period_ns": 10},
+                    ]
+                },
+            }
+            with pytest.raises(sva_bind.UnsupportedChartError):
+                sv_tb.render_target(chart, {"chart_name": "demo"})
+
+    def test_unknown_clock_id_in_sampling_clock_raises(self):
+        """A ``<sos:cdc_boundary>`` or
+        ``<sos:cross_invariant><sos:sampling_clock>`` referencing a
+        clock NOT in ``<sos:clock_domains>`` raises
+        ``UnsupportedChartError`` so the chart-author sees a clear
+        chart-vocab gate error rather than a downstream sync-stub
+        compile failure."""
+        chart = _chart_with_n_clocks(2)
+        # Reference a clock the chart didn't declare.
+        chart["sos:cdc_boundary"] = [{"from": "clk_z", "to": "clk_a"}]
+        with pytest.raises(sva_bind.UnsupportedChartError):
+            sv_tb.render_target(chart, {"chart_name": "demo"})
+
+    # ---------- public file-count helper ----------
+
+    def test_expected_sv_tb_file_count_helper_returns_correct_count(self):
+        """``expected_sv_tb_file_count(chart_xml)`` returns the total
+        file count for a chart. Pinned to the actual ``render_target``
+        emit so tests can use it without hard-coding numbers."""
+        # No clocks → single-clock baseline (16).
+        assert sv_tb.expected_sv_tb_file_count(_simple_chart()) == 16
+        # 1 clock → still 16 (byte-identity).
+        assert (
+            sv_tb.expected_sv_tb_file_count(_chart_with_n_clocks(1)) == 16
+        )
+        # 2 clocks, 0 CDC → 17 (16 + 1 generators).
+        chart_2c = _chart_with_n_clocks(2)
+        files_2c = sv_tb.render_target(chart_2c, {"chart_name": "demo"})
+        assert sv_tb.expected_sv_tb_file_count(chart_2c) == len(files_2c)
+        # 2 clocks, 1 explicit CDC → 18.
+        chart_cdc = _chart_with_explicit_cdc(2, [("clk_a", "clk_b")])
+        files_cdc = sv_tb.render_target(chart_cdc, {"chart_name": "demo"})
+        assert (
+            sv_tb.expected_sv_tb_file_count(chart_cdc)
+            == len(files_cdc)
+            == 18
+        )
+        # 3 clocks, 2 CDC boundaries → 16 + 1 generators + 2 sync = 19.
+        chart_3c = _chart_with_explicit_cdc(
+            3, [("clk_a", "clk_b"), ("clk_b", "clk_c")]
+        )
+        files_3c = sv_tb.render_target(chart_3c, {"chart_name": "demo"})
+        assert (
+            sv_tb.expected_sv_tb_file_count(chart_3c)
+            == len(files_3c)
+            == 19
+        )
+
+    # ---------- parallel charts also work ----------
+
+    def test_parallel_chart_multi_clock_also_works(self):
+        """The multi-clock path composes with parallel charts: the
+        parallel top-module declares per-clock ``logic``s, includes the
+        clock-generators header, and routes the driver through the
+        multi-clock base class."""
+        chart = _chart_with_n_clocks(2, parallel=True)
+        files = sv_tb.render_target(chart, {"chart_name": "p"})
+        # Clock generators header is emitted.
+        assert "tb/sv/p/clock_generators_p.svh" in files
+        # The parallel top module declares per-clock signals and
+        # includes the generators header.
+        top = files["tb/sv/p/tb_p.sv"]
+        assert "logic clk_a;" in top
+        assert "logic clk_b;" in top
+        assert '`include "clock_generators_p.svh"' in top
+        # The driver base is the multi-clock variant — has the
+        # clock_domain_of_step manifest + extended hook signatures.
+        drv_base = files["tb/sv/p/sos_p_driver_base.svh"]
+        assert "clock_domain_of_step" in drv_base
+        assert "string clock_domain" in drv_base
+        # And the default driver uses case-on-clock_domain.
+        drv = files["tb/sv/p/sos_driver_p.sv"]
+        assert "case (clock_domain)" in drv

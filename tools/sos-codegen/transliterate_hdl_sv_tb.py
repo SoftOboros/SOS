@@ -467,6 +467,288 @@ def _collect_path_params(
 
 
 # ---------------------------------------------------------------------------
+# Wave-3-future-remaining (2026-05-24 §15) — multi-clock testbench wiring.
+#
+# Reads the chart's ``<sos:clock_domains>`` block (one or more
+# ``<sos:clock>`` declarations) and the chart's CDC-boundary declarations
+# (either explicit ``<sos:cdc_boundary from="..." to="..."/>`` elements
+# OR derived from ``<sos:cross_invariant>`` / ``<sos:sampling_clock>``
+# annotations that pair two distinct clock domains on one signal).
+#
+# Detection rule (load-bearing for byte-identity):
+#   * Zero or one declared ``<sos:clock>`` → SINGLE-clock emit path
+#     (byte-identical to the prior wave-3-future-remaining-path emit).
+#   * Two or more declared ``<sos:clock>`` → MULTI-clock emit path
+#     (per-clock generator block + clock-domain manifest + ``case
+#     (clock_domain)`` in the default driver's ``drive_step``; one CDC
+#     synchroniser stub file per directional boundary).
+#
+# Authority boundary (per §0 standards-integration matrix):
+#   * ``<sos:clock_domains>`` / ``<sos:clock>`` element shape — declared
+#     by SOS-08-D wave-4 (multi-clock-domain bind wiring); this walker
+#     ``mirror``s the upstream shape (reads but does not extend).
+#   * ``clock_domain_of_step()`` virtual-function shape on the driver
+#     base — relationship ``own`` (this walker authors the SV contract).
+#   * CDC sync stub naming convention
+#     ``sos_<chart>_cdc_<from>_<to>_sync.svh`` — relationship ``own``.
+# ---------------------------------------------------------------------------
+
+
+_SV_CLOCK_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_sv_clock_name(name: str) -> str:
+    """Wave-3-future-remaining (2026-05-24 §15): validate a chart-declared
+    clock-domain identifier against SV identifier rules.
+
+    Returns the validated name unchanged. Raises ``UnsupportedChartError``
+    when the name does not match ``[A-Za-z_][A-Za-z0-9_]*`` — the chart-
+    vocab gate runs at codegen time so the error surfaces with the chart-
+    author's clock name verbatim instead of a generated-SV compile
+    failure downstream.
+    """
+    if not isinstance(name, str) or not name:
+        raise UnsupportedChartError(
+            "SOS-08-E wave-3-future-remaining (multi-clock): "
+            "<sos:clock> declaration MUST carry a non-empty `name` "
+            "attribute."
+        )
+    if not _SV_CLOCK_NAME_RE.match(name):
+        raise UnsupportedChartError(
+            "SOS-08-E wave-3-future-remaining (multi-clock): "
+            f'<sos:clock name="{name}"/> violates SV identifier rules '
+            "``[A-Za-z_][A-Za-z0-9_]*``; clock names land verbatim as "
+            "SV signal names in the testbench top + as case-labels in "
+            "the default driver's ``drive_step``."
+        )
+    return name
+
+
+def _collect_clock_domains(
+    chart_ir: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Wave-3-future-remaining (2026-05-24 §15): read the chart's
+    ``<sos:clock_domains>`` block and return one dict per declared clock.
+
+    Assumed wave-4 shape (mirrored from SOS-08-D wave-4 multi-clock-
+    domain bind wiring; documented in §15 since the upstream wave-4
+    element is landing in parallel with this slice):
+
+        <sos:clock_domains>
+          <sos:clock name="clk_a" period_ns="10"   duty_cycle="0.5"/>
+          <sos:clock name="clk_b" period_ns="20.0" duty_cycle="0.5"/>
+        </sos:clock_domains>
+
+    Returns ``[{name, period_ns, duty_cycle}, ...]`` in document order;
+    the first-declared clock is the **primary** clock per the multi-
+    clock spec (used as the default return of
+    ``clock_domain_of_step()``).
+
+    Accepts both the SCXML-namespaced (``sos:clock_domains`` /
+    ``sos:clock``) and bare-namespace (``clock_domains`` / ``clock``)
+    keys — the scjson loader strips namespaces by default but raw-dict
+    chart fixtures may use either form.
+
+    Returns an empty list when no ``<sos:clock_domains>`` block exists.
+    The caller decides whether zero clocks means "use the default
+    100 MHz clock" (the byte-identity single-clock path) or a fail-fast
+    error.
+    """
+    if not isinstance(chart_ir, dict):
+        return []
+    block = (
+        chart_ir.get("sos:clock_domains")
+        or chart_ir.get("clock_domains")
+    )
+    if block is None:
+        return []
+    # Accept both list-of-blocks and single-block forms (the scjson
+    # loader's repeated-child handling can produce either).
+    if isinstance(block, list):
+        if not block:
+            return []
+        # Multiple <sos:clock_domains> blocks → take the union of their
+        # <sos:clock> children in document order.
+        clocks_raw: list[Any] = []
+        for b in block:
+            if not isinstance(b, dict):
+                continue
+            inner = b.get("sos:clock") or b.get("clock") or []
+            if isinstance(inner, dict):
+                clocks_raw.append(inner)
+            elif isinstance(inner, list):
+                clocks_raw.extend(inner)
+    elif isinstance(block, dict):
+        inner = block.get("sos:clock") or block.get("clock") or []
+        if isinstance(inner, dict):
+            clocks_raw = [inner]
+        elif isinstance(inner, list):
+            clocks_raw = list(inner)
+        else:
+            clocks_raw = []
+    else:
+        return []
+
+    seen_names: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for clk in clocks_raw:
+        if not isinstance(clk, dict):
+            continue
+        name = clk.get("name")
+        name = _validate_sv_clock_name(name)
+        if name in seen_names:
+            # Duplicate clock declaration — first wins (deterministic).
+            continue
+        seen_names.add(name)
+        # period_ns / duty_cycle are advisory; keep raw values so the
+        # generator emit can use them verbatim. Default period_ns to
+        # 10 (100 MHz) when absent to match the wave-1 testbench top's
+        # ``CLK_PERIOD = 10`` default.
+        period_ns = clk.get("period_ns") or clk.get("period")
+        if period_ns is None:
+            period_ns = 10
+        duty = clk.get("duty_cycle") or clk.get("duty")
+        if duty is None:
+            duty = 0.5
+        out.append({
+            "name": name,
+            "period_ns": period_ns,
+            "duty_cycle": duty,
+        })
+    return out
+
+
+def _collect_cdc_boundaries(
+    chart_ir: dict[str, Any],
+    clock_names: list[str],
+) -> list[tuple[str, str]]:
+    """Wave-3-future-remaining (2026-05-24 §15): enumerate the directional
+    CDC boundaries declared on the chart.
+
+    Two inbound shapes are accepted:
+
+      1. Explicit ``<sos:cdc_boundary from="<clk>" to="<clk>"/>``
+         elements — the canonical declaration form when the chart author
+         wants the testbench to instantiate a synchroniser stub for a
+         specific direction (e.g. clk_a → clk_b request, clk_b → clk_a
+         ack).
+
+      2. Derived from ``<sos:cross_invariant>`` declarations: every pair
+         of distinct clock names referenced via ``<sos:sampling_clock>``
+         children (or a top-level ``sampling_clock=`` attribute on the
+         cross-invariant) yields **one** directional boundary per pair
+         in document order. This handles the SOS-08-D wave-4 cross-
+         invariant case where the invariant samples two clock domains.
+
+    Returns the list of ``(from_clock, to_clock)`` directional pairs in
+    document order; duplicates collapsed. Returns an empty list when no
+    boundaries are declared (multi-clock charts MAY have zero CDC
+    boundaries when no signal crosses domains — the per-clock generator
+    block still emits but no sync stub files do).
+
+    Boundaries that name a clock NOT in ``clock_names`` raise
+    ``UnsupportedChartError`` (chart-vocab gate — the testbench can't
+    instantiate a sync stub for a clock the chart never declared).
+    """
+    known = set(clock_names)
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+
+    def _add(from_clk: str, to_clk: str, source_label: str) -> None:
+        if from_clk == to_clk:
+            # Same-clock "boundary" is not a CDC; silently skip rather
+            # than raise — chart authors sometimes annotate same-clock
+            # invariants with sampling_clock for symmetry.
+            return
+        for clk in (from_clk, to_clk):
+            if clk not in known:
+                raise UnsupportedChartError(
+                    "SOS-08-E wave-3-future-remaining (multi-clock): "
+                    f"{source_label} references clock {clk!r} which is "
+                    f"not in the chart's <sos:clock_domains> declaration. "
+                    f"Declared clocks: {sorted(known)}."
+                )
+        key = (from_clk, to_clk)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(key)
+
+    # Shape 1: explicit <sos:cdc_boundary from="..." to="..."/>.
+    cdc_raw = (
+        chart_ir.get("sos:cdc_boundary")
+        or chart_ir.get("cdc_boundary")
+        or []
+    )
+    if isinstance(cdc_raw, dict):
+        cdc_raw = [cdc_raw]
+    for b in cdc_raw:
+        if not isinstance(b, dict):
+            continue
+        f = b.get("from") or b.get("from_clock")
+        t = b.get("to") or b.get("to_clock")
+        if not (isinstance(f, str) and f and isinstance(t, str) and t):
+            raise UnsupportedChartError(
+                "SOS-08-E wave-3-future-remaining (multi-clock): "
+                "<sos:cdc_boundary> MUST carry both `from` and `to` "
+                "attributes naming chart-declared clocks."
+            )
+        _add(f, t, "<sos:cdc_boundary>")
+
+    # Shape 2: derived from <sos:cross_invariant><sos:sampling_clock>.
+    # The cross-invariant block lives under either `sos:cross_invariant`
+    # or bare `cross_invariant` (the scjson loader's namespace handling
+    # varies). Each cross-invariant MAY list multiple sampling_clock
+    # children; pairs of distinct clocks yield directional boundaries.
+    xinv_raw = (
+        chart_ir.get("sos:cross_invariant")
+        or chart_ir.get("cross_invariant")
+        or []
+    )
+    if isinstance(xinv_raw, dict):
+        xinv_raw = [xinv_raw]
+    for xinv in xinv_raw:
+        if not isinstance(xinv, dict):
+            continue
+        samplers_raw = (
+            xinv.get("sos:sampling_clock")
+            or xinv.get("sampling_clock")
+            or []
+        )
+        samplers: list[str] = []
+        if isinstance(samplers_raw, str):
+            samplers.append(samplers_raw)
+        elif isinstance(samplers_raw, dict):
+            n = samplers_raw.get("name") or samplers_raw.get("clock")
+            if isinstance(n, str) and n:
+                samplers.append(n)
+        elif isinstance(samplers_raw, list):
+            for s in samplers_raw:
+                if isinstance(s, str) and s:
+                    samplers.append(s)
+                elif isinstance(s, dict):
+                    n = s.get("name") or s.get("clock")
+                    if isinstance(n, str) and n:
+                        samplers.append(n)
+        # Drop duplicates within this cross-invariant while preserving
+        # document order.
+        uniq: list[str] = []
+        for s in samplers:
+            if s not in uniq:
+                uniq.append(s)
+        # Each ordered pair (i, j) with i != j yields one directional
+        # boundary. Document order matters: (clk_a, clk_b) is distinct
+        # from (clk_b, clk_a).
+        inv_id = xinv.get("id") or "<sos:cross_invariant>"
+        for i, f in enumerate(uniq):
+            for t in uniq[i + 1:]:
+                _add(f, t, f"<sos:cross_invariant id={inv_id!r}>")
+                _add(t, f, f"<sos:cross_invariant id={inv_id!r}>")
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Module + class name conventions
 # ---------------------------------------------------------------------------
 
@@ -498,6 +780,216 @@ def dut_module_name(chart_name: str) -> str:
     instantiates the same DUT module the SVA bind file binds to.
     """
     return f"{_normalise_chart_name(chart_name)}_fsm"
+
+
+def _cdc_sync_filename(chart_name: str, from_clk: str, to_clk: str) -> str:
+    """Wave-3-future-remaining (2026-05-24 §15): canonical filename for
+    a directional CDC sync stub.
+
+    Convention (relationship ``own`` per §0):
+    ``sos_<chart>_cdc_<from>_<to>_sync.svh``. The ``_sync.svh`` suffix
+    keeps the file out of the ``_sva.sv`` / ``_bind.sv`` audit-exemption
+    bucket (sync stubs are testbench-side scaffolding, not SVA assertion
+    files).
+    """
+    base = _normalise_chart_name(chart_name)
+    f = _sanitize_sv_identifier(from_clk)
+    t = _sanitize_sv_identifier(to_clk)
+    return f"sos_{base}_cdc_{f}_{t}_sync.svh"
+
+
+def expected_sv_tb_file_count(chart_xml: Any) -> int:
+    """Wave-3-future-remaining (2026-05-24 §15): public helper that
+    returns the total number of files ``render_target`` will emit for
+    ``chart_xml`` (a raw scjson dict).
+
+    Composition (per the wave-3-future-remaining-path emit shape):
+      * 6 SV core files (vif, driver, checker, top + their two
+        ``_base.svh`` companions).
+      * 5 build wrappers (Verilator, Questa, VCS, Xcelium, Riviera).
+      * 1 ``verilator_stubs.svh``.
+      * 1 ``sos_jsonl_parser_pkg.svh``.
+      * 1 ``sos_<chart>_state_symbols.svh``.
+      * 2 SVA bind artifacts per region (1 ``_sva.sv`` + 1 ``_bind.sv``).
+        Single-region charts emit 2; N-region parallel charts emit 2N.
+      * Wave-3-future-remaining MULTI-CLOCK additions (only when the
+        chart declares two or more ``<sos:clock>``):
+          - +1 ``clock_generators_<chart>.svh``.
+          - +K CDC sync stub files, one per directional boundary.
+
+    Single-region single-clock charts return **16** (matches the
+    existing TestFileSet assertion). Multi-clock charts return
+    ``16 + 1 + len(cdc_boundaries)``.
+
+    The helper is provided so multi-clock tests can express their
+    assertion without hard-coding numbers that drift as the file set
+    evolves. Existing tests with hard-coded 16/18 keep their literals
+    because the helper is OPTIONAL — the byte-identity guard for
+    single-clock charts ensures those numbers don't drift.
+    """
+    if not isinstance(chart_xml, dict):
+        # Mirror render_target's input check; conservative fallback
+        # to the single-region single-clock count rather than raising.
+        return 16
+    clocks = _collect_clock_domains(chart_xml)
+    regions = _collect_regions(chart_xml)
+    n_regions = len(regions) if regions else 1
+    base = 14 + 2 * n_regions  # 4 core + 5 wrappers + 1 stubs + 1
+    # parser pkg + 1 state symbols + 2 base headers + 2 SVA per region.
+    # NB: 4 (vif/driver-default/checker-default/top) + 2 (_base.svh
+    # for driver + checker) + 5 wrappers + 1 stubs + 1 parser + 1
+    # state-symbols = 14 baseline; SVA bind = 2 per region.
+    if len(clocks) >= 2:
+        base += 1  # clock_generators_<chart>.svh
+        base += len(_collect_cdc_boundaries(chart_xml, [c["name"] for c in clocks]))
+    return base
+
+
+def _emit_clock_generators_svh(
+    chart_name: str,
+    clocks: list[dict[str, Any]],
+) -> str:
+    """Wave-3-future-remaining (2026-05-24 §15): emit
+    ``clock_generators_<chart>.svh`` — one ``initial`` + ``forever``
+    block per declared clock.
+
+    Per the task spec:
+      ``initial begin <clk> = 0; forever #(<period_ns>/2.0 * 1ns) <clk> = ~<clk>; end``
+
+    The header is ``\\`include``-d at the top of the testbench module
+    so the per-clock generators land at chart-top wrapper level
+    (i.e. inside ``module tb_<chart>; ... `include ...; ...``).
+    Include-guards ensure idempotent multi-include behaviour.
+    """
+    base = _normalise_chart_name(chart_name)
+    guard = f"CLOCK_GENERATORS_{base.upper()}_SVH"
+    blocks: list[str] = []
+    for clk in clocks:
+        name = clk["name"]
+        period = clk["period_ns"]
+        # Per-clock generator. Cast to real via ``/2.0`` per the spec;
+        # ``#( real ) * 1ns`` is a Verilator-supported timing form.
+        blocks.append(
+            f"    // Clock generator for `{name}` "
+            f"(period_ns={period}, duty_cycle={clk.get('duty_cycle', 0.5)}).\n"
+            f"    initial begin\n"
+            f"        {name} = 1'b0;\n"
+            f"        forever #(({period})/2.0 * 1ns) {name} = ~{name};\n"
+            f"    end"
+        )
+    body = "\n".join(blocks)
+    return _HEADER_PREFIX + f"""//
+// Per-clock generator blocks for the {chart_name} chart testbench.
+//
+// Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+// wiring. The chart declares its clock domains via
+// ``<sos:clock_domains>``; the walker (transliterate_hdl_sv_tb.py)
+// reads the declaration and emits one ``initial`` + ``forever`` block
+// per clock here. The testbench top-level module
+// ``\\`include``s this header so the generators land at chart-top
+// wrapper level.
+//
+// Authority boundary (per §0):
+//   * ``<sos:clock_domains>`` / ``<sos:clock>`` shape — mirror from
+//     SOS-08-D wave-4 (multi-clock-domain bind wiring).
+//   * Per-clock generator emit shape — own (this walker's contract).
+
+`ifndef {guard}
+`define {guard}
+
+// Per-clock signal declarations + ``initial`` + ``forever`` toggle
+// blocks. Each clock is a top-level ``logic`` declared adjacent to
+// the include; the testbench top module declares the signals BEFORE
+// `include-ing this header.
+{body}
+
+`endif // {guard}
+"""
+
+
+def _emit_cdc_sync_stub_svh(
+    chart_name: str,
+    from_clk: str,
+    to_clk: str,
+) -> str:
+    """Wave-3-future-remaining (2026-05-24 §15): emit a CDC synchroniser
+    stub for one directional boundary.
+
+    The stub is a placeholder two-FF synchroniser module. The body
+    carries a ``// SYNCHRONISER STUB: provided by user. Replace with
+    project-specific CDC primitive.`` banner per the task spec, plus
+    a 2-FF default implementation that synthesises but is NOT formally
+    verified.
+
+    Authority boundary (relationship ``own`` per §0): this walker
+    authors the stub module + naming convention; project-specific CDC
+    primitives are user-replaced in-place.
+    """
+    base = _normalise_chart_name(chart_name)
+    f_id = _sanitize_sv_identifier(from_clk)
+    t_id = _sanitize_sv_identifier(to_clk)
+    mod = f"sos_{base}_cdc_{f_id}_{t_id}_sync"
+    guard = f"SOS_{base.upper()}_CDC_{f_id.upper()}_{t_id.upper()}_SYNC_SVH"
+    return _HEADER_PREFIX + f"""//
+// CDC synchroniser STUB for {chart_name}: clock domain `{from_clk}` →
+// clock domain `{to_clk}`. One directional pair per file per the
+// wave-3-future-remaining multi-clock testbench wiring convention.
+//
+// SYNCHRONISER STUB: provided by user. Replace with project-specific
+// CDC primitive.
+//
+// Wave-3-future-remaining (2026-05-24 §15) ships a default 2-FF
+// synchroniser body that synthesises but is NOT formally verified.
+// Real ASIC / FPGA deployments MUST replace the body with a
+// project-specific CDC primitive (e.g. an MTBF-characterised macro
+// from the target library, or a Gray-coded handshake bus for multi-
+// bit transfers).
+//
+// Authority boundary (per §0):
+//   * Module naming convention ``sos_<chart>_cdc_<from>_<to>_sync`` —
+//     relationship ``own``.
+//   * 2-FF synchroniser shape — relationship ``derive`` (textbook CDC
+//     pattern; project-specific replacement expected).
+
+`ifndef {guard}
+`define {guard}
+
+module {mod} #(
+    parameter int WIDTH = 1
+) (
+    input  logic              clk_dst,   // destination clock ({to_clk})
+    input  logic              rst_dst,   // destination-domain reset
+    input  logic [WIDTH-1:0]  d_src,     // source-domain data ({from_clk})
+    output logic [WIDTH-1:0]  q_dst      // destination-domain data
+);
+
+    // SYNCHRONISER STUB: provided by user. Replace with project-
+    // specific CDC primitive (MTBF-characterised macro, Gray-coded
+    // bus, full handshake, etc.). The 2-FF default below is the
+    // minimum viable shape — adequate for single-bit slow signals
+    // (single-bit control flags); NOT adequate for multi-bit data
+    // buses, where bits may sample asynchronously and produce
+    // garbled values.
+
+    logic [WIDTH-1:0] meta_q;
+    logic [WIDTH-1:0] sync_q;
+
+    always_ff @(posedge clk_dst or posedge rst_dst) begin
+        if (rst_dst) begin
+            meta_q <= '0;
+            sync_q <= '0;
+        end else begin
+            meta_q <= d_src;
+            sync_q <= meta_q;
+        end
+    end
+
+    assign q_dst = sync_q;
+
+endmodule
+
+`endif // {guard}
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +1081,10 @@ endinterface
 """
 
 
-def _emit_driver_class_base(chart_name: str) -> str:
+def _emit_driver_class_base(
+    chart_name: str,
+    clocks: list[dict[str, Any]] | None = None,
+) -> str:
     """``sos_<chart>_driver_base.svh`` — stimulus driver BASE class.
 
     Wave-3-future (2026-05-24 §15): the layered class hierarchy split
@@ -612,9 +1107,22 @@ def _emit_driver_class_base(chart_name: str) -> str:
     want to override one method extend ``_base`` themselves; the
     walker keeps emitting ``_default`` byte-identical to wave-3
     chart-vocab.
+
+    Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+    wiring: when ``clocks`` has length ≥ 2 the base class extends with
+    a ``function automatic string clock_domain_of_step(int step_idx);``
+    manifest function (default body returns the primary, first-
+    declared clock name) and each ``drive_*`` hook gains a
+    ``string clock_domain`` parameter. When ``clocks`` is ``None`` or
+    has length ≤ 1, the emit is **byte-identical** to the prior
+    wave-3-future-remaining-layered emit — the regression-guard tests
+    pin this behaviour.
     """
     cls_base = f"sos_{_normalise_chart_name(chart_name)}_driver_base"
     iface = virtual_if_name(chart_name)
+    multi_clock = clocks is not None and len(clocks) >= 2
+    if multi_clock:
+        return _emit_driver_class_base_multi_clock(chart_name, clocks)
     return _HEADER_PREFIX + f"""//
 // Stimulus driver BASE class for chart `{chart_name}`.
 //
@@ -732,7 +1240,195 @@ endclass
 """
 
 
-def _emit_driver_class(chart_name: str) -> str:
+def _emit_driver_class_base_multi_clock(
+    chart_name: str,
+    clocks: list[dict[str, Any]],
+) -> str:
+    """Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+    wiring: the driver BASE class emitted when the chart declares two
+    or more clock domains.
+
+    Differences vs. the single-clock base:
+
+      * Adds ``function automatic string clock_domain_of_step(int step_idx);``
+        — the clock-domain manifest. Default body returns the primary
+        (first-declared) clock name; subclasses override to map specific
+        step indices to specific domains.
+      * Each ``drive_*`` hook signature gains a ``string clock_domain``
+        parameter. The base's ``run()`` reads ``clock_domain_of_step
+        (vector_idx)`` and threads it through every hook call.
+      * Reset waits use the **primary** clock so the test settles
+        deterministically before per-step drives select the per-step
+        clock domain.
+
+    Authority boundary (per §0):
+      * ``clock_domain_of_step()`` virtual-function shape + the
+        ``string clock_domain`` hook parameter — relationship ``own``.
+    """
+    base = _normalise_chart_name(chart_name)
+    cls_base = f"sos_{base}_driver_base"
+    iface = virtual_if_name(chart_name)
+    primary = clocks[0]["name"]
+    clock_listing = "\n".join(
+        f"    //   * {c['name']} (period_ns={c['period_ns']}, "
+        f"duty_cycle={c.get('duty_cycle', 0.5)})"
+        for c in clocks
+    )
+    return _HEADER_PREFIX + f"""//
+// Stimulus driver BASE class for chart `{chart_name}` (multi-clock).
+//
+// Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+// wiring: the chart declares the following clock domains via
+// ``<sos:clock_domains>``:
+//
+{clock_listing}
+//
+// The primary clock is `{primary}` (first-declared per the multi-
+// clock spec); ``clock_domain_of_step()``'s default body returns it.
+// Subclasses override ``clock_domain_of_step`` to map specific step
+// indices to specific clock domains.
+//
+// Hook signatures gain a ``string clock_domain`` parameter so the
+// drive logic per step can target the right clock-domain timing edge
+// (e.g. ``@(posedge clk_a)`` vs ``@(posedge clk_b)``).
+//
+// Authority boundary (per §0):
+//   * ``<sos:clock_domains>`` / ``<sos:clock>`` shape — mirror from
+//     SOS-08-D wave-4.
+//   * ``clock_domain_of_step()`` + ``string clock_domain`` hook
+//     parameter — own (this walker's contract).
+
+`ifndef SOS_{base.upper()}_DRIVER_BASE_SVH
+`define SOS_{base.upper()}_DRIVER_BASE_SVH
+
+`include "sos_jsonl_parser_pkg.svh"
+
+// Per-step record carried into ``drive_step``. Holds the minimal
+// JSONL event-poke shape decoded by the base run-skeleton.
+typedef struct {{
+    int    event_code;
+    int    cycles_wait;
+    string line;
+}} sos_jsonl_record_t;
+
+virtual class {cls_base};
+
+    virtual {iface}.driver_mp vif;
+    string                    trace_path;
+    int                       vector_idx;
+
+    function new(virtual {iface}.driver_mp vif, string trace_path);
+        this.vif        = vif;
+        this.trace_path = trace_path;
+        this.vector_idx = 0;
+    endfunction
+
+    // ------------------------------------------------------------
+    // Clock-domain manifest. Returns the clock-domain name the given
+    // step belongs to. Default body returns the primary (first-
+    // declared) clock; subclasses override to map specific step
+    // indices to specific domains.
+    //
+    // Per the multi-clock testbench wiring contract this function is
+    // ``automatic`` so subclasses MAY override the body to read mutable
+    // state without violating SV elaboration semantics.
+    // ------------------------------------------------------------
+    virtual function automatic string clock_domain_of_step(int step_idx);
+        return "{primary}";
+    endfunction
+
+    // ------------------------------------------------------------
+    // Virtual per-step hooks. Signatures carry a ``string clock_domain``
+    // parameter so subclasses know which clock-domain timing edge to
+    // target. The base run-skeleton reads ``clock_domain_of_step``
+    // once per step and threads the result through every hook call.
+    // ------------------------------------------------------------
+
+    virtual task drive_pre(int step_idx, string clock_domain);
+        // Default no-op — override to instrument pre-step state.
+    endtask
+
+    virtual task drive_step(
+        int step_idx,
+        sos_jsonl_record_t rec,
+        string clock_domain
+    );
+        // Default no-op — the wave-3-default driver overrides this
+        // hook to drive ``vif.event_in`` and emit the chart-vocab
+        // [DRIVE] log. Multi-clock charts use ``case (clock_domain)``
+        // inside the override to select the right ``@(posedge <clk>)``
+        // timing edge.
+    endtask
+
+    virtual task drive_post(int step_idx, string clock_domain);
+        // Default no-op — override to instrument post-step state.
+    endtask
+
+    // ------------------------------------------------------------
+    // Run-skeleton — owned by the base class. Opens the trace file,
+    // walks each line, decodes the minimal JSONL shape, fires
+    // ``drive_pre`` / ``drive_step`` / ``drive_post`` per step.
+    // ------------------------------------------------------------
+    task run();
+        int    fh;
+        string line;
+        int    rc;
+        int    parsed;
+        string cur_clock_domain;
+        sos_jsonl_record_t rec;
+
+        fh = $fopen(trace_path, "r");
+        if (fh == 0) begin
+            $display("[FATAL] sos_driver: cannot open trace `%s`",
+                     trace_path);
+            $finish(2);
+        end
+
+        // Pre-test reset assertion (chart-FSM convention).
+        // Multi-clock reset settle uses the primary clock so the
+        // test starts deterministically before per-step clock-domain
+        // selection.
+        vif.rst     = 1'b1;
+        vif.clk_en  = 1'b0;
+        vif.event_in = '0;
+        repeat (4) @(posedge vif.clk);
+        vif.rst    = 1'b0;
+        vif.clk_en = 1'b1;
+        @(posedge vif.clk);
+
+        while (!$feof(fh)) begin
+            rc = $fgets(line, fh);
+            if (rc == 0) break;
+            // SOS-08-E §5.4: JSONL trace; one event per line.
+            rec.event_code  = 0;
+            rec.cycles_wait = 1;
+            rec.line        = line;
+            parsed = sos_jsonl_parse_int(line, "event", rec.event_code);
+            parsed = sos_jsonl_parse_int(line, "cycles", rec.cycles_wait);
+            if (rec.cycles_wait <= 0) rec.cycles_wait = 1;
+
+            cur_clock_domain = clock_domain_of_step(vector_idx);
+            drive_pre(vector_idx, cur_clock_domain);
+            drive_step(vector_idx, rec, cur_clock_domain);
+            drive_post(vector_idx, cur_clock_domain);
+        end
+
+        $fclose(fh);
+
+        // Settle period — wave-1 fixed at 8 cycles (primary clock).
+        repeat (8) @(posedge vif.clk);
+    endtask
+
+endclass
+
+`endif // SOS_{base.upper()}_DRIVER_BASE_SVH
+"""
+
+
+def _emit_driver_class(
+    chart_name: str,
+    clocks: list[dict[str, Any]] | None = None,
+) -> str:
     """``sos_driver_<chart>.sv`` — stimulus driver DEFAULT class.
 
     Wave-3-future (2026-05-24 §15) layered class hierarchy: this class
@@ -746,7 +1442,18 @@ def _emit_driver_class(chart_name: str) -> str:
     base ``run()``), decodes each line's event-poke map, drives
     ``vif.event_in``, and waits the prescribed number of clock cycles
     between events. Per §6.1 the driver SHALL NOT inspect DUT outputs.
+
+    Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+    wiring: when ``clocks`` has length ≥ 2, ``drive_step`` is
+    overridden with a body that selects the per-step clock domain via
+    ``case (clock_domain)`` against the chart-declared clock names
+    before waiting on the corresponding ``@(posedge <clk>)`` edge.
+    Byte-identical to the prior emit when ``clocks`` is ``None`` or
+    has length ≤ 1.
     """
+    multi_clock = clocks is not None and len(clocks) >= 2
+    if multi_clock:
+        return _emit_driver_class_multi_clock(chart_name, clocks)
     cls = driver_class_name(chart_name)
     cls_base = f"sos_{_normalise_chart_name(chart_name)}_driver_base"
     base_svh = f"sos_{_normalise_chart_name(chart_name)}_driver_base.svh"
@@ -790,6 +1497,85 @@ class {cls} extends {cls_base};
         vector_idx = vector_idx + 1;
         $display("[DRIVE] V%0d: event=%0d cycles=%0d  // chart=`{chart_name}`",
                  vector_idx, rec.event_code, rec.cycles_wait);
+    endtask
+
+endclass
+"""
+
+
+def _emit_driver_class_multi_clock(
+    chart_name: str,
+    clocks: list[dict[str, Any]],
+) -> str:
+    """Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+    wiring: the driver DEFAULT class emitted when the chart declares
+    two or more clock domains.
+
+    The chart-top file open / reset / vector parse / loop are
+    inherited unchanged from the multi-clock BASE class. The default
+    ``drive_step`` body uses ``case (clock_domain)`` to select the
+    correct ``@(posedge <clk>)`` edge before driving the event.
+    """
+    base = _normalise_chart_name(chart_name)
+    cls = driver_class_name(chart_name)
+    cls_base = f"sos_{base}_driver_base"
+    base_svh = f"sos_{base}_driver_base.svh"
+    primary = clocks[0]["name"]
+    case_arms = "\n".join(
+        f'            "{c["name"]}": @(posedge {c["name"]});'
+        for c in clocks
+    )
+    return _HEADER_PREFIX + f"""//
+// Stimulus driver DEFAULT class for the {chart_name} chart testbench
+// (multi-clock).
+//
+// Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+// wiring: extends ``{cls_base}`` (declared in ``{base_svh}``). The
+// override of ``drive_step`` consumes the new ``clock_domain``
+// parameter to select the per-step ``@(posedge <clk>)`` timing edge
+// via ``case (clock_domain)``.
+//
+// The chart-top file open / reset / vector parse / loop are unchanged
+// — the multi-clock base class owns the run-skeleton.
+
+`include "{base_svh}"
+
+class {cls} extends {cls_base};
+
+    function new(virtual {virtual_if_name(chart_name)}.driver_mp vif, string trace_path);
+        super.new(vif, trace_path);
+    endfunction
+
+    // Wave-3-future-remaining (2026-05-24 §15) ``drive_step`` body —
+    // per-event drive with multi-clock timing selection. The
+    // ``case (clock_domain)`` arm picks the right
+    // ``@(posedge <clk>)`` edge per chart-declared clock; the
+    // ``default`` arm falls back to the primary clock so a
+    // misclassified step still makes forward progress (rather than
+    // dead-locking on an undeclared domain).
+    virtual task drive_step(
+        int step_idx,
+        sos_jsonl_record_t rec,
+        string clock_domain
+    );
+        vif.event_in = rec.event_code[7:0];
+        case (clock_domain)
+{case_arms}
+            default: @(posedge {primary});
+        endcase
+        vif.event_in = '0;
+        repeat (rec.cycles_wait - 1) begin
+            case (clock_domain)
+{case_arms}
+                default: @(posedge {primary});
+            endcase
+        end
+
+        vector_idx = vector_idx + 1;
+        $display(
+            "[DRIVE] V%0d: event=%0d cycles=%0d domain=`%s`  // chart=`{chart_name}`",
+            vector_idx, rec.event_code, rec.cycles_wait, clock_domain
+        );
     endtask
 
 endclass
@@ -1980,13 +2766,32 @@ endclass
 """
 
 
-def _emit_top_module(chart_name: str, n_states: int) -> str:
+def _emit_top_module(
+    chart_name: str,
+    n_states: int,
+    clocks: list[dict[str, Any]] | None = None,
+) -> str:
     """``tb_<chart>.sv`` — top-level testbench module.
 
     Instantiates the DUT (``<chart>_fsm``), the virtual interface, the
     driver, the checker, drives clock, forks driver + checker, and
     emits the final [PASS]/[FAIL] summary line per §6.3.
+
+    Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+    wiring: when ``clocks`` has length ≥ 2 the top module declares
+    one ``logic`` per clock and ``\\`include``s
+    ``clock_generators_<chart>.svh`` to bring in the per-clock
+    generator blocks. The DUT's ``.clk`` port stays wired to the
+    primary (first-declared) clock for backwards compatibility with
+    the chart-top wrapper's single-clock port shape; subclasses that
+    need per-region clocking override the wrapper itself.
+
+    Byte-identical to the wave-3-future-remaining-layered emit when
+    ``clocks`` is ``None`` or has length ≤ 1.
     """
+    multi_clock = clocks is not None and len(clocks) >= 2
+    if multi_clock:
+        return _emit_top_module_multi_clock(chart_name, n_states, clocks)
     top = tb_module_name(chart_name)
     dut = dut_module_name(chart_name)
     drv = driver_class_name(chart_name)
@@ -2064,6 +2869,120 @@ module {top};
         join
 
         // Summary — chart-vocabulary per INV-S-HDL-E-4.
+        if (checker.get_fail_count() == 0) begin
+            $display("[PASS] chart `{chart_name}` testbench: all vectors green.");
+            $finish(0);
+        end else begin
+            $display("[FAIL count=%0d] chart `{chart_name}` testbench.",
+                     checker.get_fail_count());
+            $finish(1);
+        end
+    end
+
+endmodule
+"""
+
+
+def _emit_top_module_multi_clock(
+    chart_name: str,
+    n_states: int,
+    clocks: list[dict[str, Any]],
+) -> str:
+    """Wave-3-future-remaining (2026-05-24 §15) multi-clock variant of
+    ``_emit_top_module``.
+
+    Declares one ``logic`` per chart-declared clock at the top-module
+    scope, ``\\`include``s ``clock_generators_<chart>.svh`` to bring in
+    the per-clock generators, and wires the DUT's ``.clk`` to the
+    primary (first-declared) clock. The virtual interface is clocked
+    on the primary clock too — wave-1 vif modports take a single
+    ``clk`` port and the multi-clock contract preserves that surface
+    (per-region clocking on the chart-top wrapper is the SOS-08-D
+    wave-4 path, not this slice's scope).
+    """
+    top = tb_module_name(chart_name)
+    dut = dut_module_name(chart_name)
+    drv = driver_class_name(chart_name)
+    chk = checker_class_name(chart_name)
+    iface = virtual_if_name(chart_name)
+    base = _normalise_chart_name(chart_name)
+    primary = clocks[0]["name"]
+    clock_decls = "\n".join(
+        f"    logic {c['name']};  // period_ns={c['period_ns']}"
+        for c in clocks
+    )
+    return _HEADER_PREFIX + f"""//
+// Top-level testbench module for the {chart_name} chart (multi-clock).
+//
+// Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+// wiring. The chart declares {len(clocks)} clock domains via
+// ``<sos:clock_domains>``; the per-clock ``initial`` / ``forever``
+// blocks live in ``clock_generators_{base}.svh`` and are
+// ``\\`include``-d here so the generators sit at chart-top wrapper
+// level.
+//
+// The DUT's ``.clk`` and the virtual interface's ``clk`` are both
+// wired to the primary (first-declared) clock `{primary}`. Per-region
+// clocking on the chart-top wrapper is a SOS-08-D wave-4 concern,
+// not this slice's scope.
+
+`timescale 1ns/1ps
+
+`include "dut_if_{base}.sv"
+`include "sos_driver_{base}.sv"
+`include "sos_checker_{base}.sv"
+
+module {top};
+
+    localparam int N_STATES = {max(n_states, 1)};
+
+    // Per-clock signal declarations (chart-declared via
+    // <sos:clock_domains>). The per-clock generators live in
+    // ``clock_generators_{base}.svh``.
+{clock_decls}
+
+`include "clock_generators_{base}.svh"
+
+    // The virtual interface + DUT are clocked on the primary clock.
+    {iface} #(.N_STATES(N_STATES), .EVENT_W(8)) vif (.clk({primary}));
+
+    // Reset comes from the driver modport; here we just expose the
+    // chart-FSM observables for the checker.
+    logic                rst_q;
+    logic                clk_en_q;
+    logic [7:0]          event_in_q;
+    logic [N_STATES-1:0] current_state_q;
+
+    always_comb begin
+        rst_q      = vif.rst;
+        clk_en_q   = vif.clk_en;
+        event_in_q = vif.event_in;
+        vif.current_state = current_state_q;
+    end
+
+    {dut} #(.N_STATES(N_STATES)) dut_i (
+        .clk           ({primary}),
+        .rst           (rst_q),
+        .clk_en        (clk_en_q),
+        .event_in      (event_in_q),
+        .current_state (current_state_q)
+    );
+
+    {drv} driver;
+    {chk} checker;
+
+    initial begin
+        string trace_path;
+        trace_path = "vectors/{base}.jsonl";
+
+        driver  = new(vif.driver_mp,  trace_path);
+        checker = new(vif.checker_mp, trace_path);
+
+        fork
+            driver.run();
+            checker.run();
+        join
+
         if (checker.get_fail_count() == 0) begin
             $display("[PASS] chart `{chart_name}` testbench: all vectors green.");
             $finish(0);
@@ -2774,6 +3693,7 @@ endclass
 def _emit_top_module_parallel(
     chart_name: str,
     regions: list[tuple[str, str | None, list[str]]],
+    clocks: list[dict[str, Any]] | None = None,
 ) -> str:
     """``tb_<chart>.sv`` — top-level testbench for a PARALLEL chart.
 
@@ -2782,7 +3702,18 @@ def _emit_top_module_parallel(
     each region's ``current_state_<region>`` observable output to the
     virtual interface, drives clock/reset, fork-joins the driver +
     checker, emits [PASS]/[FAIL] summary per §6.3 / INV-S-HDL-E-4.
+
+    Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+    wiring: when ``clocks`` has length ≥ 2, the top module declares
+    one ``logic`` per chart-declared clock + ``\\`include``s
+    ``clock_generators_<chart>.svh``. The DUT's ``.clk`` and the
+    virtual interface's ``.clk`` are both wired to the primary
+    (first-declared) clock for backwards compatibility with the
+    chart-top wrapper's single-clock port shape. Byte-identical to
+    the prior wave-3-future-remaining-layered parallel emit when
+    ``clocks`` is ``None`` or has length ≤ 1.
     """
+    multi_clock = clocks is not None and len(clocks) >= 2
     top = tb_module_name(chart_name)
     dut = dut_module_name(chart_name)
     drv = driver_class_name(chart_name)
@@ -2821,6 +3752,35 @@ def _emit_top_module_parallel(
         for rn, _initial, _states in regions
     )
 
+    # Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+    # wiring. When the chart declares ≥2 clocks, replace the single-
+    # clock generator block with per-clock ``logic`` declarations + a
+    # ``\\`include`` of ``clock_generators_<chart>.svh``. The DUT and
+    # virtual interface stay wired to the primary clock.
+    if multi_clock:
+        primary = clocks[0]["name"]
+        clock_decls = "\n".join(
+            f"    logic {c['name']};  // period_ns={c['period_ns']}"
+            for c in clocks
+        )
+        clock_block = (
+            f"{clock_decls}\n\n"
+            f"`include \"clock_generators_{base}.svh\"\n\n"
+            f"    // The virtual interface + DUT are clocked on the\n"
+            f"    // primary (first-declared) clock `{primary}` per the\n"
+            f"    // wave-3-future-remaining multi-clock contract."
+        )
+        primary_wire = primary
+    else:
+        clock_block = (
+            "    localparam int CLK_PERIOD = 10;  // 100 MHz wave-3 default.\n"
+            "\n"
+            "    logic clk;\n"
+            "    initial clk = 1'b0;\n"
+            "    always #(CLK_PERIOD/2) clk = ~clk;"
+        )
+        primary_wire = "clk"
+
     return _HEADER_PREFIX + f"""//
 // Top-level testbench module for chart `{chart_name}` (parallel wave-3).
 //
@@ -2847,15 +3807,11 @@ def _emit_top_module_parallel(
 module {top};
 
 {n_states_per_region}
-    localparam int CLK_PERIOD = 10;  // 100 MHz wave-3 default.
-
-    logic clk;
-    initial clk = 1'b0;
-    always #(CLK_PERIOD/2) clk = ~clk;
+{clock_block}
 
     {iface} #(
 {vif_n_states_overrides}
-    ) vif (.clk(clk));
+    ) vif (.clk({primary_wire}));
 
     logic rst_q;
     logic clk_en_q;
@@ -2872,7 +3828,7 @@ module {top};
     {dut} #(
 {region_n_states_overrides}
     ) dut_i (
-        .clk           (clk),
+        .clk           ({primary_wire}),
         .rst           (rst_q),
         .clk_en        (clk_en_q),
         .event_in      (event_in_q),
@@ -3213,6 +4169,26 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
     nested_params = _collect_nested_params(chart_ir)
     path_params = _collect_path_params(chart_ir)
 
+    # Wave-3-future-remaining (2026-05-24 §15) multi-clock testbench
+    # wiring. Read the chart's ``<sos:clock_domains>`` block. Charts
+    # with ≤1 clocks declared route through the existing single-clock
+    # emitters (byte-identical to the prior wave-3-future-remaining-
+    # path emit per the regression-guard tests). Charts with ≥2 clocks
+    # route through the multi-clock variants and additionally emit
+    # the per-clock generator header + one CDC sync stub per
+    # directional boundary.
+    clocks = _collect_clock_domains(chart_ir)
+    is_multi_clock = len(clocks) >= 2
+    # Pass ``clocks`` to the per-file emitters only when multi-clock;
+    # passing ``None`` (or len ≤ 1) takes the byte-identical path.
+    emit_clocks = clocks if is_multi_clock else None
+    if is_multi_clock:
+        cdc_boundaries = _collect_cdc_boundaries(
+            chart_ir, [c["name"] for c in clocks]
+        )
+    else:
+        cdc_boundaries = []
+
     if regions:
         # Parallel-chart emit (wave-3): per-region virtual interface +
         # per-region checker + chart-top-wrapper DUT instantiation.
@@ -3224,9 +4200,9 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
             f"tb/sv/{base}/dut_if_{base}.sv":
                 _emit_virtual_interface_parallel(chart_name, regions),
             f"tb/sv/{base}/sos_{base}_driver_base.svh":
-                _emit_driver_class_base(chart_name),
+                _emit_driver_class_base(chart_name, emit_clocks),
             f"tb/sv/{base}/sos_driver_{base}.sv":
-                _emit_driver_class(chart_name),
+                _emit_driver_class(chart_name, emit_clocks),
             f"tb/sv/{base}/sos_{base}_checker_base.svh":
                 _emit_checker_class_base_parallel(
                     chart_name, regions, nested_params, path_params
@@ -3236,7 +4212,7 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
                     chart_name, regions, nested_params, path_params
                 ),
             f"tb/sv/{base}/tb_{base}.sv":
-                _emit_top_module_parallel(chart_name, regions),
+                _emit_top_module_parallel(chart_name, regions, emit_clocks),
             f"tb/sv/{base}/run_verilator.mk":
                 _emit_verilator_makefile(chart_name),
             f"tb/sv/{base}/run.do": _emit_questa_do(chart_name),
@@ -3255,9 +4231,9 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
             f"tb/sv/{base}/dut_if_{base}.sv":
                 _emit_virtual_interface(chart_name),
             f"tb/sv/{base}/sos_{base}_driver_base.svh":
-                _emit_driver_class_base(chart_name),
+                _emit_driver_class_base(chart_name, emit_clocks),
             f"tb/sv/{base}/sos_driver_{base}.sv":
-                _emit_driver_class(chart_name),
+                _emit_driver_class(chart_name, emit_clocks),
             f"tb/sv/{base}/sos_{base}_checker_base.svh":
                 _emit_checker_class_base(
                     chart_name, nested_params, path_params
@@ -3265,7 +4241,7 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
             f"tb/sv/{base}/sos_checker_{base}.sv":
                 _emit_checker_class(chart_name, nested_params, path_params),
             f"tb/sv/{base}/tb_{base}.sv":
-                _emit_top_module(chart_name, n_states),
+                _emit_top_module(chart_name, n_states, emit_clocks),
             f"tb/sv/{base}/run_verilator.mk":
                 _emit_verilator_makefile(chart_name),
             f"tb/sv/{base}/run.do": _emit_questa_do(chart_name),
@@ -3273,6 +4249,19 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
             f"tb/sv/{base}/run_xrun.sh": _emit_xcelium_argfile(chart_name),
             f"tb/sv/{base}/run_riviera.tcl": _emit_riviera_tcl(chart_name),
         }
+
+    # Wave-3-future-remaining (2026-05-24 §15) multi-clock additions:
+    # one ``clock_generators_<chart>.svh`` carrying per-clock
+    # initial/forever blocks, plus one ``_cdc_<from>_<to>_sync.svh``
+    # stub file per directional CDC boundary.
+    if is_multi_clock:
+        files[f"tb/sv/{base}/clock_generators_{base}.svh"] = (
+            _emit_clock_generators_svh(chart_name, clocks)
+        )
+        for f_clk, t_clk in cdc_boundaries:
+            files[
+                f"tb/sv/{base}/{_cdc_sync_filename(chart_name, f_clk, t_clk)}"
+            ] = _emit_cdc_sync_stub_svh(chart_name, f_clk, t_clk)
 
     # Wave-3-future (2026-05-24 §15): shared JSONL parser package +
     # per-chart state-symbol table. Both files are header-only

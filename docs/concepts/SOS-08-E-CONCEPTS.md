@@ -942,3 +942,113 @@ In addition, the obsolete `test_two_level_dotted_param_raises_actionable_error` 
 Status: 🟢 **wave-3-future-remaining-path nested-JSON parser landed (arbitrary depth)**. Multi-clock testbench wiring remains the sole wave-3-future carry-forward.
 
 Status: 🟢 **wave-3-future-remaining layered class hierarchy landed**. File shape: 16 files single-region, 18 files parallel. `_base` is the supported extension point; users override by extending it. The walker continues to emit `_default` byte-identical to wave-3 chart-vocab. Multi-clock testbench wiring + deeper-than-one-level nesting remain on the wave-3-future track.
+
+### 2026-05-24 — Impl wave-3-future-remaining: multi-clock testbench wiring (Ira)
+
+Closes the **LAST wave-3-future carry-forward** named in the prior §15 entry as "multi-clock-domain testbench wiring". The wave-3 SV-testbench walker emitted a single chart-top clock (the wave-1 `CLK_PERIOD = 10` default). This slice extends the walker to consume the chart's `<sos:clock_domains>` block and emit per-clock generators, a clock-domain manifest, and one CDC synchroniser stub per directional boundary. With this, the wave-3-future carry-forward set is **complete**.
+
+**Assumed `<sos:clock_domains>` shape**:
+
+SOS-08-D wave-4's multi-clock-domain bind wiring is the upstream authority for the `<sos:clock_domains>` element. At the time this slice landed (2026-05-24), the SOS-08-D wave-4 element definition has not yet been ratified as a normative artefact in `SOS-08-D-CONCEPTS.md` (the in-flight SOS-08-D-3 phase tracks it). Per the spec-before-code discipline, this slice **assumes** the following shape and documents it here as load-bearing context for the implementation:
+
+```xml
+<sos:clock_domains>
+  <sos:clock name="clk_a" period_ns="10"   duty_cycle="0.5"/>
+  <sos:clock name="clk_b" period_ns="20.0" duty_cycle="0.5"/>
+</sos:clock_domains>
+```
+
+The walker (`_collect_clock_domains`) reads this shape and accepts both SCXML-namespaced (`sos:clock_domains` / `sos:clock`) and bare-namespace (`clock_domains` / `clock`) keys (the scjson loader strips namespaces by default). The first-declared clock is the **primary** clock. When SOS-08-D wave-4 ratifies a different shape, this walker MUST be updated to mirror — the authority is SOS-08-D, not SOS-08-E.
+
+**Detection rule** (load-bearing for byte-identity):
+
+- **Zero or one** declared `<sos:clock>` → SINGLE-clock emit path; byte-identical to the prior wave-3-future-remaining-path emit. Charts without `<sos:clock_domains>` and charts with a single-clock declaration emit the SAME file set with the SAME content (regression-guard tests pin this).
+- **Two or more** declared `<sos:clock>` → MULTI-clock emit path: per-clock generator block + `clock_domain_of_step()` virtual function on the driver base + ``string clock_domain`` parameter on every `drive_*` hook + `case (clock_domain)` selection in the default driver's `drive_step` body + one CDC synchroniser stub file per directional boundary.
+
+**Implementation surface**:
+
+- **`_collect_clock_domains(chart_ir)`** (new) — reads the chart's `<sos:clock_domains>` block; returns `[{name, period_ns, duty_cycle}, ...]` in document order. Validates each clock name against `[a-zA-Z_][a-zA-Z0-9_]*` via the new `_validate_sv_clock_name` chart-vocab gate; duplicate clock names are collapsed (first wins). Returns an empty list when no `<sos:clock_domains>` block is declared.
+
+- **`_collect_cdc_boundaries(chart_ir, clock_names)`** (new) — enumerates the directional `(from_clock, to_clock)` CDC boundary pairs declared on the chart. Accepts two inbound shapes: (1) explicit `<sos:cdc_boundary from="clk_a" to="clk_b"/>` elements, and (2) derived from `<sos:cross_invariant>` `<sos:sampling_clock>` lists (each pair of distinct clock names referenced under one cross-invariant yields the directional pair in both orders). Returns `[]` when no boundaries are declared. Raises `UnsupportedChartError` when a boundary references a clock NOT in the chart's `<sos:clock_domains>` declaration (chart-vocab gate).
+
+- **`expected_sv_tb_file_count(chart_xml)` (PUBLIC)** — helper that returns the total number of files `render_target` will emit. Single-region single-clock charts → 16 (matches the existing `TestFileSet` assertion). Multi-clock charts → `16 + 1 + len(cdc_boundaries)` (the +1 for the generator header; +N for each directional CDC sync stub). Existing wave-3-future-remaining-path tests retain their hard-coded 16/18 literals because the helper is OPTIONAL — the byte-identity guard for ≤1-clock charts ensures those literals stay valid.
+
+- **`_emit_driver_class_base(chart_name, clocks=None)`** (extended) — accepts an optional `clocks` list. When `clocks` is `None` or has length ≤ 1, the emit is **byte-identical** to the prior wave-3-future-remaining-layered emit. When `clocks` has length ≥ 2, the implementation routes through `_emit_driver_class_base_multi_clock`, which:
+    * Declares `virtual function automatic string clock_domain_of_step(int step_idx);` whose default body returns the primary (first-declared) clock name verbatim.
+    * Extends every `drive_*` hook signature with a `string clock_domain` parameter.
+    * Threads `clock_domain_of_step(vector_idx)` through every hook call in the `run()` skeleton.
+
+- **`_emit_driver_class(chart_name, clocks=None)`** (extended) — same byte-identity gate. The multi-clock variant overrides `drive_step` with a body that uses `case (clock_domain)` to wait on the per-step `@(posedge <clk>)` edge before driving the event. The `default:` arm falls back to the primary clock so a misclassified step still makes forward progress.
+
+- **`_emit_top_module(chart_name, n_states, clocks=None)`** / **`_emit_top_module_parallel(chart_name, regions, clocks=None)`** (extended) — same byte-identity gate. The multi-clock variant declares one `logic` per chart-declared clock, ``\`include``s ``clock_generators_<chart>.svh``, and wires the DUT's `.clk` + virtual interface's `.clk` to the primary clock for backwards compatibility with the single-clock chart-top wrapper port shape. (Per-region clocking on the chart-top wrapper is the SOS-08-D wave-4 concern, not this slice's scope.)
+
+- **`_emit_clock_generators_svh(chart_name, clocks)`** (new) — emits `clock_generators_<chart>.svh`. One `initial begin <clk> = 1'b0; forever #((<period_ns>)/2.0 * 1ns) <clk> = ~<clk>; end` block per declared clock, wrapped in include guards.
+
+- **`_emit_cdc_sync_stub_svh(chart_name, from_clk, to_clk)`** (new) — emits a directional CDC synchroniser stub at `sos_<chart>_cdc_<from>_<to>_sync.svh`. The module body carries the load-bearing user-replace banner (`// SYNCHRONISER STUB: provided by user. Replace with project-specific CDC primitive.`) plus a 2-FF default implementation that synthesises but is NOT formally verified. **Stub only** — real ASIC/FPGA deployments MUST replace the body with a project-specific CDC primitive.
+
+- **`render_target`** (extended) — calls `_collect_clock_domains(chart_ir)` once, computes the `is_multi_clock` flag from `len(clocks) >= 2`, and threads `emit_clocks = clocks if is_multi_clock else None` through every emitter that has the new parameter. Multi-clock charts additionally emit `clock_generators_<chart>.svh` + one CDC sync stub per directional boundary derived via `_collect_cdc_boundaries`.
+
+**Normative additions** (acceptance-checklist gates):
+
+1. Clock declaration via `<sos:clock_domains>` / `<sos:clock>` (reused from SOS-08-D wave-4 — the SV-testbench walker reads but does not extend the upstream grammar).
+2. Per-clock generator emit (one `initial` + `forever` block per declared clock; idempotent via include guards).
+3. `clock_domain_of_step()` virtual function shape on the driver base (default body returns the primary clock name; subclasses override to map specific step indices to specific domains).
+4. CDC sync stub MUST be replaced by user with project-specific CDC primitive. The 2-FF default body is the minimum viable shape — adequate for single-bit slow signals; NOT adequate for multi-bit data buses.
+
+**Authority boundary declarations** (per §0 standards-integration matrix):
+
+| Concept | Upstream authority | Relationship | Mutation rights |
+|---|---|---|---|
+| `<sos:clock_domains>` / `<sos:clock>` element shape | SOS-08-D wave-4 (multi-clock-domain bind wiring) | `mirror` | this walker reads but does not extend |
+| `clock_domain_of_step()` virtual function shape on driver base | SOS-08-E (this doc) | `own` | this walker authors the SV contract; §15 amendment required to change |
+| ``string clock_domain`` hook parameter (drive_pre/drive_step/drive_post) | SOS-08-E (this doc) | `own` | §15 amendment required |
+| CDC sync stub naming convention `sos_<chart>_cdc_<from>_<to>_sync.svh` | SOS-08-E (this doc) | `own` | §15 amendment required |
+| 2-FF synchroniser default implementation | textbook CDC pattern | `derive` | project-specific replacement expected at the file's STUB-banner boundary |
+
+**Invariants upheld**:
+
+- **INV-S-HDL-E-1** (no constrained-random) — preserved. The multi-clock additions are pure procedural SV: `initial begin ... forever ... end` blocks, virtual function dispatch, `case (clock_domain)` statements. The audit pass scans the emitted parser pkg, both checker emits, both driver emits, the clock generators header, the CDC sync stub, the top module, and all build wrappers cleanly.
+- **INV-S-HDL-E-2** (no UVM) — preserved.
+- **INV-S-HDL-E-3** (no inline `assert property` outside bind files) — preserved.
+- **INV-S-HDL-E-4** (chart-vocabulary failure messages) — preserved. The multi-clock default driver's `[DRIVE]` log line now names the per-step clock domain verbatim (``[DRIVE] V%0d: event=%0d cycles=%0d domain=`%s`  // chart=...``) so a CI failure on a multi-clock chart immediately surfaces which clock domain the step was targeting.
+- **INV-S-HDL-E-5** (per-simulator build wrapper) — preserved unchanged. The five wave-2 wrappers cover single-region + parallel + single-clock + multi-clock emit paths (the wrappers are simulator-specific, not emit-shape-specific).
+- **INV-S-HDL-E-6** (Verilator-subset compliance) — preserved. `initial begin ... forever ... end` and `case` are within Verilator's documented subset; the per-clock generators emit Verilator-compatible timing via `#(real * 1ns)`.
+- **PCDN-SOS-08-E-001** (flat class hierarchy at v1) — resolved by the layered-hierarchy refactor; the multi-clock additions extend the base class but preserve the layered-hierarchy contract.
+- **PCDN-SOS-08-E-002** (Verilator deferred-failure stubs) — preserved unchanged.
+- **PCDN-SOS-08-E-004** (per-region testbench shape) — preserved; multi-clock composes with parallel via the parallel top-module variant.
+
+**Tests added**: 18 new test methods on `TestWave3FutureMultiClockTestbenchWiring`:
+
+- `test_byte_identity_for_no_clock_declared_chart` — regression guard: charts without `<sos:clock_domains>` emit no `clock_generators_*` or `_cdc_*` files; idempotent rerun is byte-identical.
+- `test_byte_identity_for_single_clock_chart` — regression guard: a chart with EXACTLY ONE `<sos:clock>` emits byte-identically to the same chart WITHOUT `<sos:clock_domains>` — confirms the wave-3-future-remaining-path baseline survives the multi-clock extension.
+- `test_drive_step_hook_signature_unchanged_when_single_clock` — single-clock chart preserves the wave-3 `drive_step(int step_idx, sos_jsonl_record_t rec)` signature; no `string clock_domain` parameter appears.
+- `test_two_clock_chart_emits_two_clock_generators` — two-clock chart emits exactly two `forever` toggle blocks.
+- `test_three_clock_chart_emits_three_clock_generators` — three-clock chart emits exactly three.
+- `test_clock_period_ns_emitted_in_generator` — the `period_ns` value lands in the `#((period)/2.0 * 1ns)` toggle verbatim.
+- `test_driver_base_declares_clock_domain_of_step_function` — the multi-clock driver base declares the virtual function with the contracted signature; default body returns the primary (first-declared) clock name.
+- `test_drive_step_hook_signature_gains_clock_domain_param_when_multi_clock` — all three hooks gain the `string clock_domain` parameter.
+- `test_default_driver_uses_case_on_clock_domain` — the default driver's `drive_step` override uses `case (clock_domain)` with per-clock arms + a `default:` fallback to the primary clock.
+- `test_primary_clock_is_first_declared` — swapping declaration order swaps which clock is primary (drives the default arm + the `clock_domain_of_step` default body).
+- `test_clock_domain_of_step_default_returns_primary` — the function body is a simple return with no branching.
+- `test_cdc_sync_stub_file_emitted_per_directional_boundary` — `clk_a → clk_b` and `clk_b → clk_a` yield two separate stub files.
+- `test_cdc_sync_stub_file_naming_convention` — exact filename match against `sos_<chart>_cdc_<from>_<to>_sync.svh`.
+- `test_cdc_sync_default_body_is_two_ff_synchroniser` — user-replace banner present; 2-FF (`meta_q` + `sync_q`) default body present; module name matches file name.
+- `test_invalid_sv_identifier_in_clock_name_raises` — chart-vocab gate raises on `"123clk"`, `"clk-a"`, `"clk a"`, `"clk.a"`.
+- `test_unknown_clock_id_in_sampling_clock_raises` — `<sos:cdc_boundary>` referencing an undeclared clock raises with the canonical chart-vocab error.
+- `test_expected_sv_tb_file_count_helper_returns_correct_count` — public helper agrees with the actual emit count across 0/1/2/3-clock × 0/1/2-CDC permutations.
+- `test_parallel_chart_multi_clock_also_works` — the multi-clock path composes with parallel charts.
+
+**Test suite**: 892/892 passing (874 prior + 18 new wave-3-future-remaining multi-clock; 1 skipped when neither SV syntax tool is installed).
+
+**Wave-3-future closed**:
+
+With this slice landed, the wave-3-future carry-forward set is **complete**. The following remain explicitly out-of-scope for SOS-08-E v1 (future phase work, not wave-3-future):
+
+- **Per-region clocking on the chart-top wrapper** (per-region `clk_<dom>` / `rst_<dom>` ports) — the SOS-08-D wave-4 multi-clock-domain bind wiring concern. SOS-08-E v1 wires the DUT's single `.clk` port to the primary clock; per-region clocking on the chart-top wrapper itself is an SOS-08-D concern.
+- **CDC formal verification** — the emitted stubs synthesise but are NOT formally verified. Project-specific CDC primitives (MTBF-characterised macros, Gray-coded handshake buses, full multi-bit handshakes) are user-replaced in-place at the STUB-banner boundary.
+- **Asynchronous reset handling** — the multi-clock emit uses synchronous reset assertion in the driver base; per-clock-domain async-reset wiring is a future phase concern.
+- **Nested-payload-aware failure messages** — unchanged from the prior §15 entries.
+
+**Cited PCDNs / invariants**: PCDN-SOS-08-E-001 / -002 / -004 unchanged; INV-S-HDL-E-1..6 preserved; new chart-vocab elements `<sos:clock_domains>` / `<sos:clock>` (mirrored from SOS-08-D wave-4) + `<sos:cdc_boundary>` (own); new SV contracts `clock_domain_of_step()` + ``string clock_domain`` hook parameter + `sos_<chart>_cdc_<from>_<to>_sync.svh` naming convention (own).
+
+Status: 🟢 **wave-3-future closed**. Multi-clock testbench wiring complete; LAST wave-3-future carry-forward landed. SOS-08-E v1 emission contract fully delivered.
