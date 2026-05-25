@@ -1110,3 +1110,394 @@ class TestWave4FutureBackwardsCompatibleEmit:
         body = "\n".join(lines)
         assert "WAVE-4-V1 PLACEHOLDER" not in body
         assert "bit 1 per SOS-08-C document-order encoding" in body
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-D wave-4-future (2026-05-24 §15): `<sos:raw_property>` escape
+# hatch. Chart authors paste literal SVA into the element body when the
+# structured `<sos:cross_invariant>` grammar cannot express the desired
+# property (liveness, multi-step `##` temporal sequences, vendor-specific
+# coverage constructs). The walker validates the element wrapper +
+# collision-checks names but treats the body as opaque IEEE 1800-2017
+# SystemVerilog (authority relationship `derive`).
+# ---------------------------------------------------------------------------
+
+
+def _chart_with_raw_property():
+    """Parallel chart with one `<sos:raw_property>` block and no
+    cross_invariants. Exercises the raw-property-only emit path."""
+    chart = _parallel_chart()
+    chart["sos:raw_property"] = [
+        {
+            "name": "liveness_p",
+            "clock_region": "left",
+            "body": (
+                "(left_request_pending) "
+                "|-> ##[1:8] (left_request_granted)"
+            ),
+        },
+    ]
+    return chart
+
+
+def _chart_with_structured_and_raw():
+    """Parallel chart carrying BOTH a `<sos:cross_invariant>` AND a
+    `<sos:raw_property>`. Exercises ordering + banner separation."""
+    chart = _chart_with_cross_invariants()
+    chart["sos:raw_property"] = [
+        {
+            "name": "liveness_after_l2",
+            "clock_region": "left",
+            "body": (
+                "(current_state_left == ST_L2) "
+                "|-> ##[1:16] $past(current_state_right) != "
+                "current_state_right"
+            ),
+        },
+    ]
+    return chart
+
+
+class TestWave4FutureRawPropertyEscapeHatch:
+    """SOS-08-D wave-4-future §15 (2026-05-24): `<sos:raw_property>`
+    escape hatch for SVA bodies the structured cross_invariant grammar
+    cannot express. The walker emits the body verbatim, collision-checks
+    names, validates clock_region against declared regions, and bans
+    empty bodies + missing attrs.
+
+    Authority boundary per §0:
+      * Element shape (`name`, `clock_region`, body)  — relationship `own`.
+      * SVA body content                               — relationship `derive`
+        (IEEE 1800-2017 §16 grammar; walker does not interpret).
+    """
+
+    def _files(self) -> dict:
+        return transliterate_sva_bind.render_target(
+            _chart_with_raw_property(), {"chart_name": "p"}
+        )
+
+    def test_emits_raw_property_block_after_structured_invariants(self):
+        """The chart-top SVA file MUST appear with the raw-property
+        block when ONLY raw properties exist; the wave-4 cross-region
+        banner reports zero invariants but the file is still emitted."""
+        files = transliterate_sva_bind.render_target(
+            _chart_with_structured_and_raw(), {"chart_name": "p"}
+        )
+        sva = files["tests/p/p_top_sva.sv"]
+        # Structured property text appears before raw-property text.
+        cross_idx = sva.find("property p_inv_s_chart_1")
+        banner_idx = sva.find(
+            "// === raw_property escape hatches (walker-opaque) ==="
+        )
+        raw_idx = sva.find("property liveness_after_l2")
+        assert cross_idx > 0, "structured property missing"
+        assert banner_idx > 0, "banner comment missing"
+        assert raw_idx > 0, "raw property missing"
+        assert cross_idx < banner_idx < raw_idx, (
+            f"emission order MUST be structured → banner → raw; "
+            f"got cross_idx={cross_idx} banner_idx={banner_idx} "
+            f"raw_idx={raw_idx}"
+        )
+
+    def test_byte_identity_when_chart_has_no_raw_property(self):
+        """Regression guard — wave-4-future MUST NOT alter the emitted
+        byte content for any chart that declares no `<sos:raw_property>`.
+
+        Verifies the existing wave-4 fixture (`_chart_with_cross_invariants`)
+        produces identical bytes to a re-emit through the new code path.
+        The body MUST NOT carry the wave-4-future banner OR any per-
+        region clock port — the file is byte-identical to the wave-4
+        emit."""
+        files = transliterate_sva_bind.render_target(
+            _chart_with_cross_invariants(), {"chart_name": "p"}
+        )
+        sva = files["tests/p/p_top_sva.sv"]
+        bind = files["tests/p/p_top_bind.sv"]
+        # No wave-4-future-only banner.
+        assert (
+            "// === raw_property escape hatches (walker-opaque) ===" not in sva
+        )
+        # No per-region clock input port.
+        assert "_clk," not in sva  # No `<region>_clk,` port declaration.
+        assert "_clk\n" not in sva.replace("clk_", "x_x_")
+        # Bind also free of raw-property wiring.
+        assert "wave-4-future" not in bind.lower()
+        # Spot-check: wave-4 file count + names unchanged for this chart.
+        # (4 per-region SVA/bind + 2 top files = 6 — matches wave-4 baseline.)
+        assert len(files) == 6
+
+    def test_banner_comment_separates_structured_from_raw(self):
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        assert (
+            "// === raw_property escape hatches (walker-opaque) ===" in sva
+        )
+        # The banner explicitly cites that the walker is opaque to the
+        # body — IEEE 1800-2017 lives upstream.
+        assert "IEEE 1800-2017" in sva
+        assert "`derive`" in sva
+
+    def test_collision_with_cross_invariant_name_raises(self):
+        """A raw property's derived assert label MUST NOT collide with
+        an existing `<sos:cross_invariant>` id (which derives the same
+        `<ID>_ASSERT` label inside the bind module)."""
+        chart = _chart_with_cross_invariants()
+        chart["sos:raw_property"] = [
+            {
+                # `inv_s_chart_1` after sanitise → collides with the
+                # structured `INV-S-CHART-1` invariant.
+                "name": "inv_s_chart_1",
+                "clock_region": "left",
+                "body": "1'b1",
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"collides with the structured <sos:cross_invariant",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_collision_with_another_raw_property_name_raises(self):
+        chart = _parallel_chart()
+        chart["sos:raw_property"] = [
+            {
+                "name": "dup_p",
+                "clock_region": "left",
+                "body": "1'b1",
+            },
+            {
+                "name": "dup_p",
+                "clock_region": "right",
+                "body": "1'b1",
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"collides with another <sos:raw_property>",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_missing_clock_region_raises(self):
+        chart = _parallel_chart()
+        chart["sos:raw_property"] = [
+            {
+                "name": "no_clock_p",
+                "body": "1'b1",
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"non-empty `clock_region`",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_missing_name_raises(self):
+        chart = _parallel_chart()
+        chart["sos:raw_property"] = [
+            {
+                "clock_region": "left",
+                "body": "1'b1",
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"non-empty `name`",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_unknown_clock_region_raises_with_chart_vocab_error(self):
+        chart = _parallel_chart()
+        chart["sos:raw_property"] = [
+            {
+                "name": "bad_region_p",
+                "clock_region": "middle",
+                "body": "1'b1",
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"does not reference a region the chart declares",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_empty_body_raises(self):
+        chart = _parallel_chart()
+        chart["sos:raw_property"] = [
+            {
+                "name": "empty_p",
+                "clock_region": "left",
+                "body": "   \n\t  ",
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"non-empty body",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_missing_body_key_raises(self):
+        """Body absent entirely (no `body` / `_text` / `$` / `#text`)."""
+        chart = _parallel_chart()
+        chart["sos:raw_property"] = [
+            {
+                "name": "no_body_p",
+                "clock_region": "left",
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"non-empty body",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_leading_trailing_whitespace_stripped_body_verbatim_preserved(self):
+        """The walker MUST strip leading/trailing whitespace on the body
+        text but preserve the interior verbatim."""
+        chart = _parallel_chart()
+        verbatim = (
+            "(current_state_left == ST_L1) "
+            "|-> ##[2:4] !$isunknown(current_state_right)"
+        )
+        chart["sos:raw_property"] = [
+            {
+                "name": "whitespace_p",
+                "clock_region": "left",
+                # Leading + trailing whitespace MUST be stripped.
+                "body": "\n   " + verbatim + "   \n  ",
+            },
+        ]
+        files = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )
+        sva = files["tests/p/p_top_sva.sv"]
+        # Body interior is preserved verbatim — same `$isunknown` call,
+        # same `##[2:4]` window, same parens / spacing.
+        assert verbatim in sva
+        # The body MUST appear inside the property block @ posedge line.
+        assert f"@(posedge left_clk) {verbatim};" in sva
+
+    def test_source_document_order_preserved_across_multiple_raw_properties(self):
+        chart = _parallel_chart()
+        chart["sos:raw_property"] = [
+            {
+                "name": "first_p",
+                "clock_region": "left",
+                "body": "1'b1",
+            },
+            {
+                "name": "second_p",
+                "clock_region": "right",
+                "body": "1'b0",
+            },
+            {
+                "name": "third_p",
+                "clock_region": "left",
+                "body": "1'b1",
+            },
+        ]
+        files = transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+        sva = files["tests/p/p_top_sva.sv"]
+        first_idx = sva.find("property first_p")
+        second_idx = sva.find("property second_p")
+        third_idx = sva.find("property third_p")
+        assert 0 < first_idx < second_idx < third_idx, (
+            f"raw properties MUST emit in source document order; got "
+            f"first={first_idx} second={second_idx} third={third_idx}"
+        )
+
+    def test_emitted_clock_region_resolves_to_existing_region_clock(self):
+        """`clock_region="left"` MUST lower to `@(posedge left_clk)`
+        inside the emitted property + add `input wire left_clk` to the
+        module's port list."""
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        assert "@(posedge left_clk)" in sva
+        # Module port list carries the `<region>_clk` input.
+        assert re.search(
+            r"input\s+wire\s+left_clk\b", sva
+        ), f"SVA module must declare `left_clk` input port:\n{sva}"
+
+    def test_bind_directive_wires_raw_property_clock_from_default_clk(self):
+        """Region without a `clock=` annotation routes raw_property's
+        `<region>_clk` from the chart-top reference `clk`."""
+        bind = self._files()["tests/p/p_top_bind.sv"]
+        assert re.search(
+            r"\.left_clk\s*\(\s*clk\s*\)", bind
+        ), f"left_clk MUST wire from default clk:\n{bind}"
+
+    def test_bind_directive_wires_raw_property_clock_from_per_domain_clock(self):
+        """Region carrying a `clock=` annotation routes raw_property's
+        `<region>_clk` from `clk_<domain>` per SOS-08-C wave-3 clock-
+        distribution contract."""
+        chart = _multi_clock_parallel_chart()
+        chart["sos:raw_property"] = [
+            {
+                "name": "fast_liveness",
+                "clock_region": "fast",
+                "body": "1'b1",
+            },
+        ]
+        files = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )
+        bind = files["tests/p/p_top_bind.sv"]
+        assert re.search(
+            r"\.fast_clk\s*\(\s*clk_fast\s*\)", bind
+        ), f"fast region's `fast_clk` MUST wire from `clk_fast`:\n{bind}"
+
+    def test_assert_label_uppercased_per_emit_convention(self):
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        assert "LIVENESS_P_ASSERT: assert property (liveness_p)" in sva
+
+    def test_raw_only_chart_omits_param_block(self):
+        """A chart carrying ONLY raw properties (no `<sos:cross_invariant>`)
+        emits a top-sva module WITHOUT the `#(parameter int N_STATES_X)`
+        block — there are no structured invariants needing per-region
+        state-vector parameters."""
+        sva = self._files()["tests/p/p_top_sva.sv"]
+        # No `#(...)` parameter list — module decl is `module <m> (`
+        # directly. The wave-4 emit shape for charts WITH cross-
+        # invariants uses `module <m> #(\n    parameter int ...`.
+        assert "parameter int N_STATES_" not in sva
+        # Module decl line — `module p_top_sva (`.
+        assert re.search(r"module\s+p_top_sva\s*\(\s*\n", sva)
+
+    def test_render_emits_top_files_even_without_cross_invariants(self):
+        """The wave-4 emit fires when EITHER cross_invariants OR raw
+        properties are non-empty. Raw-property-only charts MUST emit
+        the top files."""
+        files = self._files()
+        assert "tests/p/p_top_sva.sv" in files
+        assert "tests/p/p_top_bind.sv" in files
+
+    def test_single_region_chart_ignores_raw_property(self):
+        """Mirroring `TestWave4SingleRegionUnchanged`: single-region
+        charts ignore `<sos:raw_property>` (and `<sos:cross_invariant>`)
+        — the wave-4 + wave-4-future top-file emit fires only on
+        parallel-chart inputs."""
+        chart = _simple_chart()
+        chart["sos:raw_property"] = [
+            {
+                "name": "ignored_p",
+                "clock_region": "left",
+                "body": "1'b1",
+            },
+        ]
+        files = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "demo"}
+        )
+        assert "tests/demo/demo_top_sva.sv" not in files
+        assert "tests/demo/demo_top_bind.sv" not in files
+        assert len(files) == 2  # single-region path unchanged.
+
+    def test_dict_form_accepted_for_single_raw_property(self):
+        """Loader-friendly: a single `<sos:raw_property>` may surface
+        as a bare dict (not a list) per the bare/wrapped scjson loader
+        convention. The walker MUST normalise either shape."""
+        chart = _parallel_chart()
+        chart["sos:raw_property"] = {
+            "name": "single_p",
+            "clock_region": "left",
+            "body": "1'b1",
+        }
+        files = transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+        sva = files["tests/p/p_top_sva.sv"]
+        assert "property single_p" in sva

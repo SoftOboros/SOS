@@ -952,6 +952,259 @@ _CROSS_INVARIANT_WITHIN_CAP = 1024
    §15 amendment if a real-world chart needs longer."""
 
 
+# ----------------------------------------------------------------------------
+# SOS-08-D wave-4-future (2026-05-24 §15) — `<sos:raw_property>` escape
+# hatch. Chart authors paste literal SVA into a `<sos:raw_property>`
+# element when the structured `<sos:cross_invariant>` grammar cannot
+# express the desired property (liveness, multi-step `##` temporal
+# sequences, vendor-specific coverage constructs). The walker validates
+# the element's attributes + collision-checks the name but treats the
+# body as opaque SVA text (relationship `derive` against IEEE 1800-2017).
+# ----------------------------------------------------------------------------
+
+
+@dataclass
+class _RawProperty:
+    """One ratified ``<sos:raw_property>`` declaration.
+
+    Wave-4-future declaration form (per §15 2026-05-24):
+
+        <sos:raw_property name="<sv-ident>" clock_region="<region>">
+            ...literal SVA body text...
+        </sos:raw_property>
+
+    Semantics: emit a ``property <name>; @(posedge <region>_clk) <body>;
+    endproperty`` block followed by ``<NAME>_ASSERT: assert property
+    (<name>);`` into ``<chart>_top_sva.sv``. The walker does NOT parse
+    the body — it is opaque SVA text (IEEE 1800-2017 grammar, owned
+    upstream by IEEE). Authority relationship per §0 is ``derive`` for
+    the body content; ``own`` for the element shape (name +
+    clock_region attribute names + collision-check semantics).
+    """
+
+    name: str
+    clock_region: str
+    body: str
+    doc_order: int = 0
+
+
+def _collect_raw_properties(
+    chart_ir: dict[str, Any],
+) -> list[_RawProperty]:
+    """Read ``<sos:raw_property>`` declarations from the chart IR.
+
+    Lookup accepts either the SCXML-namespaced ``sos:raw_property`` key
+    or the bare ``raw_property`` key (parallels ``_collect_cross_invariants``
+    for chart authors writing raw scjson with stripped namespaces).
+
+    Validation is split across two passes: this collector raises on
+    intrinsically-malformed entries (missing attrs, empty body, type
+    errors); ``_validate_raw_properties`` runs after with the region
+    map to check collisions + clock_region resolution.
+    """
+    raw = (
+        chart_ir.get("sos:raw_property")
+        or chart_ir.get("raw_property")
+        or []
+    )
+    if isinstance(raw, dict):
+        raw = [raw]
+    out: list[_RawProperty] = []
+    for idx, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        clock_region = entry.get("clock_region")
+        # Element body may live under "body" (custom scjson convention)
+        # or as the element's text content under "_text" / "$" / "#text"
+        # depending on the loader. Accept the documented shapes.
+        body = (
+            entry.get("body")
+            or entry.get("_text")
+            or entry.get("#text")
+            or entry.get("$")
+            or ""
+        )
+        if not (isinstance(name, str) and name.strip()):
+            raise UnsupportedChartError(
+                "SOS-08-D wave-4-future: <sos:raw_property> MUST carry a "
+                "non-empty `name` attribute (the SV identifier used for "
+                "the emitted property + assert label; collision-checked "
+                "against other property names in the same bind module)."
+            )
+        if not (isinstance(clock_region, str) and clock_region.strip()):
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future: <sos:raw_property name="
+                f"{name!r}> MUST carry a non-empty `clock_region` "
+                f"attribute referencing an existing region (used to "
+                f"resolve the property's sampling clock)."
+            )
+        if not isinstance(body, str) or not body.strip():
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future: <sos:raw_property name="
+                f"{name!r}> MUST carry a non-empty body of literal SVA "
+                f"text. The walker preserves the body verbatim; an "
+                f"empty body has no executable meaning."
+            )
+        out.append(_RawProperty(
+            name=name.strip(),
+            clock_region=clock_region.strip(),
+            body=body.strip(),
+            doc_order=idx,
+        ))
+    return out
+
+
+def _validate_raw_properties(
+    raw_properties: list[_RawProperty],
+    invariants: list[_CrossInvariant],
+    known_regions: list[str],
+) -> None:
+    """Cross-check ``<sos:raw_property>`` declarations after collection.
+
+    Fail-loud (``UnsupportedChartError``) on:
+      * ``name`` collision with another raw property in the same chart.
+      * ``name`` collision with a structured ``<sos:cross_invariant>``'s
+        derived assertion label (the wave-4 emit produces ``<ID>_ASSERT``
+        sanitised to upper-case; a raw property with a matching name
+        would emit a duplicate label).
+      * ``clock_region`` referencing a region the chart does not declare.
+
+    The validation runs after ``_collect_raw_properties`` (which has
+    already rejected missing attrs + empty bodies) so the surfaces here
+    are purely structural cross-checks.
+    """
+    # Pre-compute structured-invariant-derived label set; the wave-4 emit
+    # produces `<id sanitised to upper>_ASSERT` for each cross_invariant.
+    structured_labels: dict[str, str] = {
+        _sanitize_sv_identifier(inv.id).upper(): inv.id
+        for inv in invariants
+    }
+    # Structured property names (the lowercase `p_<id>` form) are also
+    # part of the bind module's namespace; collision-check against them
+    # too so a raw property doesn't shadow a structured property.
+    structured_prop_names: dict[str, str] = {
+        "p_" + _sanitize_sv_identifier(inv.id).lower(): inv.id
+        for inv in invariants
+    }
+
+    known_regions_set = set(known_regions)
+    seen_raw_names: dict[str, _RawProperty] = {}
+    for rp in raw_properties:
+        # Raw-property-to-raw-property name collision.
+        prior = seen_raw_names.get(rp.name)
+        if prior is not None:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future: <sos:raw_property name="
+                f"{rp.name!r}> collides with another <sos:raw_property> "
+                f"of the same name (declaration order #{prior.doc_order} "
+                f"vs #{rp.doc_order}). Property names MUST be unique "
+                f"within the chart's bind module."
+            )
+        # Raw-property-vs-structured-invariant collision: compare against
+        # both the assert label (`<NAME>_ASSERT`) and the property name
+        # (`p_<name>` lowercase) the wave-4 emit derives.
+        rp_label = _sanitize_sv_identifier(rp.name).upper()
+        rp_prop = "p_" + _sanitize_sv_identifier(rp.name).lower()
+        if rp_label in structured_labels:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future: <sos:raw_property name="
+                f"{rp.name!r}> derives assert label "
+                f"{rp_label + '_ASSERT'!r} which collides with the "
+                f"structured <sos:cross_invariant id="
+                f"{structured_labels[rp_label]!r}> emit. Rename the "
+                f"raw property or the cross-invariant id so the labels "
+                f"diverge."
+            )
+        if rp_prop in structured_prop_names:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future: <sos:raw_property name="
+                f"{rp.name!r}> derives property name {rp_prop!r} which "
+                f"collides with the structured <sos:cross_invariant id="
+                f"{structured_prop_names[rp_prop]!r}> emit. Rename the "
+                f"raw property or the cross-invariant id so the "
+                f"property names diverge."
+            )
+        # clock_region must reference a known region — chart-vocabulary
+        # validation per INV-S-HDL-D-5; consistent with the wave-4-future
+        # cross-invariant region-validation pass.
+        if rp.clock_region not in known_regions_set:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future: <sos:raw_property name="
+                f"{rp.name!r}>'s clock_region {rp.clock_region!r} does "
+                f"not reference a region the chart declares. Known "
+                f"regions: {sorted(known_regions_set)}."
+            )
+        seen_raw_names[rp.name] = rp
+
+
+def _collect_raw_property_clock_regions(
+    raw_properties: list[_RawProperty],
+) -> list[str]:
+    """Return the set of region names referenced by any raw property's
+    ``clock_region`` attribute, in first-seen (document) order. Used by
+    the SVA module + bind directive to declare + route the per-region
+    clock input ports the raw properties sample on."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for rp in raw_properties:
+        if rp.clock_region not in seen:
+            out.append(rp.clock_region)
+            seen.add(rp.clock_region)
+    return out
+
+
+def _emit_raw_property_blocks(
+    raw_properties: list[_RawProperty],
+    chart_name: str,
+) -> list[str]:
+    """Emit the raw-property SVA block list (banner + per-property body).
+
+    Each ``<sos:raw_property>`` lowers to four lines (comment + property
+    + assert label + closing) preserving the body verbatim except for
+    leading/trailing whitespace stripping. Properties appear in source-
+    document order. The walker does NOT interpret the body — it's
+    opaque SVA text (IEEE 1800-2017 grammar) per the §0 authority
+    declaration (relationship = ``derive``).
+    """
+    if not raw_properties:
+        return []
+    lines: list[str] = [
+        "",
+        "    // === raw_property escape hatches (walker-opaque) ===",
+        "    // Per SOS-08-D §15 wave-4-future (2026-05-24), the",
+        "    // <sos:raw_property> element pastes literal SVA text into",
+        "    // the emit. The walker preserves the body verbatim and",
+        "    // performs NO grammar checks — the body is IEEE 1800-2017",
+        "    // SystemVerilog (authority relationship = `derive`).",
+        "    // Chart-vocabulary failure messages are the chart author's",
+        "    // responsibility inside the raw body; the walker only",
+        "    // emits the default-failure path.",
+    ]
+    for rp in raw_properties:
+        # Emit per-property block. The body is written as-is (verbatim
+        # apart from the leading/trailing whitespace stripping done by
+        # `_collect_raw_properties`). Indent the body two levels inside
+        # the property block; the walker does NOT re-indent the body's
+        # interior lines — chart authors who care about indentation
+        # control it in their raw text.
+        body_text = rp.body
+        assert_label = _sanitize_sv_identifier(rp.name).upper() + "_ASSERT"
+        prop_ident = _sanitize_sv_identifier(rp.name)
+        clk_signal = f"{_sanitize_sv_identifier(rp.clock_region)}_clk"
+        lines.extend([
+            "",
+            f"    // <sos:raw_property name=\"{rp.name}\" "
+            f"clock_region=\"{rp.clock_region}\"/> — escape hatch, walker-opaque",
+            f"    // (chart `{chart_name}`, body preserved verbatim from source)",
+            f"    property {prop_ident};",
+            f"        @(posedge {clk_signal}) {body_text};",
+            f"    endproperty",
+            f"    {assert_label}: assert property ({prop_ident});",
+        ])
+    return lines
+
+
 def _collect_cross_invariants(
     chart_ir: dict[str, Any]
 ) -> list[_CrossInvariant]:
@@ -1157,6 +1410,7 @@ def _emit_cross_region_sva_module(
     invariants: list[_CrossInvariant],
     region_info: list[tuple[str, str | None]],
     region_state_indices: dict[str, dict[str, int]] | None = None,
+    raw_properties: list[_RawProperty] | None = None,
 ) -> str:
     """Emit ``<chart>_top_sva.sv`` — chart-top assertion module.
 
@@ -1173,8 +1427,18 @@ def _emit_cross_region_sva_module(
     Per INV-S-HDL-3 cross-domain region observables are synchronised
     through ``sos_synchronizer`` before the chart-top wrapper exposes
     them, so the sampled view is well-defined.
+
+    Wave-4-future (2026-05-24 §15): the ``raw_properties`` arg threads
+    a list of ``<sos:raw_property>`` declarations through to the emit.
+    Each raw property emits a banner-commented block after the
+    structured cross-invariants; per-region clock input ports
+    (``<region>_clk``) are added for each unique ``clock_region``
+    referenced by a raw property. When ``raw_properties`` is empty / None
+    the module emit is byte-identical to wave-4 (preserves regression
+    guard for existing fixtures).
     """
     module = _cross_invariant_sva_module_name(chart_name)
+    raw_properties = raw_properties or []
 
     # Collect the set of region observable ports the module needs to
     # expose. Iteration order is invariant-declaration order; dedup
@@ -1200,6 +1464,18 @@ def _emit_cross_region_sva_module(
         f"    parameter int N_STATES_{_sanitize_sv_identifier(r).upper()} = 1"
         for r in referenced_regions
     )
+
+    # Wave-4-future: per-region clock input ports for raw_property
+    # sampling. Each unique clock_region produces one ``<region>_clk``
+    # input. Empty when no raw properties → emit byte-identical to
+    # wave-4 for the regression-guard test.
+    raw_clock_regions = _collect_raw_property_clock_regions(raw_properties)
+    raw_clock_port_lines: list[str] = []
+    for r in raw_clock_regions:
+        clk_signal = f"{_sanitize_sv_identifier(r)}_clk"
+        raw_clock_port_lines.append(
+            f"    input wire {clk_signal},"
+        )
 
     property_blocks: list[str] = []
     for inv in invariants:
@@ -1234,9 +1510,16 @@ def _emit_cross_region_sva_module(
         region_info, referenced_regions
     )
 
-    lines: list[str] = [
-        _emit_header(chart_name, kind="cross-region-sva"),
-        "",
+    # Wave-4-future raw-property block (empty when no raw_properties →
+    # byte-identical to wave-4 emit for charts without escape hatches).
+    raw_property_lines = _emit_raw_property_blocks(
+        raw_properties, chart_name
+    )
+
+    # Header banner: keep wave-4 line count + wording stable when no
+    # raw_properties so the regression-guard byte-identity test passes;
+    # extend with a wave-4-future banner only when raw_properties exist.
+    header_banner: list[str] = [
         "// SOS-08-D wave-4: cross-region invariant SVA module.",
         f"// Chart-top wrapper bound to: {chart_top_module}",
         f"// Invariants declared:        {len(invariants)}",
@@ -1254,31 +1537,96 @@ def _emit_cross_region_sva_module(
         "// region sampling clock below is well-defined for both",
         "// single-clock + multi-clock parallel charts.",
         domain_comment,
+    ]
+    if raw_properties:
+        header_banner.extend([
+            "//",
+            "// SOS-08-D §15 wave-4-future (2026-05-24): this module also",
+            "// carries <sos:raw_property> escape-hatch blocks below the",
+            f"// structured cross-invariants. Raw properties declared: "
+            f"{len(raw_properties)}.",
+            "// The walker preserves each raw body verbatim (relationship",
+            "// `derive` against IEEE 1800-2017 SystemVerilog); only the",
+            "// element wrapper + collision/clock_region validation are",
+            "// walker-owned.",
+        ])
+
+    # Module port + parameter list. The structured-invariant path emits
+    # a parameter block (`#(parameter int N_STATES_<R> = 1, ...)`);
+    # raw-property-only emits skip the parameter block (no per-region
+    # state-vector ports → no parameter needed). Port list assembles
+    # clk + rst + structured observables + per-region raw clocks.
+    port_list_lines: list[str] = [
+        "    input wire clk",
+        "    input wire rst",
+    ]
+    for r in referenced_regions:
+        port_list_lines.append(
+            f"    input wire [N_STATES_{_sanitize_sv_identifier(r).upper()}-1:0] "
+            f"current_state_{_sanitize_sv_identifier(r)}"
+        )
+    for r in raw_clock_regions:
+        port_list_lines.append(
+            f"    input wire {_sanitize_sv_identifier(r)}_clk"
+        )
+    # Join with trailing commas on all but the last port line.
+    port_list_block = ",\n".join(port_list_lines)
+
+    lines: list[str] = [
+        _emit_header(chart_name, kind="cross-region-sva"),
+        "",
+        *header_banner,
         "",
         "`default_nettype none",
         "",
-        f"module {module} #(",
-        param_decls,
-        ") (",
-        "    input wire clk,",
-        "    input wire rst,",
-        port_decls.rstrip(","),
+    ]
+
+    if invariants:
+        # Preserve wave-4 emit shape: `module <m> #(<params>) (<ports>);`.
+        # When invariants is empty (raw-properties-only emit) the
+        # parameter block is omitted so the SV elaborates cleanly with
+        # no unreferenced parameters.
+        lines.extend([
+            f"module {module} #(",
+            param_decls,
+            ") (",
+        ])
+    else:
+        lines.append(f"module {module} (")
+
+    lines.extend([
+        port_list_block,
         ");",
-        "",
-        "    // INV-S-HDL-D-2 (one-hot, reset-initial) state-constants",
-        "    // are inherited from each region's FSM module via the",
-        "    // chart-top wrapper's port wiring; the cross-region module",
-        "    // need only re-declare the constants it directly refs.",
-        *_emit_cross_invariant_state_constants(
-            invariants, region_state_indices
-        ),
-        "",
-        *property_blocks,
+    ])
+
+    if invariants:
+        lines.extend([
+            "",
+            "    // INV-S-HDL-D-2 (one-hot, reset-initial) state-constants",
+            "    // are inherited from each region's FSM module via the",
+            "    // chart-top wrapper's port wiring; the cross-region module",
+            "    // need only re-declare the constants it directly refs.",
+            *_emit_cross_invariant_state_constants(
+                invariants, region_state_indices
+            ),
+            "",
+            *property_blocks,
+        ])
+
+    if raw_property_lines:
+        # Raw properties always render after the structured invariants
+        # (and after the structured-block separator) so the byte-identity
+        # regression guard for no-raw_property charts holds: the entire
+        # block below the `*property_blocks` line is `*raw_property_lines`
+        # which is empty for that path.
+        lines.extend(raw_property_lines)
+
+    lines.extend([
         "",
         "endmodule",
         "",
         "`default_nettype wire",
-    ]
+    ])
     return "\n".join(lines) + "\n"
 
 
@@ -1396,6 +1744,7 @@ def _emit_cross_region_bind_directive(
     chart_top_module: str,
     invariants: list[_CrossInvariant],
     region_info: list[tuple[str, str | None]],
+    raw_properties: list[_RawProperty] | None = None,
 ) -> str:
     """Emit ``<chart>_top_bind.sv`` — bind directive attaching the
     chart-top SVA module to the chart-top wrapper.
@@ -1405,9 +1754,19 @@ def _emit_cross_region_bind_directive(
       - ``.rst(rst)`` — chart-top reference reset.
       - ``.current_state_<region>`` per region referenced by any
         invariant; matches the chart-top wrapper's exposed port shape.
+
+    Wave-4-future (2026-05-24 §15): when ``raw_properties`` is non-
+    empty, the bind also wires per-region ``<region>_clk`` ports from
+    the chart-top wrapper's per-domain or default clock. Each region
+    used as a raw-property ``clock_region`` contributes one connection.
+    For regions carrying a ``clock`` annotation, the source is
+    ``clk_<domain>`` per SOS-08-C wave-3's clock-distribution contract;
+    for regions without an annotation, the source is the chart-top
+    reference ``clk``.
     """
     sva_module = _cross_invariant_sva_module_name(chart_name)
     inst_name = f"u_{sva_module}"
+    raw_properties = raw_properties or []
 
     referenced_regions: list[str] = []
     seen: set[str] = set()
@@ -1417,14 +1776,44 @@ def _emit_cross_region_bind_directive(
                 referenced_regions.append(r)
                 seen.add(r)
 
-    conn_lines: list[str] = [
-        "    .clk           (clk),",
-        "    .rst           (rst),",
+    raw_clock_regions = _collect_raw_property_clock_regions(raw_properties)
+    region_to_domain = dict(region_info)
+
+    # Build connection list. Last connection MUST NOT carry a trailing
+    # comma — assemble first, then patch the final entry.
+    all_conns: list[str] = [
+        ".clk           (clk)",
+        ".rst           (rst)",
     ]
-    for i, r in enumerate(referenced_regions):
+    for r in referenced_regions:
         obs = f"current_state_{_sanitize_sv_identifier(r)}"
-        suffix = "," if i < len(referenced_regions) - 1 else ""
-        conn_lines.append(f"    .{obs} ({obs}){suffix}")
+        all_conns.append(f".{obs} ({obs})")
+    for r in raw_clock_regions:
+        sva_port = f"{_sanitize_sv_identifier(r)}_clk"
+        domain = region_to_domain.get(r)
+        if domain is not None:
+            src = _clk_port_name(domain)
+        else:
+            src = "clk"
+        all_conns.append(f".{sva_port} ({src})")
+
+    conn_lines: list[str] = []
+    for i, conn in enumerate(all_conns):
+        suffix = "," if i < len(all_conns) - 1 else ""
+        conn_lines.append(f"    {conn}{suffix}")
+
+    body_extra: list[str] = []
+    if raw_properties:
+        body_extra.extend([
+            "//",
+            "// SOS-08-D §15 wave-4-future (2026-05-24): bind also wires",
+            f"// {len(raw_clock_regions)} per-region clock port(s) used by "
+            f"<sos:raw_property> blocks.",
+            "// Per-region clock source picks up the wave-4 clock-",
+            "// distribution contract: clk_<domain> when the region",
+            "// declares a `clock` attribute; the chart-top reference",
+            "// `clk` otherwise.",
+        ])
 
     lines: list[str] = [
         _emit_header(chart_name, kind="cross-region-bind"),
@@ -1439,6 +1828,7 @@ def _emit_cross_region_bind_directive(
         "// Per-region clock-domain wiring is handled by the per-region",
         "// bind directives in `_region_<r>_fsm_bind.sv`; this chart-",
         "// top bind uses the reference clock for cross-region sampling.",
+        *body_extra,
         "",
         "`default_nettype none",
         "",
@@ -1606,8 +1996,15 @@ def _render_parallel(
     # its top level, co-emit ``<chart>_top_sva.sv`` (assertion module
     # referencing per-region observables) + ``<chart>_top_bind.sv``
     # (bind directive targeting the chart-top wrapper).
+    #
+    # SOS-08-D wave-4-future (2026-05-24 §15): the same two files also
+    # carry ``<sos:raw_property>`` escape-hatch blocks. Top-file emit
+    # fires when EITHER list is non-empty; collision + clock_region
+    # validation runs before emit so chart-author typos surface as
+    # actionable errors (INV-S-HDL-D-5) rather than as malformed SVA.
     cross_invariants = _collect_cross_invariants(chart_ir)
-    if cross_invariants:
+    raw_properties = _collect_raw_properties(chart_ir)
+    if cross_invariants or raw_properties:
         # SOS-08-D wave-4-future (2026-05-24 §15): build per-region
         # state-encoding map matching SOS-08-C's document-order one-hot
         # encoding; validate every cross-invariant's region.state refs
@@ -1615,8 +2012,15 @@ def _render_parallel(
         # citing INV-S-HDL-D-2 + the cross-invariant id, not as a
         # silently-mismatched bit position in the SVA property.
         region_state_indices = _build_region_state_indices(regions)
-        _validate_cross_invariant_state_refs(
-            cross_invariants, region_state_indices
+        if cross_invariants:
+            _validate_cross_invariant_state_refs(
+                cross_invariants, region_state_indices
+            )
+        # Raw-property validation: collision + clock_region resolution
+        # against the chart's declared regions.
+        known_region_names = [r for r, _ in region_info]
+        _validate_raw_properties(
+            raw_properties, cross_invariants, known_region_names
         )
         top_sva_body = _emit_cross_region_sva_module(
             chart_name=chart_name,
@@ -1624,12 +2028,14 @@ def _render_parallel(
             invariants=cross_invariants,
             region_info=region_info,
             region_state_indices=region_state_indices,
+            raw_properties=raw_properties,
         )
         top_bind_body = _emit_cross_region_bind_directive(
             chart_name=chart_name,
             chart_top_module=chart_top_module,
             invariants=cross_invariants,
             region_info=region_info,
+            raw_properties=raw_properties,
         )
         out[f"tests/{base}/{base}_top_sva.sv"] = top_sva_body
         out[f"tests/{base}/{base}_top_bind.sv"] = top_bind_body

@@ -805,3 +805,104 @@ The error message names: (a) the invariant id (the chart-author handle), (b) the
 **Cited invariants / PCDNs**: INV-S-HDL-D-2 (state encoding parity — now achieved by construction); INV-S-HDL-D-5 (chart vocabulary — extended to validation diagnostics); PCDN-SOS-08-C-state-encoding-mirror (resolved by `_walk_states_in_order` sharing); SOS-08-C `_one_hot_value` (consumed indirectly through the shared traversal helper for the equivalence test).
 
 Status: 🟢 **wave-4-future complete** for state-encoding pass-through + chart-author validation. Compound antecedent/consequent expressions, multi-clock cross-region sampling, `raw_property` escape hatch, and shared-datamodel cross-region transition driving remain on the wave-4-future track.
+
+### 2026-05-24 — Impl wave-4-future: `<sos:raw_property>` escape hatch (Ira)
+
+Closes the **`raw_property` escape hatch** carry-forward from the 2026-05-24 wave-4-future ratification entry. Most cross-region invariants are expressible via the structured `<sos:cross_invariant>` grammar, but a small set of properties — liveness (SVA `eventually`, `s_eventually`), multi-step `##` temporal sequences, vendor-specific coverage constructs — cannot be expressed without literal SVA. Forcing chart authors to fork the walker for every exotic property is the wrong knob; this entry lands the escape hatch alongside the structured emit so chart authors can paste raw SVA into a `<sos:raw_property>` element with explicit acknowledgement that the body is opaque to the walker and not chart-vocabulary-checked.
+
+**New element form** (frozen by this §15 entry):
+
+```xml
+<sos:bind_directives>
+    <sos:cross_invariant id="INV-S-CHART-1"
+                         antecedent="region.left == L2"
+                         consequent="region.right == R2"
+                         within="8" />
+    <sos:raw_property name="liveness_p" clock_region="left">
+        s_eventually (current_state_left == ST_L2)
+    </sos:raw_property>
+</sos:bind_directives>
+```
+
+- **`name`** (REQUIRED) — SV identifier used as the emitted property name + the `<NAME>_ASSERT:` assert label. Collision-checked against (a) every other `<sos:raw_property>` in the same bind module and (b) every structured `<sos:cross_invariant>` id's derived assert label (`<ID>_ASSERT`) and derived property name (`p_<id>`). A collision raises `UnsupportedChartError` at codegen time.
+- **`clock_region`** (REQUIRED) — references an existing region (validated against the chart's parallel-region declaration set, reusing the same chart-vocab error shape `<sos:cross_invariant>` uses). The emit lowers `clock_region="<name>"` to `@(posedge <name>_clk)` and adds a per-region clock input port to the chart-top SVA module; the bind directive routes that port from `clk_<domain>` (for regions carrying a `clock="<domain>"` annotation) or from the chart-top reference `clk` (default).
+- **Element body** — literal SVA text. The walker strips leading and trailing whitespace; the interior is preserved verbatim. A missing or whitespace-only body raises `UnsupportedChartError`. The walker does NOT parse or validate the body — it is IEEE 1800-2017 SystemVerilog grammar, owned upstream by IEEE.
+
+**Emission shape** (per `<sos:raw_property>` block, inside `<chart>_top_sva.sv`):
+
+```sv
+// === raw_property escape hatches (walker-opaque) ===
+// Per SOS-08-D §15 wave-4-future (2026-05-24), the
+// <sos:raw_property> element pastes literal SVA text into
+// the emit. The walker preserves the body verbatim and
+// performs NO grammar checks — the body is IEEE 1800-2017
+// SystemVerilog (authority relationship = `derive`).
+// Chart-vocabulary failure messages are the chart author's
+// responsibility inside the raw body; the walker only
+// emits the default-failure path.
+
+// <sos:raw_property name="liveness_p" clock_region="left"/> — escape hatch, walker-opaque
+// (chart `<chart>`, body preserved verbatim from source)
+property liveness_p;
+    @(posedge left_clk) s_eventually (current_state_left == ST_L2);
+endproperty
+LIVENESS_P_ASSERT: assert property (liveness_p);
+```
+
+**Emission ordering** (load-bearing for the regression-guard test): structured `<sos:cross_invariant>` properties emit FIRST inside `<chart>_top_sva.sv` (preserving wave-4 byte-identity for charts that don't use `raw_property`); then a banner comment `// === raw_property escape hatches (walker-opaque) ===` separates the two regions; then each `<sos:raw_property>` emits in source-document order. The banner appears ONLY when raw properties exist — charts without raw properties produce byte-identical wave-4 output.
+
+**No "auto-disable" mode.** The walker does not synthesise gating around the raw body. If the chart author wants the property gated (e.g. behind `disable iff (rst)`), they include the gating in their literal text. The structured `<sos:cross_invariant>` path already gates on `disable iff (rst)` automatically; the escape hatch deliberately stays out of policy decisions about the body.
+
+**Authority boundary declaration** (per §0 standards-integration discipline):
+
+- **Element shape** (`<sos:raw_property name="..." clock_region="...">...</sos:raw_property>`) — relationship `own`. SOS-08-D owns the element wrapper, the attribute names, the collision-check semantics, the clock_region resolution rules, the banner-comment shape, and the assert-label convention (`<NAME>_ASSERT`). Mutating these requires a §15 amendment to this doc.
+- **SVA body content** — relationship `derive`. The body is IEEE 1800-2017 SystemVerilog §16 (Assertions). The walker reads it but does not interpret it; the emit pastes the body verbatim into the property block. Upstream authority is IEEE 1800-2017. No mutation rights — the walker cannot rewrite the body.
+
+**Failure modes** (all fail-loud at codegen time per INV-S-HDL-D-5):
+
+| Failure | Detection | Error shape |
+|---|---|---|
+| Missing `name` attribute | `_collect_raw_properties` | `non-empty 'name'` |
+| Missing `clock_region` attribute | `_collect_raw_properties` | `non-empty 'clock_region'` |
+| Empty body (whitespace-only or absent) | `_collect_raw_properties` | `non-empty body` |
+| `name` collides with another `<sos:raw_property>` | `_validate_raw_properties` | `collides with another <sos:raw_property>` |
+| `name` derives a label colliding with `<sos:cross_invariant>` id | `_validate_raw_properties` | `collides with the structured <sos:cross_invariant>` |
+| `clock_region` references unknown region | `_validate_raw_properties` | `does not reference a region the chart declares` + sorted known-region list |
+
+All errors raise `UnsupportedChartError` with chart-vocabulary text naming the property handle (so the chart author can locate the offending element directly).
+
+**Implementation surface** (one walker module, no external callers touched):
+
+- `_RawProperty` (dataclass) — collected element: `name`, `clock_region`, `body`, `doc_order`.
+- `_collect_raw_properties(chart_ir)` — reads `<sos:raw_property>` declarations from either `sos:raw_property` or `raw_property` key (parallels `_collect_cross_invariants`). Accepts list or bare-dict shapes. Strips body leading/trailing whitespace. Raises on missing attrs + empty bodies.
+- `_validate_raw_properties(raw_properties, invariants, known_regions)` — cross-checks names (raw vs raw, raw vs structured) and clock_region resolution. Runs AFTER `_collect_raw_properties`; surfaces collisions as `UnsupportedChartError`.
+- `_collect_raw_property_clock_regions(raw_properties)` — deduped, first-seen-order list of regions used as `clock_region`. Drives the per-region clock input port emission + bind wiring.
+- `_emit_raw_property_blocks(raw_properties, chart_name)` — emits the banner + per-property block list. Returns `[]` when `raw_properties` is empty (byte-identity for the no-raw-property regression-guard test).
+- `_emit_cross_region_sva_module` — extended with `raw_properties=None`. Appends the raw-property block list AFTER the structured invariant blocks. Adds per-region clock input ports. When `invariants` is empty (raw-property-only chart), omits the `#(parameter int N_STATES_<R> = 1)` block.
+- `_emit_cross_region_bind_directive` — extended with `raw_properties=None`. Wires `<region>_clk` connections (sourced from `clk_<domain>` for clock-annotated regions, from `clk` otherwise).
+- `_render_parallel` — top-file emission fires when EITHER `cross_invariants` OR `raw_properties` is non-empty. Validation pass runs before emit so chart-author typos surface as actionable errors.
+
+**Backwards compatibility**. All extended helpers default `raw_properties` to `None` / `[]`. Charts without `<sos:raw_property>` produce byte-identical emit to wave-4-future (state-encoding pass-through entry above). The regression-guard test `test_byte_identity_when_chart_has_no_raw_property` pins this: the existing `_chart_with_cross_invariants` fixture's emit MUST NOT carry the wave-4-future banner OR any per-region clock port; the file count remains 6 (4 region SVA/bind + 2 top files); the bind directive's body is free of wave-4-future markers.
+
+**Wave-4-future remaining** after this entry (the original wave-4-future carry-forward list, minus the closed `raw_property` item):
+
+- **Compound cross-invariant expressions** (Boolean conjunctions / disjunctions across `region.X == STATE_A` terms in the structured grammar). Chart authors needing complex Boolean structure can either author multiple `<sos:cross_invariant>` elements or drop to `<sos:raw_property>` (this entry's escape hatch makes the compound case workable today; lifting the structured grammar is now demand-driven).
+- **Multi-clock cross-region sampling** (sample antecedent on its own clock and consequent on its own clock with a synchronisation handoff between them). Wave-4 emit samples both observables on the chart-top reference clock per INV-S-HDL-3 (regions are synced through `sos_synchronizer` before exposure). Cross-clock sampling primitives are a future amendment.
+- **Shared-datamodel cross-region transition driving** — extending cross_invariant antecedent/consequent grammar to reference datamodel signals (`data.<X> == <K>`) in addition to region states. Useful for invariants like "when shared counter reaches K, region.Y must be in STATE_Z within W cycles".
+
+**Test count**: net +20 in `TestWave4FutureRawPropertyEscapeHatch` (one class in `tools/sos-codegen/tests/test_transliterate_sva_bind.py`):
+
+- Emission ordering + structural shape: `test_emits_raw_property_block_after_structured_invariants`, `test_banner_comment_separates_structured_from_raw`, `test_source_document_order_preserved_across_multiple_raw_properties`, `test_raw_only_chart_omits_param_block`, `test_render_emits_top_files_even_without_cross_invariants`, `test_assert_label_uppercased_per_emit_convention`.
+- Byte-identity regression: `test_byte_identity_when_chart_has_no_raw_property` (the load-bearing wave-4 byte-identity guard).
+- Validation (collisions): `test_collision_with_cross_invariant_name_raises`, `test_collision_with_another_raw_property_name_raises`.
+- Validation (missing attrs): `test_missing_clock_region_raises`, `test_missing_name_raises`, `test_unknown_clock_region_raises_with_chart_vocab_error`, `test_empty_body_raises`, `test_missing_body_key_raises`.
+- Body verbatim preservation: `test_leading_trailing_whitespace_stripped_body_verbatim_preserved`.
+- Clock wiring: `test_emitted_clock_region_resolves_to_existing_region_clock`, `test_bind_directive_wires_raw_property_clock_from_default_clk`, `test_bind_directive_wires_raw_property_clock_from_per_domain_clock`.
+- Single-region passthrough: `test_single_region_chart_ignores_raw_property`.
+- Loader-shape tolerance: `test_dict_form_accepted_for_single_raw_property`.
+
+**Test suite**: 769/769 passing (749 prior + 20 new wave-4-future raw_property). All existing wave-4 + wave-4-future state-encoding tests unchanged — the `raw_properties=None` default preserves the wave-4 emit shape for every legacy fixture.
+
+**Cited invariants / PCDNs**: INV-S-HDL-D-4 (same SVA artifact feeds cocotb + formal — raw bodies pass through unchanged to both consumers); INV-S-HDL-D-5 (chart-vocabulary failure messages — extended to validation diagnostics for the raw-property collision + clock_region errors); §8 standards-integration matrix relationships `own` (element shape) + `derive` (SVA body — IEEE 1800-2017 §16).
+
+Status: 🟢 **wave-4-future complete** for `<sos:raw_property>` escape hatch. Compound antecedent/consequent expressions, multi-clock cross-region sampling, and shared-datamodel cross-region transition driving remain on the wave-4-future track.
