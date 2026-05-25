@@ -947,6 +947,17 @@ class _CrossInvariant:
     wave-4 implies-style property (with ``##[1:within]`` window) and
     the wave-4-future-compound boolean property (single-cycle SVA
     expression).
+
+    Wave-4-future-multi-clock (2026-05-24 §15) — per-region clock
+    declarations: when the cross-invariant carries one or more
+    ``<sos:sampling_clock region="..." clock="..."/>`` children, the
+    walker populates ``sampling_clocks`` with a region→clock map
+    (ordered by source-document order) and ``primary_clock_region``
+    with the first sampling-clock entry's region (the primary
+    sampling-clock for the property's ``@(posedge ...)`` header).
+    The emit path takes the IEEE 1800-2017 §16.13 multi-clocked
+    assertion form: subsequent regions wrap their leaf observable
+    in ``$past(<expr>, 1, , @(posedge <its_clock>))``.
     """
 
     id: str
@@ -962,6 +973,15 @@ class _CrossInvariant:
     # the emit path uses ``expr`` for both the SVA body + the
     # chart-vocabulary failure message.
     expr: "_CompoundExpr | None" = None
+    # Wave-4-future-multi-clock: ordered region→clock map declared by
+    # one or more ``<sos:sampling_clock region="..." clock="..."/>``
+    # children. Empty when the invariant uses the wave-4 single-clock
+    # path (sampled on chart-top ``clk``).
+    sampling_clocks: dict[str, str] = field(default_factory=dict)
+    # Wave-4-future-multi-clock: the region naming the primary
+    # ``@(posedge ...)`` clock for the property. Source-document order
+    # of ``<sos:sampling_clock>`` children controls primacy.
+    primary_clock_region: str | None = None
 
 
 @dataclass
@@ -1358,6 +1378,10 @@ def _collect_cross_invariants(
                 f"{_CROSS_INVARIANT_WITHIN_CAP}. Bump via §15 amendment "
                 f"if a real-world chart needs longer."
             )
+        # SOS-08-D wave-4-future-mclk (2026-05-24 §15): parse optional
+        # ``<sos:sampling_clock region="..." clock="..."/>`` children.
+        sampling_clocks, primary_region = _parse_sampling_clocks(entry, inv_id)
+
         out.append(_CrossInvariant(
             id=inv_id,
             antecedent_region=a_region,
@@ -1366,8 +1390,85 @@ def _collect_cross_invariants(
             consequent_state=c_state,
             within=within,
             expr=compound_expr,
+            sampling_clocks=sampling_clocks,
+            primary_clock_region=primary_region,
         ))
     return out
+
+
+def _parse_sampling_clocks(
+    entry: dict[str, Any],
+    inv_id: str,
+) -> tuple[dict[str, str], str | None]:
+    """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — parse the optional
+    ``<sos:sampling_clock>`` child list on a cross-invariant.
+
+    Returns ``(region_to_clock_map, primary_clock_region)``. When no
+    ``<sos:sampling_clock>`` children are present, returns
+    ``({}, None)`` — the wave-4 single-clock path applies and the emit
+    samples on chart-top ``clk``.
+
+    Each ``<sos:sampling_clock>`` MUST carry non-empty ``region`` +
+    ``clock`` attributes. Duplicate ``region`` entries within one
+    invariant collapse to first-seen-wins (with a chart-vocab error so
+    the chart author resolves the ambiguity). The first
+    ``<sos:sampling_clock>`` in source-document order designates the
+    primary clock — the property's outer ``@(posedge ...)`` header
+    samples on that region's clock; subsequent regions use
+    ``$past(..., @(posedge <its_clock>))`` per IEEE 1800-2017 §16.13.
+
+    Validation against the chart's clock-domain set runs separately in
+    ``_validate_sampling_clocks`` — this collector only enforces
+    intrinsic shape constraints (non-empty attrs, no duplicate
+    regions). The clock identifier validation requires the
+    region→domain map from ``_collect_parallel_regions``.
+    """
+    raw = (
+        entry.get("sos:sampling_clock")
+        or entry.get("sampling_clock")
+        or None
+    )
+    if raw is None:
+        return {}, None
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return {}, None
+
+    region_to_clock: dict[str, str] = {}
+    primary: str | None = None
+    for child in raw:
+        if not isinstance(child, dict):
+            continue
+        region = child.get("region")
+        clock = child.get("clock")
+        if not (isinstance(region, str) and region.strip()):
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-mclk: cross-invariant "
+                f"{inv_id!r} <sos:sampling_clock> MUST carry a non-"
+                f"empty `region` attribute referencing one of the "
+                f"chart's parallel regions."
+            )
+        if not (isinstance(clock, str) and clock.strip()):
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-mclk: cross-invariant "
+                f"{inv_id!r} <sos:sampling_clock region={region!r}> "
+                f"MUST carry a non-empty `clock` attribute referencing "
+                f"one of the chart's declared clock domains."
+            )
+        region = region.strip()
+        clock = clock.strip()
+        if region in region_to_clock:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-mclk: cross-invariant "
+                f"{inv_id!r} declares <sos:sampling_clock> for region "
+                f"{region!r} more than once; declare at most one "
+                f"sampling clock per region per invariant."
+            )
+        region_to_clock[region] = clock
+        if primary is None:
+            primary = region
+    return region_to_clock, primary
 
 
 def _compound_child_key(entry: dict[str, Any], name: str) -> str | None:
@@ -1413,12 +1514,18 @@ def _detect_unknown_root_operator(
     intended unsupported-operator chart-vocab message).
     """
     known_compound = set(_COMPOUND_OPERATOR_NAMES) | {"state_ref"}
+    # SOS-08-D wave-4-future-mclk (2026-05-24 §15) — `<sos:sampling_clock>`
+    # is a per-invariant child, not a boolean operator; whitelist so the
+    # unknown-operator detector doesn't reject it.
+    known_invariant_children = {"sampling_clock"}
     loader_internals = {"_text", "#text", "$"}
     for k in entry.keys():
         bare = k.split(":")[-1]
         if bare in _CROSS_INVARIANT_ATTR_KEYS:
             continue
         if bare in known_compound:
+            continue
+        if bare in known_invariant_children:
             continue
         if bare in loader_internals or bare.startswith("_") or bare.startswith("#"):
             continue
@@ -1994,6 +2101,611 @@ def _summarise_compound_expr(expr: "_CompoundExpr") -> str:
     return f"<{expr.kind}>"
 
 
+def _collect_chart_clock_domains(
+    region_info: list[tuple[str, str | None]],
+) -> set[str]:
+    """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — set of declared
+    clock-domain identifiers the chart's regions expose.
+
+    Note on `<sos:clock_domains>` block: at the time of the
+    wave-4-future-mclk landing, there is no separately validated
+    `<sos:clock_domains>` chart-vocab element — clock identifiers are
+    derived from each region's ``clock="..."`` attribute (per SOS-08-C
+    wave-3 clock-distribution contract). This collector returns the
+    union of (a) every non-None clock-domain string declared by some
+    region, plus (b) the default chart-top reference clock identifier
+    ``clk`` (used by regions without a `clock=` annotation).
+
+    The returned set is the validation target for
+    ``_validate_sampling_clocks`` — a ``<sos:sampling_clock
+    clock=...>`` value not in this set raises a chart-vocab error
+    citing the canonical mclk error prefix.
+    """
+    domains: set[str] = {"clk"}
+    for _region, dom in region_info:
+        if dom:
+            domains.add(dom)
+            # Accept the per-domain port-naming variants too so a chart
+            # author MAY write ``clock="clk_fast"`` or ``clock="fast"``
+            # interchangeably. Internally the walker emits via
+            # ``_clk_port_name(<domain>)``.
+            domains.add(_clk_port_name(dom))
+    return domains
+
+
+def _resolve_region_clock_signal(
+    region: str,
+    region_info: list[tuple[str, str | None]],
+) -> str:
+    """Resolve a region name into the SystemVerilog clock signal that
+    samples its observable.
+
+    For regions carrying a ``clock="<domain>"`` attribute, the signal
+    is ``_clk_port_name(<domain>)`` (per SOS-08-C wave-3). For regions
+    without an annotation, the signal is the chart-top reference
+    ``clk``. Returns ``"clk"`` for any region not declared by the
+    chart — defensive fallback; validation upstream rejects unknown
+    region names before this helper is reached.
+    """
+    for r, dom in region_info:
+        if r == region:
+            if dom is None:
+                return "clk"
+            return _clk_port_name(dom)
+    return "clk"
+
+
+def _resolve_sampling_clock_signal(
+    region: str,
+    sampling_clocks: dict[str, str],
+    region_info: list[tuple[str, str | None]],
+) -> str:
+    """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — resolve the
+    per-region SVA sampling clock for a multi-clock cross-invariant.
+
+    If the invariant explicitly names a ``<sos:sampling_clock>`` for
+    ``region``, the declared clock identifier wins; if the declared
+    name is a bare domain (``"fast"``), it normalises through
+    ``_clk_port_name``. Otherwise the region's intrinsic clock (per
+    ``_resolve_region_clock_signal``) is used.
+    """
+    declared = sampling_clocks.get(region)
+    if declared is None:
+        return _resolve_region_clock_signal(region, region_info)
+    # Accept both bare-domain and pre-prefixed forms.
+    if declared.startswith("clk"):
+        return declared
+    return _clk_port_name(declared)
+
+
+def _validate_sampling_clocks(
+    invariants: list[_CrossInvariant],
+    region_info: list[tuple[str, str | None]],
+    region_state_indices: dict[str, dict[str, int]],
+) -> None:
+    """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — chart-vocab
+    validation pass for `<sos:sampling_clock>` declarations.
+
+    Raises ``UnsupportedChartError`` with prefix
+    ``SOS-08-D wave-4-future-mclk:`` on:
+
+      * ``region`` attribute references a region the chart doesn't
+        declare.
+      * ``clock`` attribute references an identifier outside the
+        chart's declared clock-domain set (per
+        ``_collect_chart_clock_domains``).
+      * ``<sos:implies>`` compound carries antecedent + consequent
+        leaves drawn from different declared clock domains — SVA's
+        ``|->`` operator requires single-clock-domain operands per
+        IEEE 1800-2017 §16.13.5.
+    """
+    declared_clocks = _collect_chart_clock_domains(region_info)
+    known_regions = set(region_state_indices.keys())
+    for inv in invariants:
+        if not inv.sampling_clocks:
+            continue
+        for region, clock in inv.sampling_clocks.items():
+            if region not in known_regions:
+                raise UnsupportedChartError(
+                    f"SOS-08-D wave-4-future-mclk: cross-invariant "
+                    f"{inv.id!r} <sos:sampling_clock region={region!r}> "
+                    f"references a region the chart does not declare. "
+                    f"Known regions: {sorted(known_regions)}."
+                )
+            if clock not in declared_clocks:
+                raise UnsupportedChartError(
+                    f"SOS-08-D wave-4-future-mclk: cross-invariant "
+                    f"{inv.id!r} <sos:sampling_clock region={region!r} "
+                    f"clock={clock!r}> references an unknown clock "
+                    f"signal. Known clock domains: "
+                    f"{sorted(declared_clocks)}."
+                )
+        # IEEE 1800-2017 §16.13.5 — mixed-clock implies is forbidden:
+        # the |-> operator requires a single clocking event for the
+        # antecedent + consequent expressions. Detect by walking the
+        # compound AST for any <sos:implies> node whose antecedent and
+        # consequent reach state_ref leaves in different declared
+        # clock domains.
+        if inv.expr is not None:
+            _reject_mixed_clock_implies(inv, region_info)
+
+
+def _reject_mixed_clock_implies(
+    inv: _CrossInvariant,
+    region_info: list[tuple[str, str | None]],
+) -> None:
+    """Walk ``inv.expr`` looking for ``<sos:implies>`` whose antecedent
+    and consequent leaves resolve to different clock signals. IEEE
+    1800-2017 §16.13.5: the overlapping-implication operator requires
+    a single clock domain across both sides — multi-clock implies
+    chains require explicit synchroniser primitives the walker does
+    not synthesise.
+
+    Per SOS-08-D wave-4-future-mclk (§15): chart authors who need
+    multi-clock causal relationships drop to ``<sos:raw_property>``.
+    """
+    def _expr_clocks(e: "_CompoundExpr") -> set[str]:
+        if e.kind == "state_ref":
+            if e.region is None:
+                return set()
+            return {_resolve_sampling_clock_signal(
+                e.region, inv.sampling_clocks, region_info
+            )}
+        out: set[str] = set()
+        for c in e.children:
+            out |= _expr_clocks(c)
+        return out
+
+    def _scan(e: "_CompoundExpr") -> None:
+        if e.kind == "implies":
+            a_clocks = _expr_clocks(e.children[0])
+            c_clocks = _expr_clocks(e.children[1])
+            if a_clocks and c_clocks and a_clocks != c_clocks:
+                raise UnsupportedChartError(
+                    f"SOS-08-D wave-4-future-mclk: cross-invariant "
+                    f"{inv.id!r} <sos:implies> antecedent samples on "
+                    f"{sorted(a_clocks)} but consequent samples on "
+                    f"{sorted(c_clocks)} — IEEE 1800-2017 §16.13.5 "
+                    f"requires single-clock antecedent + consequent "
+                    f"for the |-> operator. Use <sos:raw_property> "
+                    f"escape hatch for multi-clock causal chains."
+                )
+        for c in e.children:
+            _scan(c)
+
+    if inv.expr is not None:
+        _scan(inv.expr)
+
+
+def _emit_mclk_leaf_for_region(
+    region: str,
+    state: str,
+    primary_region: str,
+    sampling_clocks: dict[str, str],
+    region_info: list[tuple[str, str | None]],
+) -> str:
+    """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — render a single
+    state_ref leaf for a multi-clock cross-invariant.
+
+    The primary-clock-region leaf renders as the wave-4 form
+    ``(current_state_<r> == ST_<s>)`` — the property's outer
+    ``@(posedge <primary_clock>)`` covers it. Every other region's
+    leaf wraps in ``$past(<expr>, 1, , @(posedge <its_clock>))`` per
+    IEEE 1800-2017 §16.13 multi-clocked assertion form, sampling the
+    other region's observable on its own clock and feeding the result
+    back to the primary clock's evaluation point.
+    """
+    obs = f"current_state_{_sanitize_sv_identifier(region)}"
+    const = _state_constant_name(state)
+    base = f"({obs} == {const})"
+    if region == primary_region:
+        return base
+    its_clock = _resolve_sampling_clock_signal(
+        region, sampling_clocks, region_info
+    )
+    # IEEE 1800-2017 §16.13: $past with explicit clocking event lets
+    # the property sample the operand on a different clock domain.
+    return f"$past({base}, 1, , @(posedge {its_clock}))"
+
+
+def _emit_mclk_compound_sv_expr(
+    expr: "_CompoundExpr",
+    primary_region: str,
+    sampling_clocks: dict[str, str],
+    region_info: list[tuple[str, str | None]],
+) -> str:
+    """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — render a compound
+    expression for the multi-clock path. Each state_ref leaf wraps
+    individually via ``_emit_mclk_leaf_for_region``; boolean operators
+    compose verbatim with wave-4-future-compound's lowering rules."""
+    if expr.kind == "state_ref":
+        return _emit_mclk_leaf_for_region(
+            expr.region or "", expr.state or "",
+            primary_region, sampling_clocks, region_info,
+        )
+    if expr.kind == "and":
+        rendered = " && ".join(
+            _emit_mclk_compound_sv_expr(
+                c, primary_region, sampling_clocks, region_info
+            )
+            for c in expr.children
+        )
+        return f"({rendered})"
+    if expr.kind == "or":
+        rendered = " || ".join(
+            _emit_mclk_compound_sv_expr(
+                c, primary_region, sampling_clocks, region_info
+            )
+            for c in expr.children
+        )
+        return f"({rendered})"
+    if expr.kind == "not":
+        return (
+            "!("
+            + _emit_mclk_compound_sv_expr(
+                expr.children[0], primary_region, sampling_clocks, region_info
+            )
+            + ")"
+        )
+    if expr.kind == "implies":
+        a_sv = _emit_mclk_compound_sv_expr(
+            expr.children[0], primary_region, sampling_clocks, region_info
+        )
+        c_sv = _emit_mclk_compound_sv_expr(
+            expr.children[1], primary_region, sampling_clocks, region_info
+        )
+        return f"({a_sv} |-> {c_sv})"
+    raise UnsupportedChartError(
+        f"SOS-08-D wave-4-future-mclk: unrecognised AST kind "
+        f"{expr.kind!r} at multi-clock emit time."
+    )
+
+
+def _emit_mclk_cdc_banner(
+    inv: _CrossInvariant,
+    primary_clock: str,
+    other_clocks: list[str],
+) -> str:
+    """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — banner comment
+    immediately preceding every multi-clock property. Per the §15
+    normative section, the walker emits the assertion form only — CDC
+    synchroniser primitives between clock domains MUST be present in
+    the design; the walker does not verify them.
+    """
+    other_clocks_text = ", ".join(other_clocks) if other_clocks else "(none)"
+    return (
+        f"    // MULTI-CLOCK PROPERTY: {inv.id}. CDC synchroniser "
+        f"between {primary_clock} and {other_clocks_text} MUST be "
+        f"present in the design. The walker does not verify CDC "
+        f"synchronisation; see SOS-08-D-CONCEPTS.md §15."
+    )
+
+
+# ----------------------------------------------------------------------------
+# SOS-08-D wave-4-future-shared (2026-05-24 §15) — shared-datamodel
+# cross-region driving. A `<sos:shared_signal>` declares a chart-level
+# signal that ONE region owns (the writer) and other regions may read.
+# This slice emits the one-driver SVA invariant only; the HDL-side
+# wiring (port shape, register allocation) is deferred to SOS-08-C
+# wave-3-e port-shape extension or a successor phase.
+# ----------------------------------------------------------------------------
+
+
+@dataclass
+class _SharedSignal:
+    """One ratified ``<sos:shared_signal>`` declaration.
+
+    Wave-4-future-shared declaration form (per §15 2026-05-24):
+
+        <sos:shared_signal name="<sv-ident>" width="<bits>"
+                           owner_region="<region>" />
+
+    Semantics: the bind module emits a one-driver SVA invariant
+    asserting that the signal MAY change value only while the owner
+    region is in a non-idle state (idle = the region's initial
+    state). The HDL-side wiring (the actual register / port shape) is
+    deferred — this slice emits the assertion only, per §15.
+    """
+
+    name: str
+    width: int
+    owner_region: str
+    doc_order: int = 0
+
+
+def _collect_shared_signals(
+    chart_ir: dict[str, Any],
+) -> list[_SharedSignal]:
+    """SOS-08-D wave-4-future-shared (2026-05-24 §15) — read
+    ``<sos:shared_signal>`` declarations from the chart IR.
+
+    Lookup accepts either ``sos:shared_signal`` or bare
+    ``shared_signal`` keys. Validation runs in two passes: this
+    collector raises on intrinsically-malformed entries (missing
+    attrs, type errors); ``_validate_shared_signals`` runs after with
+    the region map to check name-collisions and owner_region
+    resolution.
+    """
+    raw = (
+        chart_ir.get("sos:shared_signal")
+        or chart_ir.get("shared_signal")
+        or []
+    )
+    if isinstance(raw, dict):
+        raw = [raw]
+    out: list[_SharedSignal] = []
+    for idx, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        owner = entry.get("owner_region")
+        width_raw = entry.get("width", 1)
+        if not (isinstance(name, str) and name.strip()):
+            raise UnsupportedChartError(
+                "SOS-08-D wave-4-future-shared: <sos:shared_signal> "
+                "MUST carry a non-empty `name` attribute (used as the "
+                "emitted signal identifier `shared_<name>`)."
+            )
+        if not (isinstance(owner, str) and owner.strip()):
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-shared: <sos:shared_signal "
+                f"name={name!r}> MUST carry a non-empty "
+                f"`owner_region` attribute naming the single region "
+                f"that drives the signal."
+            )
+        try:
+            width = int(width_raw)
+        except (TypeError, ValueError):
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-shared: <sos:shared_signal "
+                f"name={name!r}>'s `width` MUST be a positive integer; "
+                f"got {width_raw!r}."
+            ) from None
+        if width < 1:
+            width = 1
+        out.append(_SharedSignal(
+            name=name.strip(),
+            width=width,
+            owner_region=owner.strip(),
+            doc_order=idx,
+        ))
+    return out
+
+
+def _collect_shared_signal_refs(chart_ir: dict[str, Any]) -> list[str]:
+    """SOS-08-D wave-4-future-shared (2026-05-24 §15) — collect the set
+    of shared-signal names referenced by ``<sos:shared_signal_ref>``
+    elements anywhere in the chart IR.
+
+    A shared-signal-ref MAY appear inside any region's ``<assign>``
+    location (or the chart-top scope) to read the shared signal. This
+    slice does NOT emit the HDL-side wiring for those reads — only the
+    name set is collected so the walker can validate that every
+    referenced name resolves to a declared ``<sos:shared_signal>``.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                bare = k.split(":")[-1] if isinstance(k, str) else ""
+                if bare == "shared_signal_ref":
+                    refs = v if isinstance(v, list) else [v]
+                    for r in refs:
+                        if isinstance(r, dict):
+                            nm = r.get("name")
+                            if isinstance(nm, str) and nm.strip():
+                                nm = nm.strip()
+                                if nm not in seen:
+                                    seen.add(nm)
+                                    names.append(nm)
+                else:
+                    _walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(chart_ir)
+    return names
+
+
+def _validate_shared_signals(
+    signals: list[_SharedSignal],
+    signal_refs: list[str],
+    known_regions: list[str],
+) -> None:
+    """SOS-08-D wave-4-future-shared (2026-05-24 §15) — cross-check
+    shared-signal declarations + refs.
+
+    Raises ``UnsupportedChartError`` with prefix
+    ``SOS-08-D wave-4-future-shared:`` on:
+
+      * ``name`` collision across two ``<sos:shared_signal>`` decls.
+      * ``owner_region`` references a region the chart does not
+        declare.
+      * Two declarations claim the same ``name`` AND name conflicting
+        ``owner_region`` values (the owner-collision check folds into
+        the name-collision check, but the error wording cites the
+        owner conflict explicitly when both names match).
+      * ``<sos:shared_signal_ref>`` references an undeclared name.
+    """
+    known_set = set(known_regions)
+    seen: dict[str, _SharedSignal] = {}
+    for sig in signals:
+        prior = seen.get(sig.name)
+        if prior is not None:
+            if prior.owner_region != sig.owner_region:
+                raise UnsupportedChartError(
+                    f"SOS-08-D wave-4-future-shared: <sos:shared_signal "
+                    f"name={sig.name!r}> owner_region collision: "
+                    f"declaration #{prior.doc_order} owns by region "
+                    f"{prior.owner_region!r}, declaration "
+                    f"#{sig.doc_order} owns by region "
+                    f"{sig.owner_region!r}. A shared signal MUST have "
+                    f"exactly one owner region."
+                )
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-shared: <sos:shared_signal "
+                f"name={sig.name!r}> is declared more than once "
+                f"(declaration #{prior.doc_order} vs "
+                f"#{sig.doc_order}). Shared-signal names MUST be "
+                f"unique within the chart's bind module."
+            )
+        if sig.owner_region not in known_set:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-shared: <sos:shared_signal "
+                f"name={sig.name!r}> owner_region "
+                f"{sig.owner_region!r} does not reference a region "
+                f"the chart declares. Known regions: "
+                f"{sorted(known_set)}."
+            )
+        seen[sig.name] = sig
+
+    # Every shared_signal_ref must resolve to a declared shared signal.
+    declared_names = {s.name for s in signals}
+    for ref in signal_refs:
+        if ref not in declared_names:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-shared: <sos:shared_signal_ref "
+                f"name={ref!r}> references undeclared shared signal "
+                f"{ref!r}. Known shared signals: "
+                f"{sorted(declared_names)}."
+            )
+
+
+def _region_initial_state(
+    region_name: str,
+    regions: list[tuple[str, dict[str, Any]]],
+) -> str | None:
+    """Return the ``initial`` state name for ``region_name`` in the
+    parallel-region map.
+
+    Falls back to the first ``<state>`` child's id if no ``initial``
+    attribute is set (mirrors the wave-1 single-region fallback in
+    ``_normalise_chart``). Used by the shared-signal one-driver
+    invariant to render the "idle" state constant.
+    """
+    for r, st in regions:
+        if r != region_name:
+            continue
+        initial = st.get("initial")
+        if isinstance(initial, list):
+            initial = initial[0] if initial else None
+        if isinstance(initial, str) and initial.strip():
+            return initial.strip()
+        for sub in st.get("state", []) or []:
+            sid = sub.get("id") if isinstance(sub, dict) else None
+            if isinstance(sid, str) and sid.strip():
+                return sid.strip()
+        return None
+    return None
+
+
+def _emit_shared_signal_invariants(
+    signals: list[_SharedSignal],
+    region_info: list[tuple[str, str | None]],
+    regions: list[tuple[str, dict[str, Any]]],
+    chart_name: str,
+) -> list[str]:
+    """SOS-08-D wave-4-future-shared (2026-05-24 §15) — emit the
+    one-driver SVA invariant for each declared shared signal.
+
+    Per the §15 normative spec: ``assert property (@(posedge
+    <owner_clock>) $changed(shared_<name>) |-> (current_state_<owner>
+    != ST_<owner_idle>));`` — the signal MAY only change while the
+    owner region is in a non-idle state. The "idle" state is the
+    owner region's initial state (the region after reset, where the
+    region is not actively producing values).
+
+    Per the §15 normative spec, this slice emits the assertion only;
+    the actual HDL-side wiring of ``shared_<name>`` (port + register)
+    is deferred to a future SOS-08-C carry-forward. A documentation
+    block in the emit names the deferral.
+    """
+    if not signals:
+        return []
+    lines: list[str] = [
+        "",
+        "    // === SOS-08-D wave-4-future-shared: shared-signal one-driver invariants ===",
+        "    //",
+        "    // Per SOS-08-D §15 wave-4-future-shared (2026-05-24),",
+        "    // <sos:shared_signal> declares a chart-level signal driven",
+        "    // by exactly one region (owner_region). The walker emits a",
+        "    // one-driver assertion per declaration: $changed of the",
+        "    // shared signal implies the owner region is NOT in its",
+        "    // idle (initial) state.",
+        "    //",
+        "    // NOTE: this slice emits the assertion only. The HDL-side",
+        "    // wiring of the `shared_<name>` register / port shape is",
+        "    // deferred to a future SOS-08-C wave-3-e port-shape",
+        "    // extension or a successor phase. The bind module assumes",
+        "    // the chart-top wrapper exposes a `shared_<name>` port of",
+        "    // the declared width; that port wiring lands later.",
+    ]
+    for sig in signals:
+        owner_clock = _resolve_region_clock_signal(
+            sig.owner_region, region_info
+        )
+        owner_obs = (
+            f"current_state_{_sanitize_sv_identifier(sig.owner_region)}"
+        )
+        idle = _region_initial_state(sig.owner_region, regions)
+        if idle is None:
+            # Defensive — validation upstream guarantees the owner is a
+            # known region; this branch is unreachable in practice.
+            continue
+        idle_const = _state_constant_name(idle)
+        prop_name = (
+            "p_shared_" + _sanitize_sv_identifier(sig.name).lower()
+            + "_one_driver"
+        )
+        asrt_name = (
+            "SHARED_" + _sanitize_sv_identifier(sig.name).upper()
+            + "_ONE_DRIVER"
+        )
+        signal_ident = (
+            "shared_" + _sanitize_sv_identifier(sig.name).lower()
+        )
+        fail_msg = (
+            f"[FAIL] chart `{chart_name}` shared-signal `{sig.name}` "
+            f"changed while owner region `{sig.owner_region}` was in "
+            f"idle state `{idle}` — only the owner region MAY drive "
+            f"the signal."
+        )
+        lines.extend([
+            "",
+            f"    // <sos:shared_signal name=\"{sig.name}\" "
+            f"width=\"{sig.width}\" owner_region=\"{sig.owner_region}\"/>",
+            f"    // Owner idle state: `{idle}`. HDL-side wiring of "
+            f"`{signal_ident}` deferred to SOS-08-C wave-3-e (see §15).",
+            f"    property {prop_name};",
+            f"        @(posedge {owner_clock}) disable iff (rst)",
+            f"        $changed({signal_ident}) |-> "
+            f"({owner_obs} != {idle_const});",
+            f"    endproperty",
+            f"    {asrt_name}: assert property ({prop_name})",
+            f"        else $fatal(1, \"{fail_msg}\");",
+        ])
+    return lines
+
+
+def _shared_signal_referenced_regions(
+    signals: list[_SharedSignal],
+) -> list[str]:
+    """Return the owner regions of every declared shared signal in
+    first-seen-order. Used by the SVA module port list + bind directive
+    so each owner region's observable port + clock are wired through.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in signals:
+        if s.owner_region not in seen:
+            seen.add(s.owner_region)
+            out.append(s.owner_region)
+    return out
+
+
 def _emit_cross_region_sva_module(
     *,
     chart_name: str,
@@ -2002,6 +2714,8 @@ def _emit_cross_region_sva_module(
     region_info: list[tuple[str, str | None]],
     region_state_indices: dict[str, dict[str, int]] | None = None,
     raw_properties: list[_RawProperty] | None = None,
+    shared_signals: list[_SharedSignal] | None = None,
+    regions: list[tuple[str, dict[str, Any]]] | None = None,
 ) -> str:
     """Emit ``<chart>_top_sva.sv`` — chart-top assertion module.
 
@@ -2030,6 +2744,8 @@ def _emit_cross_region_sva_module(
     """
     module = _cross_invariant_sva_module_name(chart_name)
     raw_properties = raw_properties or []
+    shared_signals = shared_signals or []
+    regions = regions or []
 
     # Collect the set of region observable ports the module needs to
     # expose. Iteration order is invariant-declaration order; dedup
@@ -2050,6 +2766,14 @@ def _emit_cross_region_sva_module(
             if r and r not in seen:
                 referenced_regions.append(r)
                 seen.add(r)
+    # SOS-08-D wave-4-future-shared (2026-05-24 §15): owner regions of
+    # any declared shared signal also need their observable + clock
+    # wired in (the one-driver invariant samples on the owner's clock
+    # and references its state observable).
+    for owner in _shared_signal_referenced_regions(shared_signals):
+        if owner not in seen:
+            referenced_regions.append(owner)
+            seen.add(owner)
 
     # Map region → declared clock domain (None for default-clk regions).
     region_to_domain = dict(region_info)
@@ -2078,9 +2802,128 @@ def _emit_cross_region_sva_module(
         )
 
     property_blocks: list[str] = []
+    # SOS-08-D wave-4-future-mclk (2026-05-24 §15): track per-invariant
+    # multi-clock clocks so the SVA module port list adds the extra
+    # ``<region>_clk`` input ports (one per region referenced under any
+    # multi-clock invariant).
+    mclk_extra_clock_signals: list[str] = []
+    mclk_seen_clock_signals: set[str] = set()
     for inv in invariants:
         prop_name = "p_" + _sanitize_sv_identifier(inv.id).lower()
         asrt_name = _sanitize_sv_identifier(inv.id).upper()
+        is_mclk = bool(inv.sampling_clocks)
+        if is_mclk:
+            # SOS-08-D wave-4-future-mclk (2026-05-24 §15): pick the
+            # primary clock (region whose <sos:sampling_clock> appears
+            # first); resolve its SV clock signal; collect other clocks
+            # referenced by the invariant's leaves for the CDC banner +
+            # the SVA module's per-region clock port list.
+            primary_region = (
+                inv.primary_clock_region
+                or (
+                    inv.antecedent_region
+                    if inv.expr is None
+                    else (
+                        _walk_compound_state_refs(inv.expr)[0][0]
+                        if inv.expr is not None
+                        and _walk_compound_state_refs(inv.expr)
+                        else ""
+                    )
+                )
+            )
+            primary_clock = _resolve_sampling_clock_signal(
+                primary_region, inv.sampling_clocks, region_info
+            )
+            # Collect other clock signals for the CDC banner / SVA port
+            # list. Iterate the invariant's leaf regions.
+            if inv.expr is not None:
+                leaf_regions = [
+                    r for (r, _s) in _walk_compound_state_refs(inv.expr)
+                ]
+            else:
+                leaf_regions = [
+                    inv.antecedent_region,
+                    inv.consequent_region,
+                ]
+            other_clocks: list[str] = []
+            seen_other: set[str] = set()
+            for r in leaf_regions:
+                if not r or r == primary_region:
+                    continue
+                sig = _resolve_sampling_clock_signal(
+                    r, inv.sampling_clocks, region_info
+                )
+                if sig != primary_clock and sig not in seen_other:
+                    seen_other.add(sig)
+                    other_clocks.append(sig)
+            # Register extra per-region clock signals on the module port
+            # list (in addition to the chart-top ``clk``).
+            for r in leaf_regions:
+                if not r:
+                    continue
+                sig = _resolve_sampling_clock_signal(
+                    r, inv.sampling_clocks, region_info
+                )
+                if sig != "clk" and sig not in mclk_seen_clock_signals:
+                    mclk_seen_clock_signals.add(sig)
+                    mclk_extra_clock_signals.append(sig)
+            banner = _emit_mclk_cdc_banner(
+                inv, primary_clock, other_clocks
+            )
+            if inv.expr is not None:
+                body_sv = _emit_mclk_compound_sv_expr(
+                    inv.expr, primary_region,
+                    inv.sampling_clocks, region_info,
+                )
+                chart_summary = _summarise_compound_expr(inv.expr)
+                fail_msg = (
+                    f"[FAIL] chart `{chart_name}` cross-invariant "
+                    f"`{inv.id}` (multi-clock): compound predicate "
+                    f"`{chart_summary}` violated."
+                )
+                property_blocks.append(
+                    f"{banner}\n"
+                    f"    // {inv.id} (wave-4-future-mclk compound): "
+                    f"{chart_summary}\n"
+                    f"    property {prop_name}_mclk;\n"
+                    f"        @(posedge {primary_clock})\n"
+                    f"        {body_sv};\n"
+                    f"    endproperty\n"
+                    f"    {asrt_name}: assert property ({prop_name}_mclk)\n"
+                    f"        else $fatal(1, \"{fail_msg}\");"
+                )
+                continue
+            # String-form multi-clock invariant.
+            a_leaf = _emit_mclk_leaf_for_region(
+                inv.antecedent_region, inv.antecedent_state,
+                primary_region, inv.sampling_clocks, region_info,
+            )
+            c_leaf = _emit_mclk_leaf_for_region(
+                inv.consequent_region, inv.consequent_state,
+                primary_region, inv.sampling_clocks, region_info,
+            )
+            fail_msg = (
+                f"[FAIL] chart `{chart_name}` cross-invariant `{inv.id}` "
+                f"(multi-clock): region `{inv.antecedent_region}` on "
+                f"clock `{_resolve_sampling_clock_signal(inv.antecedent_region, inv.sampling_clocks, region_info)}` "
+                f"entered state `{inv.antecedent_state}` but region "
+                f"`{inv.consequent_region}` on clock "
+                f"`{_resolve_sampling_clock_signal(inv.consequent_region, inv.sampling_clocks, region_info)}` "
+                f"did not enter state `{inv.consequent_state}`."
+            )
+            property_blocks.append(
+                f"{banner}\n"
+                f"    // {inv.id} (wave-4-future-mclk): "
+                f"`{inv.antecedent_region}`.{inv.antecedent_state} && "
+                f"$past `{inv.consequent_region}`.{inv.consequent_state}\n"
+                f"    property {prop_name}_mclk;\n"
+                f"        @(posedge {primary_clock})\n"
+                f"        {a_leaf} && {c_leaf};\n"
+                f"    endproperty\n"
+                f"    {asrt_name}: assert property ({prop_name}_mclk)\n"
+                f"        else $fatal(1, \"{fail_msg}\");"
+            )
+            continue
         if inv.expr is not None:
             # Wave-4-future-compound (2026-05-24 §15): structured
             # boolean composition over <sos:state_ref> leaves. The
@@ -2127,6 +2970,26 @@ def _emit_cross_region_sva_module(
             f"    {asrt_name}: assert property ({prop_name})\n"
             f"        else $fatal(1, \"{fail_msg}\");"
         )
+
+    # SOS-08-D wave-4-future-shared (2026-05-24 §15): one-driver
+    # invariant blocks for declared <sos:shared_signal> entries. Owner
+    # regions (and their clocks) are wired into the module port list
+    # below; the assertion checks $changed(<signal>) |-> owner != idle.
+    shared_signal_lines: list[str] = _emit_shared_signal_invariants(
+        shared_signals, region_info, regions, chart_name,
+    )
+    # Owner-clock signals that aren't already wired through the
+    # multi-clock or default ``clk`` port appear here so the SVA
+    # module's port list adds the appropriate input wires.
+    shared_extra_clock_signals: list[str] = []
+    shared_seen_clock_signals: set[str] = set(mclk_seen_clock_signals)
+    for sig in shared_signals:
+        owner_clk = _resolve_region_clock_signal(
+            sig.owner_region, region_info
+        )
+        if owner_clk != "clk" and owner_clk not in shared_seen_clock_signals:
+            shared_seen_clock_signals.add(owner_clk)
+            shared_extra_clock_signals.append(owner_clk)
 
     domain_comment = _format_cross_invariant_domain_comment(
         region_info, referenced_regions
@@ -2177,7 +3040,9 @@ def _emit_cross_region_sva_module(
     # a parameter block (`#(parameter int N_STATES_<R> = 1, ...)`);
     # raw-property-only emits skip the parameter block (no per-region
     # state-vector ports → no parameter needed). Port list assembles
-    # clk + rst + structured observables + per-region raw clocks.
+    # clk + rst + structured observables + per-region raw clocks +
+    # wave-4-future-mclk per-region clocks + wave-4-future-shared
+    # owner-region clocks + shared_<name> signals.
     port_list_lines: list[str] = [
         "    input wire clk",
         "    input wire rst",
@@ -2191,6 +3056,28 @@ def _emit_cross_region_sva_module(
         port_list_lines.append(
             f"    input wire {_sanitize_sv_identifier(r)}_clk"
         )
+    for sig in mclk_extra_clock_signals:
+        if sig in (f"{_sanitize_sv_identifier(r)}_clk" for r in raw_clock_regions):
+            continue
+        port_list_lines.append(
+            f"    input wire {sig}"
+        )
+    for sig in shared_extra_clock_signals:
+        port_list_lines.append(
+            f"    input wire {sig}"
+        )
+    for sh in shared_signals:
+        signal_ident = (
+            "shared_" + _sanitize_sv_identifier(sh.name).lower()
+        )
+        if sh.width <= 1:
+            port_list_lines.append(
+                f"    input wire {signal_ident}"
+            )
+        else:
+            port_list_lines.append(
+                f"    input wire [{sh.width - 1}:0] {signal_ident}"
+            )
     # Join with trailing commas on all but the last port line.
     port_list_block = ",\n".join(port_list_lines)
 
@@ -2203,16 +3090,32 @@ def _emit_cross_region_sva_module(
         "",
     ]
 
-    if invariants:
-        # Preserve wave-4 emit shape: `module <m> #(<params>) (<ports>);`.
-        # When invariants is empty (raw-properties-only emit) the
-        # parameter block is omitted so the SV elaborates cleanly with
-        # no unreferenced parameters.
-        lines.extend([
-            f"module {module} #(",
-            param_decls,
-            ") (",
-        ])
+    # Parameter block is required whenever the module exposes per-region
+    # state-vector ports (either from structured invariants OR from
+    # shared-signal owner observables). It is omitted only when the
+    # module is purely raw-property-driven (no state-vector ports).
+    need_param_block = bool(invariants) or bool(shared_signals)
+
+    if need_param_block:
+        # When the parameter block exists because of shared signals only
+        # (no structured invariants), build the param_decls list from
+        # referenced_regions (which already includes shared-signal owners).
+        if not invariants:
+            params_for_shared = ",\n".join(
+                f"    parameter int N_STATES_{_sanitize_sv_identifier(r).upper()} = 1"
+                for r in referenced_regions
+            )
+            lines.extend([
+                f"module {module} #(",
+                params_for_shared,
+                ") (",
+            ])
+        else:
+            lines.extend([
+                f"module {module} #(",
+                param_decls,
+                ") (",
+            ])
     else:
         lines.append(f"module {module} (")
 
@@ -2242,6 +3145,48 @@ def _emit_cross_region_sva_module(
         # block below the `*property_blocks` line is `*raw_property_lines`
         # which is empty for that path.
         lines.extend(raw_property_lines)
+
+    # SOS-08-D wave-4-future-shared (2026-05-24 §15): emit shared-signal
+    # one-driver invariants AFTER the structured cross-invariants and
+    # raw-property blocks. The shared invariants reference each owner
+    # region's ``ST_<initial>`` constant — declare those state constants
+    # here (the structured-invariant constants emit above only covers
+    # states referenced by cross_invariants).
+    if shared_signal_lines:
+        # Emit ST_<initial> state constants for each shared-signal owner
+        # region's initial state (unless they were already emitted by
+        # cross-invariant state-constant emission above).
+        shared_state_const_lines: list[str] = []
+        emitted_shared_constants: set[tuple[str, str]] = set()
+        for sh in shared_signals:
+            idle = _region_initial_state(sh.owner_region, regions)
+            if idle is None:
+                continue
+            key = (sh.owner_region, idle)
+            if key in emitted_shared_constants:
+                continue
+            emitted_shared_constants.add(key)
+            r_ident = _sanitize_sv_identifier(sh.owner_region)
+            param = f"N_STATES_{r_ident.upper()}"
+            const = _state_constant_name(idle)
+            # Compute the bit position for the idle state using the
+            # region_state_indices map when available; fall back to
+            # bit 0 (the wave-4 v1 placeholder behaviour).
+            bit_idx = _state_index_for(
+                sh.owner_region, idle, region_state_indices
+            )
+            shared_state_const_lines.extend([
+                f"    // Shared-signal owner idle constant `{const}` "
+                f"for region `{sh.owner_region}` (bit {bit_idx}).",
+                f"    `ifndef {const}_DEFINED",
+                f"    `define {const}_DEFINED",
+                f"    localparam logic [{param}-1:0] {const} = "
+                f"{{{param}{{1'b0}}}} | ({param}'(1) << {bit_idx});",
+                f"    `endif",
+            ])
+        if shared_state_const_lines:
+            lines.extend(shared_state_const_lines)
+        lines.extend(shared_signal_lines)
 
     lines.extend([
         "",
@@ -2376,6 +3321,7 @@ def _emit_cross_region_bind_directive(
     invariants: list[_CrossInvariant],
     region_info: list[tuple[str, str | None]],
     raw_properties: list[_RawProperty] | None = None,
+    shared_signals: list[_SharedSignal] | None = None,
 ) -> str:
     """Emit ``<chart>_top_bind.sv`` — bind directive attaching the
     chart-top SVA module to the chart-top wrapper.
@@ -2398,17 +3344,66 @@ def _emit_cross_region_bind_directive(
     sva_module = _cross_invariant_sva_module_name(chart_name)
     inst_name = f"u_{sva_module}"
     raw_properties = raw_properties or []
+    shared_signals = shared_signals or []
 
     referenced_regions: list[str] = []
     seen: set[str] = set()
     for inv in invariants:
-        for r in (inv.antecedent_region, inv.consequent_region):
-            if r not in seen:
+        if inv.expr is not None:
+            inv_regions = [r for (r, _s) in _walk_compound_state_refs(inv.expr)]
+        else:
+            inv_regions = [inv.antecedent_region, inv.consequent_region]
+        for r in inv_regions:
+            if r and r not in seen:
                 referenced_regions.append(r)
                 seen.add(r)
+    # SOS-08-D wave-4-future-shared: owner regions get their observables
+    # wired too.
+    for owner in _shared_signal_referenced_regions(shared_signals):
+        if owner not in seen:
+            referenced_regions.append(owner)
+            seen.add(owner)
 
     raw_clock_regions = _collect_raw_property_clock_regions(raw_properties)
     region_to_domain = dict(region_info)
+
+    # SOS-08-D wave-4-future-mclk (2026-05-24 §15): per-invariant
+    # sampling-clock ports added to the SVA module need matching
+    # connections in the bind. Collect the SV clock signal names in
+    # first-seen order across all multi-clock invariants.
+    mclk_clock_signals: list[str] = []
+    mclk_seen: set[str] = set()
+    for inv in invariants:
+        if not inv.sampling_clocks:
+            continue
+        if inv.expr is not None:
+            leaf_regions = [
+                r for (r, _s) in _walk_compound_state_refs(inv.expr)
+            ]
+        else:
+            leaf_regions = [inv.antecedent_region, inv.consequent_region]
+        for r in leaf_regions:
+            if not r:
+                continue
+            sig = _resolve_sampling_clock_signal(
+                r, inv.sampling_clocks, region_info
+            )
+            if sig == "clk":
+                continue
+            if sig in mclk_seen:
+                continue
+            mclk_seen.add(sig)
+            mclk_clock_signals.append(sig)
+
+    # SOS-08-D wave-4-future-shared (2026-05-24 §15): owner-region clocks
+    # not already wired through ``clk`` / mclk path.
+    shared_clock_signals: list[str] = []
+    shared_seen_set: set[str] = set(mclk_seen)
+    for sh in shared_signals:
+        sig = _resolve_region_clock_signal(sh.owner_region, region_info)
+        if sig != "clk" and sig not in shared_seen_set:
+            shared_seen_set.add(sig)
+            shared_clock_signals.append(sig)
 
     # Build connection list. Last connection MUST NOT carry a trailing
     # comma — assemble first, then patch the final entry.
@@ -2427,6 +3422,22 @@ def _emit_cross_region_bind_directive(
         else:
             src = "clk"
         all_conns.append(f".{sva_port} ({src})")
+    raw_port_set = {
+        f"{_sanitize_sv_identifier(r)}_clk" for r in raw_clock_regions
+    }
+    for sig in mclk_clock_signals:
+        # Avoid double-wiring a port already supplied by the raw-property
+        # block (same SV clock signal name).
+        if sig in raw_port_set:
+            continue
+        all_conns.append(f".{sig} ({sig})")
+    for sig in shared_clock_signals:
+        all_conns.append(f".{sig} ({sig})")
+    for sh in shared_signals:
+        signal_ident = (
+            "shared_" + _sanitize_sv_identifier(sh.name).lower()
+        )
+        all_conns.append(f".{signal_ident} ({signal_ident})")
 
     conn_lines: list[str] = []
     for i, conn in enumerate(all_conns):
@@ -2444,6 +3455,26 @@ def _emit_cross_region_bind_directive(
             "// distribution contract: clk_<domain> when the region",
             "// declares a `clock` attribute; the chart-top reference",
             "// `clk` otherwise.",
+        ])
+    if any(inv.sampling_clocks for inv in invariants):
+        body_extra.extend([
+            "//",
+            "// SOS-08-D §15 wave-4-future-mclk (2026-05-24): one or more",
+            "// <sos:cross_invariant> declarations carry <sos:sampling_clock>",
+            "// children, lowering to IEEE 1800-2017 §16.13 multi-clock",
+            "// assertion form. Per-region clock signals routed below.",
+            "// CDC synchronisers between the named clock domains MUST",
+            "// be present in the design; the walker emits the assertion",
+            "// form only and does NOT verify CDC synchronisation.",
+        ])
+    if shared_signals:
+        body_extra.extend([
+            "//",
+            "// SOS-08-D §15 wave-4-future-shared (2026-05-24): one or more",
+            f"// <sos:shared_signal> declarations attached ({len(shared_signals)}).",
+            "// The bind wires owner-region observables + clocks + the",
+            "// shared_<name> port(s). HDL-side wiring of those ports is",
+            "// deferred to a future SOS-08-C carry-forward (see §15).",
         ])
 
     lines: list[str] = [
@@ -2635,7 +3666,11 @@ def _render_parallel(
     # actionable errors (INV-S-HDL-D-5) rather than as malformed SVA.
     cross_invariants = _collect_cross_invariants(chart_ir)
     raw_properties = _collect_raw_properties(chart_ir)
-    if cross_invariants or raw_properties:
+    # SOS-08-D wave-4-future-shared (2026-05-24 §15) — collect
+    # <sos:shared_signal> + <sos:shared_signal_ref> declarations.
+    shared_signals = _collect_shared_signals(chart_ir)
+    shared_signal_refs = _collect_shared_signal_refs(chart_ir)
+    if cross_invariants or raw_properties or shared_signals:
         # SOS-08-D wave-4-future (2026-05-24 §15): build per-region
         # state-encoding map matching SOS-08-C's document-order one-hot
         # encoding; validate every cross-invariant's region.state refs
@@ -2647,11 +3682,23 @@ def _render_parallel(
             _validate_cross_invariant_state_refs(
                 cross_invariants, region_state_indices
             )
+            # SOS-08-D wave-4-future-mclk validation: every
+            # <sos:sampling_clock> resolves to a known region + known
+            # clock domain; mixed-clock <sos:implies> rejected per
+            # IEEE 1800-2017 §16.13.5.
+            _validate_sampling_clocks(
+                cross_invariants, region_info, region_state_indices,
+            )
         # Raw-property validation: collision + clock_region resolution
         # against the chart's declared regions.
         known_region_names = [r for r, _ in region_info]
         _validate_raw_properties(
             raw_properties, cross_invariants, known_region_names
+        )
+        # SOS-08-D wave-4-future-shared (2026-05-24 §15) — validate
+        # shared signals + refs against the chart's region map.
+        _validate_shared_signals(
+            shared_signals, shared_signal_refs, known_region_names,
         )
         top_sva_body = _emit_cross_region_sva_module(
             chart_name=chart_name,
@@ -2660,6 +3707,8 @@ def _render_parallel(
             region_info=region_info,
             region_state_indices=region_state_indices,
             raw_properties=raw_properties,
+            shared_signals=shared_signals,
+            regions=regions,
         )
         top_bind_body = _emit_cross_region_bind_directive(
             chart_name=chart_name,
@@ -2667,6 +3716,7 @@ def _render_parallel(
             invariants=cross_invariants,
             region_info=region_info,
             raw_properties=raw_properties,
+            shared_signals=shared_signals,
         )
         out[f"tests/{base}/{base}_top_sva.sv"] = top_sva_body
         out[f"tests/{base}/{base}_top_bind.sv"] = top_bind_body

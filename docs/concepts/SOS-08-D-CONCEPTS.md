@@ -976,3 +976,157 @@ Operators outside this list MUST raise `UnsupportedChartError` with the canonica
 **Cited invariants / PCDNs**: INV-S-HDL-D-2 (one-hot, reset-initial encoding — the compound emit's `<sos:state_ref>` leaves reuse the wave-4-future state-encoding pass-through, so encoding parity with SOS-08-C holds by-construction); INV-S-HDL-D-4 (same SVA artifact feeds cocotb + formal — compound lowering is plain SV, no simulator-specific extensions); INV-S-HDL-D-5 (chart-vocabulary failure messages — extended to the compound-predicate summary cite); §8 standards-integration matrix relationships `own` (compound operator set), `mirror` (`<sos:state_ref>` leaf), `derive` (SVA boolean lowering — IEEE 1800-2017 §11.4.7 + §16.12.2 subset).
 
 Status: 🟢 **wave-4-future complete** for compound cross-invariant expressions. Multi-clock cross-region sampling and shared-datamodel cross-region driving remain on the wave-4-future track.
+
+### 2026-05-24 — Impl wave-4-future: multi-clock cross-region sampling + shared-datamodel cross-region driving (Ira)
+
+Closes the **final two** wave-4-future carry-forward items, leaving wave-4-future remaining **none**. This entry covers two related additions to `transliterate_sva_bind.py`: (a) explicit multi-clock cross-region sampling via the new `<sos:sampling_clock>` per-invariant child element, and (b) shared-datamodel cross-region driving via the new `<sos:shared_signal>` / `<sos:shared_signal_ref>` chart-level elements. Both items extend the same chart-top emit machinery; bundling them in one §15 entry reflects their shared file scope and emit dependency. The wave-4 single-clock path and wave-4-future-compound path remain byte-identical when neither new element is present.
+
+#### (a) Multi-clock cross-region sampling
+
+**New element form (frozen 2026-05-24 §15)**:
+
+```xml
+<sos:cross_invariant id="INV-S-CHART-MCLK">
+    <sos:sampling_clock region="fast"  clock="fast"/>
+    <sos:sampling_clock region="slow"  clock="slow"/>
+    <sos:and>
+        <sos:state_ref region="fast" state="F2"/>
+        <sos:state_ref region="slow" state="S2"/>
+    </sos:and>
+</sos:cross_invariant>
+```
+
+The walker detects the multi-clock path by structural inspection: presence of any `<sos:sampling_clock>` child on a `<sos:cross_invariant>` triggers the multi-clock emit; otherwise the wave-4 single-clock `@(posedge clk)` path applies. Detection is monotonic — a single chart MAY mix multi-clock invariants and wave-4 single-clock invariants in the same `<chart>_top_sva.sv`.
+
+**Normative declaration semantics**:
+
+* `<sos:sampling_clock>` MUST carry non-empty `region` + `clock` attributes. The `region` attribute MUST name a parallel region the chart declares; the `clock` attribute MUST reference an identifier in the chart's declared clock-domain set.
+* The chart's **declared clock-domain set** is the union of (i) every non-None `clock="..."` annotation on a parallel region's `<state>` element per SOS-08-C wave-3, (ii) the chart-top reference clock identifier `clk` (used by regions without an annotation), and (iii) the SV port-name normalised forms `clk_<domain>` for each declared domain. Chart authors MAY write either the bare domain name (`clock="fast"`) or the pre-prefixed form (`clock="clk_fast"`) — internally the walker normalises through `hdl_common.clk_port_name`.
+* **Assumed shape note**: at wave-4-future-mclk's landing, no separately-validated `<sos:clock_domains>` chart-vocab element exists; clock identifiers are derived from region `clock=` attributes per SOS-08-C wave-3. Future ratification of an explicit `<sos:clock_domains>` block (if/when the SOS-07 / SOS-08-C vocabulary lifts that boundary) SHOULD validate `<sos:sampling_clock clock=...>` against that block too; the wave-4-future-mclk validation matrix already accepts both bare and prefixed forms so no walker change is needed at that future point.
+* The **primary clock** is the region named by the first `<sos:sampling_clock>` child in source-document order. The emitted property's `@(posedge ...)` header samples on that region's clock signal. Chart authors who want a specific region's clock as the property's sampling boundary place that region's `<sos:sampling_clock>` first.
+
+**Lowered SV** (per IEEE 1800-2017 §16.13 multi-clocked assertion form):
+
+```sv
+// MULTI-CLOCK PROPERTY: INV-S-CHART-MCLK. CDC synchroniser between
+// clk_fast and clk_slow MUST be present in the design. The walker does
+// not verify CDC synchronisation; see SOS-08-D-CONCEPTS.md §15.
+property p_inv_s_chart_mclk_mclk;
+    @(posedge clk_fast)
+    ((current_state_fast == ST_F2) && $past((current_state_slow == ST_S2), 1, , @(posedge clk_slow)));
+endproperty
+INV_S_CHART_MCLK: assert property (p_inv_s_chart_mclk_mclk)
+    else $fatal(1, "[FAIL] chart `m` cross-invariant `INV-S-CHART-MCLK` (multi-clock): ...");
+```
+
+The primary-clock leaf renders verbatim under the `@(posedge <primary_clock>)` outer sampling event; every other region's leaf wraps individually in `$past(<expr>, 1, , @(posedge <its_clock>))` so the SVA engine samples the other-domain operand on its own clock and feeds the synchronised value back to the primary clock's evaluation point. The wave-4-future-compound boolean composition extends transparently: `<sos:and>` / `<sos:or>` / `<sos:not>` wrap their lowered subexpressions identically to the single-clock path; each `<sos:state_ref>` leaf is the unit of `$past` wrapping.
+
+**CDC synchroniser banner discipline**. Every multi-clock property MUST be preceded by a banner comment of the form `// MULTI-CLOCK PROPERTY: <ID>. CDC synchroniser between <primary_clock> and <other_clocks> MUST be present in the design. The walker does not verify CDC synchronisation; see SOS-08-D-CONCEPTS.md §15.` The banner closes the operational gap between the SVA emit (which assumes the operands are sampleable across clock boundaries) and the physical design (which MUST carry synchronisers between the named clock domains). The walker emits the assertion form only; CDC verification is a design responsibility, not a walker concern.
+
+**Mixed-clock `<sos:implies>` rejected at v1**. IEEE 1800-2017 §16.13.5: the overlapping-implication operator `|->` requires single-clock antecedent + consequent. A `<sos:implies>` whose antecedent and consequent leaves resolve to different clock signals MUST raise `UnsupportedChartError` with the canonical prefix `SOS-08-D wave-4-future-mclk:`. Chart authors needing multi-clock causal chains drop to `<sos:raw_property>` (the escape hatch already lands per the 2026-05-24 §15 wave-4-future entry).
+
+**Authority boundary declaration** (per §0 standards-integration discipline):
+
+* **`<sos:sampling_clock>` element shape** — relationship `own`. SOS-08-D owns the element wrapper, the `region` + `clock` attribute names, the chart-vocab error shape, the primary-clock-from-first-child rule, the CDC banner shape, and the assert-label convention (`_mclk` suffix on property name; assert label unchanged from wave-4).
+* **IEEE 1800-2017 §16.13 multi-clocked assertion form** (specifically the `$past(<expr>, 1, , @(posedge <clock>))` four-argument form per §16.13.6 + the multi-clock property body per §16.13) — relationship `derive`. The walker selects an explicit subset of the §16.13 surface (no clocking blocks; no `@@` operator; no `[*0:$]` consecutive-repetition operators; only the explicit-clocking-event `$past` form). Adding §16.13 features to the lowered subset requires a §15 amendment.
+
+#### (b) Shared-datamodel cross-region driving
+
+**New element forms (frozen 2026-05-24 §15)**:
+
+```xml
+<sos:bind_directives>
+    <sos:shared_signal name="counter" width="8" owner_region="producer"/>
+</sos:bind_directives>
+
+<!-- elsewhere, inside a reader region's <state> subtree -->
+<sos:shared_signal_ref name="counter"/>
+```
+
+* **`<sos:shared_signal>`** declares a chart-level signal driven by exactly one region (`owner_region`). Multiple reader regions MAY read the signal via `<sos:shared_signal_ref>`; only the owner region MAY drive it. The `name` attribute is used as the emitted SV signal identifier prefix (`shared_<name>`); collision-checked against other shared signals in the chart's bind module.
+* **`<sos:shared_signal_ref>`** references a declared shared signal from anywhere inside a region's state subtree. This element MAY appear inside any region's nested elements (e.g. an `<assign>` location field) and the wave-4-future-shared collector picks it up recursively.
+
+**Normative validation** (chart-vocab errors raised with prefix `SOS-08-D wave-4-future-shared:`):
+
+* `owner_region` MUST reference a region the chart declares; unknown owner raises.
+* `name` MUST be unique across all `<sos:shared_signal>` declarations in the chart.
+* Two `<sos:shared_signal>` declarations with the same `name` but different `owner_region` values surface as a distinct `owner_region collision: ...` error wording (named separately from the duplicate-name error so the chart author sees the operational conflict explicitly).
+* Every `<sos:shared_signal_ref name="X">` MUST resolve to some declared `<sos:shared_signal name="X">`; an undeclared ref raises `references undeclared shared signal '<name>'`.
+
+**Lowered SV** (one-driver invariant per declared shared signal):
+
+```sv
+// === SOS-08-D wave-4-future-shared: shared-signal one-driver invariants ===
+// ...
+// NOTE: this slice emits the assertion only. The HDL-side wiring of the
+// `shared_<name>` register / port shape is deferred to a future SOS-08-C
+// wave-3-e port-shape extension or a successor phase.
+
+property p_shared_counter_one_driver;
+    @(posedge clk_producer) disable iff (rst)
+    $changed(shared_counter) |-> (current_state_producer != ST_PRODUCER_IDLE);
+endproperty
+SHARED_COUNTER_ONE_DRIVER: assert property (p_shared_counter_one_driver)
+    else $fatal(1, "[FAIL] chart `c` shared-signal `counter` changed while owner region `producer` was in idle state `IDLE` — only the owner region MAY drive the signal.");
+```
+
+The **idle state** is the owner region's initial state (the region after reset, where the region is not actively producing values). The walker resolves the idle state via the standard `<state initial="...">` attribute on the parallel region's element, with the falls-back-to-first-child rule mirroring `_normalise_chart`. The one-driver invariant catches any silent multi-driver violations the HDL-side wiring (when it lands) does not directly enforce.
+
+**Explicit scope**: this slice emits the **invariant assertions only**. The actual HDL emit of the `shared_<name>` wires + registers (the chart-top wrapper's port shape, the owner region's drive path, the reader regions' read paths) is **deferred to a future SOS-08-C wave-3-e port-shape extension or a successor phase**. The bind module assumes the chart-top wrapper exposes a `shared_<name>` port of the declared width; that port wiring lands later. The emitted SV comment block explicitly documents the deferral so a reviewer does not mistake the absent port wiring for a walker bug. This is the **SOS-08-C carry-forward** for this slice — recorded in §13 (files cited) and tracked in §15.
+
+**Authority boundary declaration** (per §0 standards-integration discipline):
+
+* **`<sos:shared_signal>` + `<sos:shared_signal_ref>` element shape** — relationship `own`. SOS-08-D owns the element wrappers, the attribute names (`name`, `width`, `owner_region`), the collision-check semantics, the idle-state-from-initial rule, the one-driver invariant shape, and the deferral-documentation block.
+* **`<sos:state_ref>` + per-region `clock=` annotation reuse** — relationship `compose`. The shared-signal one-driver invariant composes the wave-4 `<sos:state_ref>` machinery (the per-region `current_state_<region> != ST_<state>` comparison) and the wave-4-multi-clock derived per-region clock signal (per `_resolve_region_clock_signal`) as components. Neither component is modified; the shared-signal emit is a composition of wave-4 primitives.
+
+#### Combined wave-4-future status
+
+After this entry, wave-4-future remaining = **none**. The full wave-4-future carry-forward list (raised at the wave-4 entry above) has now closed in this order: state-encoding pass-through → `<sos:raw_property>` escape hatch → compound cross-invariant expressions → multi-clock cross-region sampling → shared-datamodel cross-region driving. Wave-4 work is **complete**.
+
+**Implementation surface** (one walker module, no external callers touched):
+
+* `_CrossInvariant` (extended) — adds `sampling_clocks: dict[str, str]` + `primary_clock_region: str | None` fields populated when `<sos:sampling_clock>` children are present; defaults to empty / None for wave-4 single-clock invariants.
+* `_parse_sampling_clocks(entry, inv_id)` — collector for the new `<sos:sampling_clock>` child list. Rejects missing attrs + duplicate `region` entries within one invariant with the canonical `SOS-08-D wave-4-future-mclk:` error prefix.
+* `_collect_chart_clock_domains(region_info)` — derives the chart's declared clock-domain set from per-region `clock=` annotations + the chart-top reference `clk`.
+* `_resolve_region_clock_signal(region, region_info)` + `_resolve_sampling_clock_signal(region, sampling_clocks, region_info)` — SV clock-signal resolution for default-clk regions and per-invariant sampling-clock declarations respectively.
+* `_validate_sampling_clocks(invariants, region_info, region_state_indices)` — chart-vocab validation pass for the new element. Surfaces unknown region/clock references and the mixed-clock `<sos:implies>` rejection (per IEEE 1800-2017 §16.13.5).
+* `_reject_mixed_clock_implies(inv, region_info)` — recursive AST scan that fails fast when `<sos:implies>` antecedent/consequent leaves resolve to different clock signals.
+* `_emit_mclk_leaf_for_region(region, state, primary_region, sampling_clocks, region_info)` — per-leaf SV rendering for multi-clock emit; primary-region leaf passes through, non-primary leaves wrap in `$past(..., @(posedge <its_clock>))`.
+* `_emit_mclk_compound_sv_expr(expr, primary_region, sampling_clocks, region_info)` — multi-clock variant of `_emit_compound_sv_expr`; identical boolean composition rules, per-leaf clock-aware wrapping.
+* `_emit_mclk_cdc_banner(inv, primary_clock, other_clocks)` — emits the canonical CDC banner comment block immediately preceding each multi-clock property.
+* `_SharedSignal` (dataclass) — collected `<sos:shared_signal>` declaration: `name`, `width`, `owner_region`, `doc_order`.
+* `_collect_shared_signals(chart_ir)` — collector with intrinsic-shape validation (missing attrs, invalid width).
+* `_collect_shared_signal_refs(chart_ir)` — recursive walk over the chart IR collecting every `<sos:shared_signal_ref>` name.
+* `_validate_shared_signals(signals, signal_refs, known_regions)` — cross-check pass: name collisions, owner_region collisions (worded distinctly from the name-only collision), unknown owner_region, undeclared signal_ref.
+* `_emit_shared_signal_invariants(signals, region_info, regions, chart_name)` — emit the one-driver invariant block list (banner + per-signal property + assert + chart-vocab `$fatal`).
+* `_emit_cross_region_sva_module` (extended) — adds `shared_signals=None` + `regions=None` kwargs; emits per-region clock input ports for multi-clock invariants + owner regions; emits shared-signal owner-idle `ST_<idle>` constants when needed; appends the shared-signal one-driver block after the structured + raw-property blocks.
+* `_emit_cross_region_bind_directive` (extended) — adds `shared_signals=None` kwarg; wires per-region multi-clock clock signals + owner-region clocks + `shared_<name>` ports through to the chart-top wrapper.
+* `_render_parallel` — top-file emission fires when ANY of the three lists (cross_invariants, raw_properties, shared_signals) is non-empty. Validation pass runs the new sampling-clock + shared-signal validators before emit so chart-author typos surface as actionable errors.
+* `_detect_unknown_root_operator` (extended) — whitelists `sampling_clock` so the unknown-operator detector doesn't reject the new per-invariant child.
+
+**Backwards compatibility**. The wave-4 single-clock path is byte-identical when no `<sos:sampling_clock>` children are present. The shared-signal block emits only when `<sos:shared_signal>` is present. Both regression-guard tests (`test_byte_identity_for_single_clock_chart` + `test_byte_identity_for_chart_without_shared_signals`) pin these paths.
+
+**Conformance impact** (per §0 + §12):
+
+* `<sos:sampling_clock>` — frozen-enum registration policy: **Standards Action**. Adding fields to the element shape (e.g. a `slack` attribute for CDC tolerance) requires §15 amendment.
+* `<sos:shared_signal>` + `<sos:shared_signal_ref>` — frozen-enum registration policy: **Standards Action**. Adding fields (e.g. `direction="out"`, `default_value="0"`) requires §15 amendment.
+
+**Invariants upheld**:
+
+* **INV-S-HDL-D-3** (vector-IR read-only at emitter) — both new collectors consume the chart IR without mutation; new elements feed through fresh dataclass instances.
+* **INV-S-HDL-D-4** (same SVA artifact feeds cocotb + formal) — both items emit plain SystemVerilog (no cocotb-Python-helper coupling, no simulator-specific extensions); the `$past(..., @(posedge ...))` form + `$changed` predicate are standard IEEE 1800-2017.
+* **INV-S-HDL-D-5** (chart-vocabulary failure messages) — extended to the new failure paths: every multi-clock `$fatal` cites both clock-domain names + both regions/states; every shared-signal `$fatal` cites the owner region + idle state + chart name + signal name.
+* **INV-S-HDL-3** (cross-domain isolation) — wave-4-future-mclk respects the doctrine: the walker emits the assertion form only and explicitly defers CDC synchroniser primitives to the design layer via the banner comment; the walker does NOT smuggle synchronisers into the SVA module.
+
+**Test count**: net +20 across two new classes in `tools/sos-codegen/tests/test_transliterate_sva_bind.py`:
+
+* `TestWave4FutureMultiClockCrossRegionSampling` (11): byte-identity regression guard for single-clock charts, two-region `$past`-with-region-clock emit, three-region chained `$past`, primary-clock = first-referenced-region rule, explicit ordering overrides primary, unknown-region/unknown-clock chart-vocab errors, CDC banner comment, mixed-clock implies rejected, compound `<sos:and>` over multi-clock state_refs wraps each leaf, property-name `_mclk` disambiguation suffix.
+* `TestWave4FutureSharedDatamodelCrossRegionDriving` (9): one-driver invariant emit, `$changed` predicate, owner-region state appears in emit, unknown owner_region rejected, duplicate name rejected, undeclared signal_ref rejected, owner_region collision rejected, byte-identity regression guard for charts without shared signals, HDL-wiring-deferred documentation.
+
+**Test suite**: 894/894 passing (874 prior + 20 new wave-4-future-mclk + wave-4-future-shared).
+
+**Cited invariants / PCDNs**: INV-S-HDL-D-3 (read-only — preserved); INV-S-HDL-D-4 (same artifact — preserved); INV-S-HDL-D-5 (chart vocabulary — extended); INV-S-HDL-3 (cross-domain isolation — preserved via CDC banner discipline); IEEE 1800-2017 §16.13 multi-clocked assertion (consumed; relationship `derive`); SOS-08-C wave-3 clock-distribution contract (consumed for per-region clock-signal resolution); SOS-08-C wave-3-e port-shape extension (named as the future owner of the deferred HDL-side `shared_<name>` wiring).
+
+**Wave-4-future remaining**: **none**. Wave-4 (multi-clock-domain bind wiring + cross-region invariant SVA properties) and wave-4-future (state-encoding pass-through, `<sos:raw_property>` escape hatch, compound cross-invariant expressions, multi-clock cross-region sampling, shared-datamodel cross-region driving) are both **complete**.
+
+Status: 🟢 **wave-4-future complete**. SOS-08-D wave-4 work is closed. Future SOS-08-D extensions (if any) live in new wave entries.

@@ -2049,3 +2049,553 @@ class TestWave4FutureCompoundCrossInvariant:
         )["tests/p/p_top_sva.sv"]
         assert "compound predicate" in sva
         assert "INV-COMPOUND-IMPLIES" in sva
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-D wave-4-future-mclk (2026-05-24 §15): multi-clock cross-region
+# sampling. `<sos:cross_invariant>` MAY declare per-region
+# `<sos:sampling_clock>` children; the emitted property uses IEEE
+# 1800-2017 §16.13 multi-clocked form, sampling each region's leaf
+# observable on its own clock via `$past(..., @(posedge <clock>))`.
+# ---------------------------------------------------------------------------
+
+
+def _mclk_parallel_chart():
+    """Parallel chart with two regions on distinct clock domains —
+    reused fixture for multi-clock cross-invariant tests."""
+    return {
+        "initial": "p",
+        "parallel": [
+            {
+                "id": "p",
+                "state": [
+                    {
+                        "id": "fast",
+                        "clock": "fast",
+                        "initial": "F1",
+                        "state": [
+                            _state("F1", transitions=[{"target": "F2"}]),
+                            _state("F2"),
+                        ],
+                    },
+                    {
+                        "id": "slow",
+                        "clock": "slow",
+                        "initial": "S1",
+                        "state": [
+                            _state("S1", transitions=[{"target": "S2"}]),
+                            _state("S2"),
+                        ],
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def _mclk_three_region_chart():
+    """Parallel chart with three regions on distinct clock domains."""
+    return {
+        "initial": "p",
+        "parallel": [
+            {
+                "id": "p",
+                "state": [
+                    {
+                        "id": "a",
+                        "clock": "ca",
+                        "initial": "A1",
+                        "state": [
+                            _state("A1", transitions=[{"target": "A2"}]),
+                            _state("A2"),
+                        ],
+                    },
+                    {
+                        "id": "b",
+                        "clock": "cb",
+                        "initial": "B1",
+                        "state": [
+                            _state("B1", transitions=[{"target": "B2"}]),
+                            _state("B2"),
+                        ],
+                    },
+                    {
+                        "id": "c",
+                        "clock": "cc",
+                        "initial": "C1",
+                        "state": [
+                            _state("C1", transitions=[{"target": "C2"}]),
+                            _state("C2"),
+                        ],
+                    },
+                ],
+            },
+        ],
+    }
+
+
+class TestWave4FutureMultiClockCrossRegionSampling:
+    """SOS-08-D wave-4-future-mclk §15 (2026-05-24): multi-clock cross-
+    region sampling. Each `<sos:cross_invariant>` MAY declare per-region
+    `<sos:sampling_clock>` children that route the property's per-leaf
+    observable through its own clock via `$past(..., @(posedge <clk>))`.
+
+    Authority boundary per §0:
+      * <sos:sampling_clock> element shape → ``own``.
+      * IEEE 1800-2017 §16.13 multi-clocked assertion form → ``derive``.
+    """
+
+    def test_byte_identity_for_single_clock_chart(self):
+        """Regression guard: charts without any `<sos:sampling_clock>`
+        children MUST emit byte-identical to wave-4. The multi-clock
+        machinery is opt-in via the child element."""
+        files = transliterate_sva_bind.render_target(
+            _chart_with_cross_invariants(), {"chart_name": "p"}
+        )
+        sva = files["tests/p/p_top_sva.sv"]
+        # Single-clock wave-4 emit markers present; no wave-4-future-mclk
+        # markers.
+        assert "##[1:8]" in sva
+        assert "wave-4-future-mclk" not in sva
+        assert "MULTI-CLOCK PROPERTY" not in sva
+        # $past samples in the multi-clock path are absent.
+        assert "$past(" not in sva
+
+    def test_two_region_multi_clock_emits_dollar_past_with_region_clock(self):
+        chart = _mclk_parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-MCLK-1",
+                "antecedent": "region.fast == F2",
+                "consequent": "region.slow == S2",
+                "sampling_clock": [
+                    {"region": "fast", "clock": "fast"},
+                    {"region": "slow", "clock": "slow"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "m"}
+        )["tests/m/m_top_sva.sv"]
+        # Primary clock = fast (first <sos:sampling_clock> entry).
+        assert "@(posedge clk_fast)" in sva
+        # Subsequent region uses $past on slow clock.
+        assert "$past(" in sva
+        assert "@(posedge clk_slow)" in sva
+        # Property name carries the multi-clock disambiguator suffix.
+        assert "p_inv_mclk_1_mclk" in sva
+
+    def test_three_region_multi_clock_chains_dollar_past(self):
+        chart = _mclk_three_region_chart()
+        # Use the compound implicit-AND form to reference three regions.
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-MCLK-3",
+                "state_ref": [
+                    {"region": "a", "state": "A2"},
+                    {"region": "b", "state": "B2"},
+                    {"region": "c", "state": "C2"},
+                ],
+                "sampling_clock": [
+                    {"region": "a", "clock": "ca"},
+                    {"region": "b", "clock": "cb"},
+                    {"region": "c", "clock": "cc"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "m"}
+        )["tests/m/m_top_sva.sv"]
+        # Primary @(posedge ca); both b and c reached via $past.
+        assert "@(posedge clk_ca)" in sva
+        assert "@(posedge clk_cb)" in sva
+        assert "@(posedge clk_cc)" in sva
+        # At least two $past(...) wraps for the two subsequent regions.
+        assert sva.count("$past(") >= 2
+
+    def test_primary_clock_is_first_referenced_region(self):
+        """If the chart author lists `slow` first under `<sos:sampling_clock>`
+        the primary clock becomes the slow clock — source-document order
+        of the children controls primacy."""
+        chart = _mclk_parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-MCLK-SLOW-PRIMARY",
+                "antecedent": "region.fast == F2",
+                "consequent": "region.slow == S2",
+                "sampling_clock": [
+                    {"region": "slow", "clock": "slow"},
+                    {"region": "fast", "clock": "fast"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "m"}
+        )["tests/m/m_top_sva.sv"]
+        # Property header now samples on slow.
+        assert "@(posedge clk_slow)" in sva
+        # Fast leaf must be wrapped in $past with the fast clock.
+        assert re.search(
+            r"\$past\(\s*\(current_state_fast == ST_F2\)\s*,\s*1\s*,\s*,"
+            r"\s*@\(posedge clk_fast\)\)",
+            sva,
+        ), f"$past with fast clock missing or malformed:\n{sva}"
+
+    def test_explicit_sampling_clock_order_overrides_primary(self):
+        """The first <sos:sampling_clock> entry overrides the would-be
+        wave-4 'antecedent region is primary' default. Verified by
+        comparing two invariants that differ only in the order of their
+        <sos:sampling_clock> children — the resulting `@(posedge ...)`
+        clock signal differs."""
+        chart_a = _mclk_parallel_chart()
+        chart_a["sos:cross_invariant"] = [
+            {
+                "id": "I1",
+                "antecedent": "region.fast == F2",
+                "consequent": "region.slow == S2",
+                "sampling_clock": [
+                    {"region": "fast", "clock": "fast"},
+                    {"region": "slow", "clock": "slow"},
+                ],
+            },
+        ]
+        chart_b = _mclk_parallel_chart()
+        chart_b["sos:cross_invariant"] = [
+            {
+                "id": "I1",
+                "antecedent": "region.fast == F2",
+                "consequent": "region.slow == S2",
+                "sampling_clock": [
+                    {"region": "slow", "clock": "slow"},
+                    {"region": "fast", "clock": "fast"},
+                ],
+            },
+        ]
+        sva_a = transliterate_sva_bind.render_target(
+            chart_a, {"chart_name": "m"}
+        )["tests/m/m_top_sva.sv"]
+        sva_b = transliterate_sva_bind.render_target(
+            chart_b, {"chart_name": "m"}
+        )["tests/m/m_top_sva.sv"]
+        # The two emits differ in the property's @(posedge ...) header.
+        assert sva_a != sva_b
+
+    def test_unknown_region_clock_raises_chart_vocab(self):
+        """A <sos:sampling_clock> referencing an unknown region raises
+        with the mclk error prefix."""
+        chart = _mclk_parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-MCLK-BAD-REGION",
+                "antecedent": "region.fast == F2",
+                "consequent": "region.slow == S2",
+                "sampling_clock": [
+                    {"region": "elsewhere", "clock": "fast"},
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"SOS-08-D wave-4-future-mclk:.*region='elsewhere'",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "m"})
+
+    def test_cdc_banner_comment_emitted_before_property(self):
+        """A multi-clock property MUST be preceded by the CDC banner
+        comment so reviewers see the synchroniser-requirement warning
+        directly above the assertion."""
+        chart = _mclk_parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-CDC-BANNER",
+                "antecedent": "region.fast == F2",
+                "consequent": "region.slow == S2",
+                "sampling_clock": [
+                    {"region": "fast", "clock": "fast"},
+                    {"region": "slow", "clock": "slow"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "m"}
+        )["tests/m/m_top_sva.sv"]
+        assert "MULTI-CLOCK PROPERTY: INV-CDC-BANNER" in sva
+        assert "CDC synchroniser" in sva
+        assert "SOS-08-D-CONCEPTS.md §15" in sva
+
+    def test_mixed_clock_implies_rejected(self):
+        """IEEE 1800-2017 §16.13.5: |-> requires single-clock antecedent
+        + consequent. A multi-clock <sos:implies> MUST raise."""
+        chart = _mclk_parallel_chart()
+        # Implies needs exactly 2 children — two state_ref leaves, one
+        # per region, each on a different clock domain.
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-MCLK-IMPLIES",
+                "implies": [
+                    {
+                        "state_ref": [
+                            {"region": "fast", "state": "F2"},
+                            {"region": "slow", "state": "S2"},
+                        ],
+                    },
+                ],
+                "sampling_clock": [
+                    {"region": "fast", "clock": "fast"},
+                    {"region": "slow", "clock": "slow"},
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"§16\.13\.5|antecedent samples on",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "m"})
+
+    def test_compound_and_with_multi_clock_state_refs_wraps_each_leaf(self):
+        """Compound `<sos:and>` over multi-clock state_refs: each leaf is
+        wrapped individually in `$past(..., @(posedge <its_clock>))`
+        except the primary-clock leaf."""
+        chart = _mclk_parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-MCLK-AND",
+                "and": [
+                    {
+                        "state_ref": [
+                            {"region": "fast", "state": "F2"},
+                            {"region": "slow", "state": "S2"},
+                        ],
+                    },
+                ],
+                "sampling_clock": [
+                    {"region": "fast", "clock": "fast"},
+                    {"region": "slow", "clock": "slow"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "m"}
+        )["tests/m/m_top_sva.sv"]
+        # The fast leaf renders without $past (it's the primary clock).
+        assert re.search(
+            r"\(current_state_fast == ST_F2\)\s*&&\s*"
+            r"\$past\(\s*\(current_state_slow == ST_S2\)\s*,\s*1\s*,\s*,"
+            r"\s*@\(posedge clk_slow\)\)",
+            sva,
+        ), f"compound AND multi-clock wrapping malformed:\n{sva}"
+
+    def test_unknown_clock_signal_in_sampling_clock_raises(self):
+        """A <sos:sampling_clock clock="bogus"/> referencing an unknown
+        clock-domain identifier raises chart-vocab."""
+        chart = _mclk_parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-MCLK-BAD-CLOCK",
+                "antecedent": "region.fast == F2",
+                "consequent": "region.slow == S2",
+                "sampling_clock": [
+                    {"region": "fast", "clock": "fast"},
+                    {"region": "slow", "clock": "bogus"},
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"SOS-08-D wave-4-future-mclk:.*clock='bogus'",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "m"})
+
+    def test_property_name_disambiguates_mclk_suffix(self):
+        """Multi-clock properties carry the `_mclk` suffix on the
+        property name to disambiguate from the wave-4 single-clock
+        emit (the assert label keeps the upper-case invariant id)."""
+        chart = _mclk_parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-NAMETEST",
+                "antecedent": "region.fast == F2",
+                "consequent": "region.slow == S2",
+                "sampling_clock": [
+                    {"region": "fast", "clock": "fast"},
+                    {"region": "slow", "clock": "slow"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "m"}
+        )["tests/m/m_top_sva.sv"]
+        assert "property p_inv_nametest_mclk" in sva
+        assert "INV_NAMETEST: assert property (p_inv_nametest_mclk)" in sva
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-D wave-4-future-shared (2026-05-24 §15): shared-datamodel
+# cross-region driving. `<sos:shared_signal>` declares a chart-level
+# signal driven by exactly one region; the bind module emits a
+# one-driver SVA invariant per signal. HDL-side wiring of the actual
+# `shared_<name>` port/register is deferred to SOS-08-C wave-3-e (this
+# slice emits the assertion only).
+# ---------------------------------------------------------------------------
+
+
+def _chart_with_shared_signal():
+    """Parallel chart carrying one <sos:shared_signal> declaration."""
+    chart = _parallel_chart()
+    chart["sos:shared_signal"] = [
+        {
+            "name": "counter",
+            "width": "8",
+            "owner_region": "left",
+        },
+    ]
+    return chart
+
+
+class TestWave4FutureSharedDatamodelCrossRegionDriving:
+    """SOS-08-D wave-4-future-shared §15 (2026-05-24): one-driver
+    invariant per shared signal. The bind module emits `$changed(shared_<name>)
+    |-> (region_<owner>_state != STATE_<owner>_<idle>)` so the simulator
+    catches any silent multi-driver violations the HDL-side wiring (when
+    it lands) does not directly enforce.
+
+    Authority boundary per §0:
+      * <sos:shared_signal> + <sos:shared_signal_ref> element shape → ``own``.
+      * <sos:state_ref> + <sos:clock_domains> reuse → ``compose``.
+    """
+
+    def test_shared_signal_emits_one_driver_invariant(self):
+        files = transliterate_sva_bind.render_target(
+            _chart_with_shared_signal(), {"chart_name": "p"}
+        )
+        sva = files["tests/p/p_top_sva.sv"]
+        # The shared-signal block is emitted with the wave-4-future-
+        # shared banner; verify the canonical pieces.
+        assert "wave-4-future-shared" in sva
+        assert "SHARED_COUNTER_ONE_DRIVER: assert property" in sva
+        assert "p_shared_counter_one_driver" in sva
+
+    def test_dollar_changed_appears_in_emit(self):
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_shared_signal(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # The one-driver predicate uses $changed on shared_counter.
+        assert re.search(
+            r"\$changed\(shared_counter\)", sva,
+        ), f"$changed missing from shared-signal emit:\n{sva}"
+
+    def test_owner_region_state_appears_in_emit(self):
+        """Owner is `left` with initial state `L1` (per _parallel_chart).
+        The one-driver invariant compares current_state_left != ST_L1."""
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_shared_signal(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        assert "current_state_left != ST_L1" in sva
+
+    def test_unknown_owner_region_raises_chart_vocab(self):
+        chart = _parallel_chart()
+        chart["sos:shared_signal"] = [
+            {
+                "name": "counter",
+                "width": "8",
+                "owner_region": "nowhere",
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"SOS-08-D wave-4-future-shared:.*owner_region 'nowhere'",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_duplicate_shared_signal_name_raises(self):
+        chart = _parallel_chart()
+        chart["sos:shared_signal"] = [
+            {
+                "name": "counter",
+                "width": "8",
+                "owner_region": "left",
+            },
+            {
+                "name": "counter",
+                "width": "8",
+                "owner_region": "left",
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"declared more than once",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_undeclared_shared_signal_ref_raises(self):
+        """A <sos:shared_signal_ref> deep inside a region MUST reference
+        a declared <sos:shared_signal>; otherwise raises chart-vocab."""
+        chart = _parallel_chart()
+        chart["sos:shared_signal"] = [
+            {
+                "name": "counter",
+                "width": "8",
+                "owner_region": "left",
+            },
+        ]
+        # Inject an undeclared shared_signal_ref under one of the
+        # regions' state subtrees so the walker's collector picks it up.
+        chart["parallel"][0]["state"][0]["state"][0]["sos:shared_signal_ref"] = [
+            {"name": "phantom_signal"},
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"references undeclared shared signal 'phantom_signal'",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_owner_region_collision_raises(self):
+        chart = _parallel_chart()
+        chart["sos:shared_signal"] = [
+            {
+                "name": "counter",
+                "width": "8",
+                "owner_region": "left",
+            },
+            {
+                "name": "counter",
+                "width": "8",
+                "owner_region": "right",
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"owner_region collision",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_byte_identity_for_chart_without_shared_signals(self):
+        """Regression guard: charts without any `<sos:shared_signal>`
+        declaration MUST emit byte-identical to wave-4-future-compound.
+        The shared-signal machinery is opt-in via the child element."""
+        files = transliterate_sva_bind.render_target(
+            _chart_with_cross_invariants(), {"chart_name": "p"}
+        )
+        sva = files["tests/p/p_top_sva.sv"]
+        # No wave-4-future-shared markers in a chart that doesn't use it.
+        assert "wave-4-future-shared" not in sva
+        assert "SHARED_" not in sva
+        assert "one_driver" not in sva
+        assert "$changed(" not in sva
+
+    def test_emit_documents_hdl_wiring_deferred_to_sos_08_c(self):
+        """The §15 spec says HDL-side wiring is deferred. The emitted
+        SV comment block MUST document the deferral so a reviewer
+        does not mistake the absent port wiring for a walker bug."""
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_shared_signal(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # The shared-signal banner block names the deferral.
+        assert "HDL-side wiring" in sva
+        assert "SOS-08-C wave-3-e" in sva
+        # Bind directive's body_extra also mentions the deferral.
+        bind = transliterate_sva_bind.render_target(
+            _chart_with_shared_signal(), {"chart_name": "p"}
+        )["tests/p/p_top_bind.sv"]
+        assert "wave-4-future-shared" in bind
+        assert "deferred" in bind
