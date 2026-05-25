@@ -419,6 +419,8 @@ These open questions move this doc from 🟡 drafted to 🟢 ratified.
 
 - **PCDN-SOS-08-D-008 — `<sos:clock_domains>` element shape (post-wave-1 follow-up).** Surfaced by 2026-05-24 wave-4 implementation (`SOS08D4ms` + `SOS08E3m`): two walkers independently referenced `<sos:clock_domains>` as if normative but the chart vocabulary declares no such element. Both worked around with derived clock-id sets (see §15 2026-05-24 entries). **Recommendation**: ratify the element shape as `<sos:clock_domains><sos:clock name="<sv_ident>" period_ns="<float>" duty_cycle="<float, default 0.5>"/>...</sos:clock_domains>`, sibling to the chart root. The chart-vocab clock-id set is the union of (a) names declared in `<sos:clock_domains>` if present, (b) region `clock=` attributes per PCDN-SOS-08-010, (c) chart-top reference `clk`. Walkers MUST validate against this union; absence of the block keeps wave-1 charts working unchanged (regression-guarded by both walkers' byte-identity tests). Authority: `own` for the new element. Registration policy: **Standards Action** — the element joins the SOS-08-D wave-4-future invariants and any future addition requires §15 amendment.
 
+  **Status: 🟢 ratified 2026-05-25** via Q1–Q9 walkthrough — see §15 2026-05-25 ratification entry "PCDN-SOS-08-D-008 ratification — `<sos:clock_domains>` element formalised" for the full ratified element shape (extended with `source=` opaque chart-vocab string ID, `kind=` rising/falling enum, optional `phase_ns=` for v2-staged quadrature/three-phase support), source × kind orthogonal identity model, alias-resolution rule (canonical name = alphabetic-first), and Q1–Q9 decision log.
+
 ## 15. Change log
 
 ### 2026-05-23 — Initial draft (Ira)
@@ -1157,3 +1159,59 @@ The pin is informative-to-implementation in the sense that the scjson loader alr
 **Test coverage** (doc-only slice, no walker changes): `tools/sos-codegen/tests/test_sos_08_d_pcdn_008_and_compound_traversal.py` (new) asserts the §14 PCDN-SOS-08-D-008 entry exists with the expected element-shape + union-source + Standards-Action text fragments, the §15 2026-05-25 entry exists naming both Issue A and Issue B, Issue B explicitly lists the four boolean operators in `and / implies / not / or` order, Issue B cites `_collect_compound_children` by path, the §4 authority-boundary row for compound-child traversal order appears with relationship `mirror`, and the new PCDN cites both wave-4 commits.
 
 Status: 🟢 **follow-ups ratified**. PCDN-SOS-08-D-008 closes the `<sos:clock_domains>` element-shape gap; the compound traversal-order pin closes the D2 wave's documented deviation. Both items leave the walker behaviour unchanged — the contract surface is what changed. Future `<sos:clock_domains>` adoption is opt-in via the new element; charts not declaring the block keep the derived-union validation surface unchanged.
+
+### 2026-05-25 — PCDN-SOS-08-D-008 ratification (Ira)
+
+🟢 ratified. `<sos:clock_domains>` element formalised with source × kind orthogonal identity model.
+
+**Element shape (normative, MUST):**
+
+```xml
+<sos:clock_domains>
+  <sos:clock name="<sv_ident>"
+             source="<opaque_id>"      <!-- SHOULD; default = name -->
+             kind="rising | falling"   <!-- MUST; v1 enum -->
+             period_ns="<float>"       <!-- optional; default 10.0 -->
+             duty_cycle="<float>"      <!-- optional; default 0.5 -->
+             phase_ns="<float>"/>      <!-- optional; default 0.0; v2-relevant -->
+  ...
+</sos:clock_domains>
+```
+
+**Identity model:** Clock-domain identity is the pair `(source, kind)`. Two `<sos:clock>` declarations with the same resolved pair are **aliases** — the same domain regardless of `name=`. Walker MUST resolve all clock references (`<sos:sampling_clock clock=...>`, region `clock=` attributes, `<sos:cdc_boundary>` endpoints) through alias-resolution to the canonical pair. Canonical `name=` is the alphabetic-first among aliases.
+
+**Kind enum at v1 (Standards Action registration):**
+
+- `rising` — `@(posedge clk)`. Today's default.
+- `falling` — `@(negedge clk)`. New at v1.
+- *Reserved future kinds:* `both` (DDR), `quadrature_pair`, three-phase / waltz / arbitrary-meter. Unsupported kinds raise `SOS-08-D wave-future-clkkind: kind '<value>' is reserved but not yet supported at v1`.
+
+**Source semantics:** `source=` is an opaque chart-vocab string ID at v1. Future pin-mapping work (PCDN-SOS-08-011 territory) MAY supply `source=` from a chart-top `<sos:pin_mapping>` block. Users SHOULD supply `source=` explicitly to enable alias resolution; absence means `source = name`.
+
+**Backwards-compat (MUST):** Charts without `<sos:clock_domains>` get an implicit `name="clk", source="chart_root", kind="rising"`. Wave-1 charts emit byte-identical.
+
+**CDC boundary detection:** A boundary exists between two regions iff their resolved `(source, kind)` pairs differ. Same-source-different-kind boundaries get the same CDC banner as different-source boundaries at v1; lighter synchroniser optimisation (e.g. single-cycle alignment for same-source) is deferred to future PCDN.
+
+**Sampling-clock kind:** `<sos:sampling_clock>` does NOT carry its own `kind=`; it inherits from the referenced `<sos:clock>` declaration. SV emit selects `@(posedge ...)` or `@(negedge ...)` per resolved kind.
+
+**Phase (v2-staged):** `phase_ns=<float>` declares absolute phase offset from the source's zero-phase reference. v1 walker parses + stores; emit ignores. v2+ quadrature/three-phase support reads phase relationships from pairs of clock declarations sharing a source.
+
+**Authority:** `own` for the element shape, source × kind identity model, alias-resolution rule, kind enum. Registration policy: **Standards Action**.
+
+**Implementation impact (deferred to follow-up wave):** SOS-08-D `_collect_clock_domains` gains source/kind/phase_ns parsing + alias-resolution machinery. SOS-08-E walker mirrors the same parsed shape. Both walkers cross-reference the resolved canonical name from a shared helper (likely `tools/sos-codegen/_clock_domains.py`, parallel to existing `_assign_expr.py` + `_chart_events.py`).
+
+**Q1–Q9 decision log (referenced for traceability):**
+
+- Q1 (b): opaque `source=` string at v1; pin-mapping future.
+- Q2: `rising` + `falling` at v1; DDR/quadrature/three-phase reserved.
+- Q3 (a): aliases — same `(source, kind)` = same domain; alphabetic-first canonical name.
+- Q4: resolved-pair comparison for all downstream consumers.
+- Q5: element shape accepted.
+- Q6: SHOULD for user, MUST for walker absence-support.
+- Q7 (a): per-clock `phase_ns` attribute reserved.
+- Q8: `<sos:sampling_clock>` inherits kind.
+- Q9: uniform CDC banner v1; optimisation deferred.
+
+**Tracking:** Resolves PCDN-SOS-08-D-008 filed 2026-05-25 (commit `1ecbf31`). Cross-references PCDN-SOS-08-010 (region `clock=` attribute) — region clock references now flow through the alias resolver. Future PCDNs: kind enum extensions (DDR/quadrature/three-phase), pin-mapping shape (Q1 deferred), same-source-different-kind synchroniser optimisation (Q9 deferred). Companion §15 ratification entries land in `SOS-08-E-CONCEPTS.md` (sampling-clock inheritance + walker mirror) and `SOS-08-C-CONCEPTS.md` (C-007 + C-008 same-day ratifications) — parallel wave.
+
+**Status:** 🟢 ratified — implementation pending.
