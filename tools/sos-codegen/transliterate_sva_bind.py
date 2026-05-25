@@ -1022,13 +1022,20 @@ _CROSS_INVARIANT_WITHIN_CAP = 1024
    §15 amendment if a real-world chart needs longer."""
 
 
-_COMPOUND_OPERATOR_NAMES = ("and", "or", "not", "implies")
+_COMPOUND_OPERATOR_NAMES = ("and", "implies", "not", "or")
 """Wave-4-future (2026-05-24 §15): set of supported compound boolean
    operators. The frozen-enum registration policy is Standards Action
    (cross-phase contract surface — adding a value requires a §15
    amendment). The set is intentionally small at v1; SVA-specific
    operators (`##`, `[*]`, sampled-value functions) require
-   `<sos:raw_property>` per the wave-4-future §15 entry."""
+   `<sos:raw_property>` per the wave-4-future §15 entry.
+
+   Order is **alphabetic** — `and`, `implies`, `not`, `or`. This is
+   the canonical traversal order pinned by SOS-08-D-CONCEPTS §15
+   2026-05-25 (post-wave-4 follow-ups, Issue B). The walker MUST emit
+   compound-child operator nodes in this order when chart authors
+   intermix different operator children at the same nesting level.
+   See `_collect_compound_children` below."""
 
 
 # ----------------------------------------------------------------------------
@@ -1763,12 +1770,15 @@ def _collect_compound_children(
     For the compound-expression v1, the canonical traversal order is:
 
       1. For each entry in ``node`` whose key names a compound child
-         (and/or/not/implies/state_ref), iterate the entry's value list
+         (and/implies/not/or/state_ref), iterate the entry's value list
          in source order.
       2. The cross-key traversal MUST be deterministic — we use the
-         declaration order of ``_COMPOUND_OPERATOR_NAMES`` + state_ref
-         as the secondary sort key when chart authors interleave
-         different operator children inside a single parent.
+         alphabetic order of ``_COMPOUND_OPERATOR_NAMES`` (``and``,
+         ``implies``, ``not``, ``or``) with state_ref leaves emitted
+         first, per SOS-08-D-CONCEPTS §15 2026-05-25 (post-wave-4
+         follow-ups, Issue B). This is the canonical traversal order
+         applied when chart authors interleave different operator
+         children inside a single parent.
 
     In practice each compound operator has one or two children of a
     fixed shape (per RFC-2119 MUSTs in §15); the order rule matters

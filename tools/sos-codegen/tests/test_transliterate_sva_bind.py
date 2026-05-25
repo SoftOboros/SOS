@@ -2050,6 +2050,125 @@ class TestWave4FutureCompoundCrossInvariant:
         assert "compound predicate" in sva
         assert "INV-COMPOUND-IMPLIES" in sva
 
+    def test_canonical_emit_order_is_alphabetic(self):
+        """Regression guard for SOS-08-D-CONCEPTS §15 2026-05-25 (Issue B):
+        when chart authors intermix `<sos:and>`, `<sos:implies>`,
+        `<sos:not>`, `<sos:or>` children at the same nesting level, the
+        canonical traversal order is **alphabetic** — ``and``,
+        ``implies``, ``not``, ``or``. This locks the canonical form so a
+        future drift back to declaration-tuple order (``and``, ``or``,
+        ``not``, ``implies``) is caught.
+
+        Construction: outer `<sos:and>` carrying one of each operator
+        child, each with valid arity. The emitted SV property body MUST
+        present the four sub-expressions joined by ``&&`` in alphabetic
+        operator order — i.e. the inner ``and`` body first, then the
+        inner ``implies`` body, then the inner ``not`` body, then the
+        inner ``or`` body. The leaves under each inner operator are
+        chosen to be distinct so the emit substring for each sub-
+        expression is uniquely identifiable.
+        """
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-CANON-ORDER",
+                # Outer <sos:and> with four children, one per operator
+                # kind. Each inner operator carries valid arity:
+                #   * inner and:     2 state_refs (L1, R1)
+                #   * inner implies: 2 state_refs (L2 -> R2)
+                #   * inner not:     1 state_ref (R1)
+                #   * inner or:      2 state_refs (L1, L2)
+                # The four operator-kind keys sit at the same level
+                # under the outer `and` dict; the canonical emit order
+                # is enforced by ``_collect_compound_children`` walking
+                # ``_COMPOUND_OPERATOR_NAMES`` in alphabetic order.
+                "and": [
+                    {
+                        "and": [
+                            {
+                                "state_ref": [
+                                    {"region": "left", "state": "L1"},
+                                    {"region": "right", "state": "R1"},
+                                ],
+                            },
+                        ],
+                        "implies": [
+                            {
+                                "state_ref": [
+                                    {"region": "left", "state": "L2"},
+                                    {"region": "right", "state": "R2"},
+                                ],
+                            },
+                        ],
+                        "not": [
+                            {
+                                "state_ref": [
+                                    {"region": "right", "state": "R1"},
+                                ],
+                            },
+                        ],
+                        "or": [
+                            {
+                                "state_ref": [
+                                    {"region": "left", "state": "L1"},
+                                    {"region": "left", "state": "L2"},
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # Sanity: the four inner operator emits are all present.
+        # Inner `and`: (L1 == ST_L1) && (R1 == ST_R1)
+        and_body = (
+            r"\(\s*\(current_state_left == ST_L1\)\s*&&\s*"
+            r"\(current_state_right == ST_R1\)\s*\)"
+        )
+        # Inner `implies`: (L2 -> R2)
+        implies_body = (
+            r"\(\s*\(current_state_left == ST_L2\)\s*\|->\s*"
+            r"\(current_state_right == ST_R2\)\s*\)"
+        )
+        # Inner `not`: !(R1)
+        not_body = r"!\(\s*\(current_state_right == ST_R1\)\s*\)"
+        # Inner `or`: (L1 || L2)
+        or_body = (
+            r"\(\s*\(current_state_left == ST_L1\)\s*\|\|\s*"
+            r"\(current_state_left == ST_L2\)\s*\)"
+        )
+        # Each sub-expression appears at least once.
+        assert re.search(and_body, sva), (
+            f"inner and missing or malformed:\n{sva}"
+        )
+        assert re.search(implies_body, sva), (
+            f"inner implies missing or malformed:\n{sva}"
+        )
+        assert re.search(not_body, sva), (
+            f"inner not missing or malformed:\n{sva}"
+        )
+        assert re.search(or_body, sva), (
+            f"inner or missing or malformed:\n{sva}"
+        )
+        # Load-bearing: the four sub-expressions appear in alphabetic
+        # operator order in the outer `and` body — and, implies, not,
+        # or — separated by `&&`. Locating each inner emit's start
+        # offset and asserting the offsets are strictly increasing is
+        # the order-locking check.
+        and_pos = re.search(and_body, sva).start()
+        implies_pos = re.search(implies_body, sva).start()
+        not_pos = re.search(not_body, sva).start()
+        or_pos = re.search(or_body, sva).start()
+        assert and_pos < implies_pos < not_pos < or_pos, (
+            f"SOS-08-D-CONCEPTS §15 2026-05-25 (Issue B) requires "
+            f"alphabetic emit order (and < implies < not < or); got "
+            f"and={and_pos}, implies={implies_pos}, not={not_pos}, "
+            f"or={or_pos}.\n{sva}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # SOS-08-D wave-4-future-mclk (2026-05-24 §15): multi-clock cross-region
