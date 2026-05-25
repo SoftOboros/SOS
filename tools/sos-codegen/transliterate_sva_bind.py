@@ -936,6 +936,17 @@ class _CrossInvariant:
     The ``within`` attribute defaults to 1 (single-cycle reaction)
     when absent. A value < 1 is normalised to 1; a value > 1024 is
     rejected as outside the v1 bounded-reachability window.
+
+    Wave-4-future (2026-05-24 §15) — compound cross-invariant
+    expressions: when the declaration carries any ``<sos:and>`` /
+    ``<sos:or>`` / ``<sos:not>`` / ``<sos:implies>`` child OR a list
+    of ``<sos:state_ref>`` children (the implicit-AND form), the
+    walker populates ``expr`` with a ``_CompoundExpr`` AST and
+    leaves the antecedent/consequent attribute fields empty. The
+    emit path branches on ``expr is not None`` to choose between the
+    wave-4 implies-style property (with ``##[1:within]`` window) and
+    the wave-4-future-compound boolean property (single-cycle SVA
+    expression).
     """
 
     id: str
@@ -944,12 +955,60 @@ class _CrossInvariant:
     consequent_region: str
     consequent_state: str
     within: int
+    # Wave-4-future-compound: populated when the cross-invariant
+    # uses compound boolean elements or a list of state_ref children
+    # (implicit-AND). When ``expr`` is not None the wave-4
+    # antecedent/consequent fields are placeholders ("" / 0) and
+    # the emit path uses ``expr`` for both the SVA body + the
+    # chart-vocabulary failure message.
+    expr: "_CompoundExpr | None" = None
+
+
+@dataclass
+class _CompoundExpr:
+    """One node in a compound cross-invariant boolean AST.
+
+    Wave-4-future (2026-05-24 §15): structured boolean composition
+    over ``<sos:state_ref>`` leaves. Supported ``kind`` values:
+
+    * ``'and'`` — 2+ children; lowers to ``(c1 && c2 && ...)``.
+    * ``'or'`` — 2+ children; lowers to ``(c1 || c2 || ...)``.
+    * ``'not'`` — exactly 1 child; lowers to ``!(c)``.
+    * ``'implies'`` — exactly 2 children (antecedent, consequent);
+      lowers to ``(antecedent |-> consequent)`` per IEEE 1800-2017
+      §16.12.2 (overlapping-implication operator).
+    * ``'state_ref'`` — leaf; ``region`` + ``state`` populated. Lowers
+      to ``(current_state_<region> == ST_<state>)`` matching the wave-4
+      leaf encoding. Reuses the wave-4-future state-encoding
+      pass-through (the per-region one-hot bit index machinery from
+      ``_build_region_state_indices``) — DO NOT re-implement.
+
+    Authority relationship per §0:
+      * Element shape (``<sos:and>``/``<sos:or>``/``<sos:not>``/
+        ``<sos:implies>``/``<sos:state_ref>``)  — relationship ``own``.
+      * SVA boolean lowering (subset of IEEE 1800-2017 §11.4.7 logical
+        operators + §16.12.2 implication) — relationship ``derive``.
+    """
+
+    kind: str
+    children: list["_CompoundExpr"] = field(default_factory=list)
+    region: str | None = None
+    state: str | None = None
 
 
 _CROSS_INVARIANT_WITHIN_CAP = 1024
 """Wave-4 frozen cap on `within` cycles; bounds the SVA window so
    commercial-sim assertion-engine memory stays reasonable. Bump by
    §15 amendment if a real-world chart needs longer."""
+
+
+_COMPOUND_OPERATOR_NAMES = ("and", "or", "not", "implies")
+"""Wave-4-future (2026-05-24 §15): set of supported compound boolean
+   operators. The frozen-enum registration policy is Standards Action
+   (cross-phase contract surface — adding a value requires a §15
+   amendment). The set is intentionally small at v1; SVA-specific
+   operators (`##`, `[*]`, sampled-value functions) require
+   `<sos:raw_property>` per the wave-4-future §15 entry."""
 
 
 # ----------------------------------------------------------------------------
@@ -1219,6 +1278,28 @@ def _collect_cross_invariants(
     entries raise ``UnsupportedChartError`` with the wave-4 spec
     citation so chart authors get an actionable error instead of a
     silently-skipped invariant.
+
+    Wave-4-future (2026-05-24 §15) — compound cross-invariant
+    expressions: the walker detects the new shape by presence of any
+    ``sos:and`` / ``sos:or`` / ``sos:not`` / ``sos:implies`` (or bare-
+    namespace variants) child OR a list of ``sos:state_ref`` / bare
+    ``state_ref`` direct children. The detection rule:
+
+      * Any compound boolean child (``and``/``or``/``not``/``implies``) →
+        compound-expression path; ``expr`` populated with the AST root.
+      * One or more ``state_ref`` children, no boolean child → implicit-
+        AND path; ``expr`` populated with an ``_CompoundExpr`` whose
+        ``kind == 'and'`` and children are the state-ref leaves (or
+        a single ``state_ref`` leaf when N=1).
+      * Neither — wave-4 string-form (antecedent/consequent attrs).
+
+    Compound declarations carry the ``id`` attribute (used for the
+    derived property name + assert label + chart-vocabulary failure
+    message) and OPTIONALLY a ``within`` attribute. When the compound
+    expression is itself an ``<sos:implies>``, the ``within`` attribute
+    is consumed by the implies window; otherwise the compound is
+    asserted same-cycle (no temporal window) per the §15 normative
+    section.
     """
     raw = (
         chart_ir.get("sos:cross_invariant")
@@ -1232,21 +1313,35 @@ def _collect_cross_invariants(
         if not isinstance(entry, dict):
             continue
         inv_id = entry.get("id")
-        antecedent = entry.get("antecedent")
-        consequent = entry.get("consequent")
-        within_raw = entry.get("within", 1)
         if not (isinstance(inv_id, str) and inv_id.strip()):
             raise UnsupportedChartError(
                 "SOS-08-D wave-4: <sos:cross_invariant> MUST carry a "
                 "non-empty `id` attribute (chart-vocabulary failure "
                 "messages cite it per INV-S-HDL-D-5)."
             )
-        a_region, a_state = _parse_region_state_expr(
-            antecedent, inv_id, "antecedent"
-        )
-        c_region, c_state = _parse_region_state_expr(
-            consequent, inv_id, "consequent"
-        )
+
+        # Wave-4-future-compound detection: any compound boolean child
+        # OR any state_ref child triggers the compound path. The
+        # antecedent/consequent string-attribute form remains valid
+        # when no compound markers are present.
+        compound_expr = _maybe_parse_compound_cross_invariant(entry, inv_id)
+
+        antecedent = entry.get("antecedent")
+        consequent = entry.get("consequent")
+        within_raw = entry.get("within", 1)
+
+        if compound_expr is None:
+            a_region, a_state = _parse_region_state_expr(
+                antecedent, inv_id, "antecedent"
+            )
+            c_region, c_state = _parse_region_state_expr(
+                consequent, inv_id, "consequent"
+            )
+        else:
+            # Compound expression supplies its own predicates; populate
+            # antecedent/consequent fields with placeholders that the
+            # emit path ignores when ``expr`` is not None.
+            a_region = a_state = c_region = c_state = ""
         try:
             within = int(within_raw)
         except (TypeError, ValueError):
@@ -1270,8 +1365,350 @@ def _collect_cross_invariants(
             consequent_region=c_region,
             consequent_state=c_state,
             within=within,
+            expr=compound_expr,
         ))
     return out
+
+
+def _compound_child_key(entry: dict[str, Any], name: str) -> str | None:
+    """Return the dict key (``name`` or ``sos:name``) under which the
+    chart IR exposes a compound-cross-invariant child. Returns ``None``
+    when neither key is present."""
+    for k in (f"sos:{name}", name):
+        if k in entry:
+            return k
+    return None
+
+
+def _has_any_compound_child(entry: dict[str, Any]) -> bool:
+    """True if any ``sos:and`` / ``sos:or`` / ``sos:not`` / ``sos:implies``
+    / ``sos:state_ref`` (or bare-namespace variant) key is present on
+    ``entry``. Wave-4-future detection — gates the compound emit path."""
+    for name in _COMPOUND_OPERATOR_NAMES + ("state_ref",):
+        if _compound_child_key(entry, name) is not None:
+            return True
+    return False
+
+
+_CROSS_INVARIANT_ATTR_KEYS = {
+    "id",
+    "antecedent",
+    "consequent",
+    "within",
+}
+
+
+def _detect_unknown_root_operator(
+    entry: dict[str, Any],
+    inv_id: str,
+) -> None:
+    """Scan the cross-invariant's keys for unknown boolean-operator
+    elements (e.g. ``<sos:xor>``, ``<sos:nand>``). When an unknown
+    operator is detected, raise the canonical chart-vocab error with
+    the ``<sos:raw_property>`` escape-hatch hint per §15.
+
+    Operates BEFORE the compound-detection pass so unknown operators
+    don't fall through to the wave-4 string-form path (which would
+    surface a misleading "antecedent missing" error instead of the
+    intended unsupported-operator chart-vocab message).
+    """
+    known_compound = set(_COMPOUND_OPERATOR_NAMES) | {"state_ref"}
+    loader_internals = {"_text", "#text", "$"}
+    for k in entry.keys():
+        bare = k.split(":")[-1]
+        if bare in _CROSS_INVARIANT_ATTR_KEYS:
+            continue
+        if bare in known_compound:
+            continue
+        if bare in loader_internals or bare.startswith("_") or bare.startswith("#"):
+            continue
+        # Anything else under a <sos:cross_invariant> root is an
+        # unsupported operator — surface the canonical error.
+        raise UnsupportedChartError(
+            f"SOS-08-D wave-4-future-compound: cross-invariant "
+            f"{inv_id!r} uses unsupported boolean operator {bare!r}; "
+            f"supported: and, or, not, implies, state_ref. For SVA-"
+            f"specific operators (e.g. ##, [*], sampled-value functions), "
+            f"use <sos:raw_property> escape hatch."
+        )
+
+
+def _maybe_parse_compound_cross_invariant(
+    entry: dict[str, Any],
+    inv_id: str,
+) -> "_CompoundExpr | None":
+    """Wave-4-future compound parser.
+
+    Returns ``None`` when the entry uses the wave-4 string-form
+    (antecedent/consequent attrs only). Returns a ``_CompoundExpr``
+    AST root when any compound boolean child or ``state_ref`` child
+    is present.
+
+    Per §15 (2026-05-24): the detection rule is structural — a single
+    compound child triggers the compound path, even if antecedent /
+    consequent attrs are also present. Chart authors mixing the two
+    forms in the same element get the compound path (precedence rule:
+    structured children win over flat attrs); the wave-4 attrs are
+    ignored. The rule is intentional — chart authors transitioning
+    from the string form leave the old attrs in place during review
+    and the compound form supersedes them.
+    """
+    # Surface unknown operators FIRST so they get the canonical
+    # raw_property hint, not the wave-4 "missing antecedent" error.
+    _detect_unknown_root_operator(entry, inv_id)
+    if not _has_any_compound_child(entry):
+        return None
+
+    # Collect direct compound children at this <sos:cross_invariant>'s
+    # top level. The grammar at the cross-invariant root permits:
+    #   * EITHER 1+ <sos:state_ref> direct children (implicit-AND), OR
+    #   * EITHER 1 boolean operator child (and/or/not/implies),
+    # but not both at the same level (chart authors can nest boolean
+    # operators inside a single root for richer compositions).
+    boolean_keys = [
+        _compound_child_key(entry, n)
+        for n in _COMPOUND_OPERATOR_NAMES
+    ]
+    boolean_keys = [k for k in boolean_keys if k is not None]
+    state_ref_key = _compound_child_key(entry, "state_ref")
+
+    if boolean_keys and state_ref_key is not None:
+        # Mixed root — disallow at v1 (ambiguous: AND-with-bool or
+        # bool-only?). Chart authors who need an AND with a boolean
+        # branch wrap the whole thing in <sos:and>.
+        raise UnsupportedChartError(
+            f"SOS-08-D wave-4-future-compound: cross-invariant "
+            f"{inv_id!r} mixes <sos:state_ref> children with a "
+            f"boolean operator at the root level. Wrap the whole "
+            f"expression in <sos:and> (or another operator) to "
+            f"disambiguate."
+        )
+
+    if state_ref_key is not None and not boolean_keys:
+        state_ref_children = _normalise_compound_child_list(
+            entry[state_ref_key]
+        )
+        leaves = [
+            _build_compound_state_ref_leaf(srn, inv_id)
+            for srn in state_ref_children
+        ]
+        if len(leaves) == 1:
+            return leaves[0]
+        # Implicit-AND form: multiple <sos:state_ref> children →
+        # conjunction asserted as the property body.
+        return _CompoundExpr(kind="and", children=leaves)
+
+    # Exactly one boolean operator child at the root. >1 disallowed
+    # (would be ambiguous — wrap in <sos:and>/<sos:or>).
+    if len(boolean_keys) > 1:
+        ordered = ", ".join(sorted(boolean_keys))
+        raise UnsupportedChartError(
+            f"SOS-08-D wave-4-future-compound: cross-invariant "
+            f"{inv_id!r} carries multiple boolean operator children "
+            f"({ordered}) at the root level. Wrap the whole "
+            f"expression in <sos:and> (or another operator) to "
+            f"disambiguate."
+        )
+    root_key = boolean_keys[0]
+    root_kind = root_key.split(":")[-1]
+    root_nodes = _normalise_compound_child_list(entry[root_key])
+    if len(root_nodes) != 1:
+        # Each boolean operator at the root takes exactly one element
+        # node; multiple sibling <sos:and>/<sos:or>/etc. would require
+        # an explicit wrapping operator.
+        raise UnsupportedChartError(
+            f"SOS-08-D wave-4-future-compound: cross-invariant "
+            f"{inv_id!r}'s root <sos:{root_kind}> appears "
+            f"{len(root_nodes)} times; expected exactly 1. Wrap the "
+            f"siblings inside a single <sos:and> / <sos:or> root."
+        )
+    return _build_compound_node(root_kind, root_nodes[0], inv_id)
+
+
+def _normalise_compound_child_list(value: Any) -> list[Any]:
+    """The scjson loader emits a single child as either a dict or a
+    one-element list depending on the element multiplicity heuristics.
+    Normalise to a list."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _build_compound_state_ref_leaf(
+    node: Any,
+    inv_id: str,
+) -> "_CompoundExpr":
+    """Parse a ``<sos:state_ref region="..." state="..."/>`` element
+    into a ``_CompoundExpr`` leaf node.
+
+    Reuses the wave-4 ``<sos:state_ref>`` chart-vocab semantics
+    (region + state attributes); cross-invariant state-ref validation
+    against the region/state index map happens in
+    ``_validate_compound_state_refs`` AFTER all parsing completes so
+    chart-vocab errors surface with the full known-region/state list.
+    """
+    if not isinstance(node, dict):
+        raise UnsupportedChartError(
+            f"SOS-08-D wave-4-future-compound: cross-invariant "
+            f"{inv_id!r}'s <sos:state_ref> child MUST be an element "
+            f"with `region` + `state` attributes; got "
+            f"{type(node).__name__}."
+        )
+    region = node.get("region")
+    state = node.get("state")
+    if not (isinstance(region, str) and region.strip()):
+        raise UnsupportedChartError(
+            f"SOS-08-D wave-4-future-compound: cross-invariant "
+            f"{inv_id!r}'s <sos:state_ref> MUST carry a non-empty "
+            f"`region` attribute."
+        )
+    if not (isinstance(state, str) and state.strip()):
+        raise UnsupportedChartError(
+            f"SOS-08-D wave-4-future-compound: cross-invariant "
+            f"{inv_id!r}'s <sos:state_ref> MUST carry a non-empty "
+            f"`state` attribute."
+        )
+    return _CompoundExpr(
+        kind="state_ref",
+        children=[],
+        region=region.strip(),
+        state=state.strip(),
+    )
+
+
+def _build_compound_node(
+    kind: str,
+    node: Any,
+    inv_id: str,
+) -> "_CompoundExpr":
+    """Recursive compound-AST builder.
+
+    ``kind`` names the operator at this node (``'and'``, ``'or'``,
+    ``'not'``, ``'implies'``). ``node`` is the scjson dict containing
+    this operator's children. Recursion descends through compound
+    children + ``state_ref`` leaves; any unknown operator name raises
+    ``UnsupportedChartError`` with the canonical remediation hint.
+    """
+    if not isinstance(node, dict):
+        # An empty body (e.g. ``<sos:and/>`` collapses to a string in
+        # some loader shapes) — surface the canonical empty-children
+        # error path below by treating as empty.
+        node = {}
+
+    children = _collect_compound_children(node, inv_id)
+
+    if kind == "and":
+        if len(children) < 2:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-compound: cross-invariant "
+                f"{inv_id!r}'s <sos:and> requires 2+ children (got "
+                f"{len(children)})."
+            )
+        return _CompoundExpr(kind="and", children=children)
+    if kind == "or":
+        if len(children) < 2:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-compound: cross-invariant "
+                f"{inv_id!r}'s <sos:or> requires 2+ children (got "
+                f"{len(children)})."
+            )
+        return _CompoundExpr(kind="or", children=children)
+    if kind == "not":
+        if len(children) != 1:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-compound: cross-invariant "
+                f"{inv_id!r}'s <sos:not> requires exactly 1 child "
+                f"(got {len(children)})."
+            )
+        return _CompoundExpr(kind="not", children=children)
+    if kind == "implies":
+        if len(children) != 2:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-compound: cross-invariant "
+                f"{inv_id!r}'s <sos:implies> requires exactly 2 "
+                f"children (antecedent + consequent); got "
+                f"{len(children)}."
+            )
+        return _CompoundExpr(kind="implies", children=children)
+
+    # Unknown operator name — chart-vocab error with raw_property
+    # escape-hatch hint per §15 normative section.
+    raise UnsupportedChartError(
+        f"SOS-08-D wave-4-future-compound: cross-invariant "
+        f"{inv_id!r} uses unsupported boolean operator {kind!r}; "
+        f"supported: and, or, not, implies, state_ref. For SVA-"
+        f"specific operators (e.g. ##, [*], sampled-value functions), "
+        f"use <sos:raw_property> escape hatch."
+    )
+
+
+def _collect_compound_children(
+    node: dict[str, Any],
+    inv_id: str,
+) -> list["_CompoundExpr"]:
+    """Walk all compound + state_ref children of ``node`` in source-
+    document order.
+
+    Document order across heterogeneous keys is not directly preserved
+    by the scjson loader (it groups same-name children into lists).
+    For the compound-expression v1, the canonical traversal order is:
+
+      1. For each entry in ``node`` whose key names a compound child
+         (and/or/not/implies/state_ref), iterate the entry's value list
+         in source order.
+      2. The cross-key traversal MUST be deterministic — we use the
+         declaration order of ``_COMPOUND_OPERATOR_NAMES`` + state_ref
+         as the secondary sort key when chart authors interleave
+         different operator children inside a single parent.
+
+    In practice each compound operator has one or two children of a
+    fixed shape (per RFC-2119 MUSTs in §15); the order rule matters
+    only for ``<sos:and>`` / ``<sos:or>``, where chart authors
+    naturally write the children in the order they want SVA to emit
+    them. The traversal preserves that order within each key.
+    """
+    children: list[_CompoundExpr] = []
+    # Implicit-AND state_ref leaves at this node — included in the
+    # child list directly (e.g. ``<sos:and><sos:state_ref/><sos:state_ref/>``
+    # has two state_ref leaves).
+    state_ref_key = _compound_child_key(node, "state_ref")
+    if state_ref_key is not None:
+        for srn in _normalise_compound_child_list(node[state_ref_key]):
+            children.append(_build_compound_state_ref_leaf(srn, inv_id))
+    # Nested boolean operators.
+    for name in _COMPOUND_OPERATOR_NAMES:
+        k = _compound_child_key(node, name)
+        if k is None:
+            continue
+        for sub_node in _normalise_compound_child_list(node[k]):
+            children.append(_build_compound_node(name, sub_node, inv_id))
+    # Detect any unknown child name (operator typos, e.g. <sos:xor>).
+    # Iterate ``node``'s keys and surface unsupported boolean operators
+    # explicitly so chart authors get a chart-vocab error pointing at
+    # the raw_property escape hatch.
+    known_attr_keys = {"region", "state"}
+    for k in node.keys():
+        bare = k.split(":")[-1]
+        if bare in _COMPOUND_OPERATOR_NAMES or bare == "state_ref":
+            continue
+        if bare in known_attr_keys:
+            continue
+        # A leaf might also expose loader-internal keys; tolerate
+        # underscores / hash prefixes (e.g. ``_text``, ``#text``).
+        if bare.startswith("_") or bare.startswith("#") or bare in ("$",):
+            continue
+        # Conservative reject: any unknown child key surfacing under a
+        # compound parent node is an unsupported operator.
+        raise UnsupportedChartError(
+            f"SOS-08-D wave-4-future-compound: cross-invariant "
+            f"{inv_id!r} uses unsupported boolean operator {bare!r}; "
+            f"supported: and, or, not, implies, state_ref. For SVA-"
+            f"specific operators (e.g. ##, [*], sampled-value functions), "
+            f"use <sos:raw_property> escape hatch."
+        )
+    return children
 
 
 _REGION_STATE_RE = re.compile(
@@ -1320,6 +1757,67 @@ def _build_region_state_indices(
     return out
 
 
+def _walk_compound_state_refs(
+    expr: "_CompoundExpr",
+) -> "list[tuple[str, str]]":
+    """Yield ``(region, state)`` for every ``state_ref`` leaf reachable
+    from ``expr`` in source-document order.
+
+    Wave-4-future-compound (2026-05-24 §15): used by validation +
+    state-constant emit to enumerate the encoding-table cells the
+    compound property references. Order = depth-first left-to-right
+    over the compound AST."""
+    out: list[tuple[str, str]] = []
+    _walk_compound_state_refs_into(expr, out)
+    return out
+
+
+def _walk_compound_state_refs_into(
+    expr: "_CompoundExpr",
+    out: "list[tuple[str, str]]",
+) -> None:
+    if expr.kind == "state_ref":
+        if expr.region is not None and expr.state is not None:
+            out.append((expr.region, expr.state))
+        return
+    for c in expr.children:
+        _walk_compound_state_refs_into(c, out)
+
+
+def _validate_compound_state_refs(
+    inv: "_CrossInvariant",
+    region_state_indices: dict[str, dict[str, int]],
+) -> None:
+    """Recursively validate every ``state_ref`` leaf in a compound
+    cross-invariant against the chart's region/state index map.
+
+    Wave-4-future-compound (2026-05-24 §15): mirrors
+    ``_validate_cross_invariant_state_refs`` for the wave-4 attribute
+    form but walks the ``_CompoundExpr`` AST. Surfaces unknown
+    region/state names as chart-vocabulary errors citing the
+    cross-invariant id per INV-S-HDL-D-5.
+    """
+    if inv.expr is None:
+        return
+    for region, state in _walk_compound_state_refs(inv.expr):
+        region_map = region_state_indices.get(region)
+        if region_map is None:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-compound: cross-invariant "
+                f"{inv.id!r} <sos:state_ref> references region "
+                f"{region!r} which the chart does not declare. Known "
+                f"regions: {sorted(region_state_indices.keys())}."
+            )
+        if state not in region_map:
+            raise UnsupportedChartError(
+                f"SOS-08-D wave-4-future-compound: cross-invariant "
+                f"{inv.id!r} <sos:state_ref> references state "
+                f"{state!r} in region {region!r} which the region "
+                f"does not declare. Known states in region "
+                f"{region!r}: {sorted(region_map.keys())}."
+            )
+
+
 def _validate_cross_invariant_state_refs(
     invariants: list["_CrossInvariant"],
     region_state_indices: dict[str, dict[str, int]],
@@ -1334,8 +1832,17 @@ def _validate_cross_invariant_state_refs(
     silently matched the region's first-document-order state. The
     validation below converts the silent miscompare into an actionable
     chart-vocabulary error citing INV-S-HDL-D-2 + the cross-invariant id.
+
+    Wave-4-future-compound (2026-05-24 §15): when the invariant carries
+    a compound ``expr`` AST, recurse over every ``state_ref`` leaf via
+    ``_validate_compound_state_refs``. The string-form invariants
+    continue through the legacy antecedent/consequent validation
+    below.
     """
     for inv in invariants:
+        if inv.expr is not None:
+            _validate_compound_state_refs(inv, region_state_indices)
+            continue
         for region, state, role in (
             (inv.antecedent_region, inv.antecedent_state, "antecedent"),
             (inv.consequent_region, inv.consequent_state, "consequent"),
@@ -1403,6 +1910,90 @@ def _cross_invariant_sva_module_name(chart_name: str) -> str:
     return f"{safe.lower()}_top_sva"
 
 
+def _emit_compound_sv_expr(expr: "_CompoundExpr") -> str:
+    """Render a ``_CompoundExpr`` AST into a SystemVerilog boolean
+    expression string.
+
+    Wave-4-future-compound (2026-05-24 §15) — SVA lowering rules:
+
+    * ``state_ref(region=r, state=s)`` → ``(current_state_<r> == ST_<s>)``
+      (mirrors the wave-4 leaf encoding; reuses the wave-4-future
+      state-encoding pass-through machinery via the shared
+      ``ST_<state>`` constants emitted by
+      ``_emit_cross_invariant_state_constants``).
+    * ``and(c1, c2, ...)`` → ``(c1 && c2 && ...)`` per IEEE 1800-2017
+      §11.4.7 (logical AND).
+    * ``or(c1, c2, ...)`` → ``(c1 || c2 || ...)`` per IEEE 1800-2017
+      §11.4.7 (logical OR).
+    * ``not(c)`` → ``!(c)`` per IEEE 1800-2017 §11.4.7 (logical NOT).
+    * ``implies(a, c)`` → ``(a |-> c)`` per IEEE 1800-2017 §16.12.2
+      (overlapping implication operator). The overlapping operator
+      matches the same-cycle semantics of wave-4 cross-invariants —
+      the non-overlapping ``|=>`` would shift the consequent by one
+      cycle and is intentionally not the v1 default.
+
+    Parenthesisation is conservative: every compound node wraps its
+    rendered body in parens so operator-precedence surprises in the
+    emitted SV cannot occur. Redundant parens improve reviewability
+    and are stripped by any sane SV elaborator.
+    """
+    if expr.kind == "state_ref":
+        obs = f"current_state_{_sanitize_sv_identifier(expr.region or '')}"
+        const = _state_constant_name(expr.state or "")
+        return f"({obs} == {const})"
+    if expr.kind == "and":
+        rendered = " && ".join(
+            _emit_compound_sv_expr(c) for c in expr.children
+        )
+        return f"({rendered})"
+    if expr.kind == "or":
+        rendered = " || ".join(
+            _emit_compound_sv_expr(c) for c in expr.children
+        )
+        return f"({rendered})"
+    if expr.kind == "not":
+        # ``_build_compound_node`` guarantees exactly 1 child for not.
+        return f"!({_emit_compound_sv_expr(expr.children[0])})"
+    if expr.kind == "implies":
+        # ``_build_compound_node`` guarantees exactly 2 children.
+        a_sv = _emit_compound_sv_expr(expr.children[0])
+        c_sv = _emit_compound_sv_expr(expr.children[1])
+        return f"({a_sv} |-> {c_sv})"
+    # Defensive — should be unreachable thanks to parser-side validation.
+    raise UnsupportedChartError(
+        f"SOS-08-D wave-4-future-compound: unrecognised AST kind "
+        f"{expr.kind!r} at emit time (parser should have rejected)."
+    )
+
+
+def _summarise_compound_expr(expr: "_CompoundExpr") -> str:
+    """Render a ``_CompoundExpr`` AST into a short chart-vocabulary
+    summary string (used in the SVA module's comment header + the
+    chart-vocabulary $fatal failure message per INV-S-HDL-D-5).
+
+    Uses chart-side names (``region.state``) rather than SV identifiers
+    (``current_state_X``) so the message renders in the language the
+    chart author wrote.
+    """
+    if expr.kind == "state_ref":
+        return f"{expr.region}.{expr.state}"
+    if expr.kind == "and":
+        return "(" + " AND ".join(
+            _summarise_compound_expr(c) for c in expr.children
+        ) + ")"
+    if expr.kind == "or":
+        return "(" + " OR ".join(
+            _summarise_compound_expr(c) for c in expr.children
+        ) + ")"
+    if expr.kind == "not":
+        return f"NOT {_summarise_compound_expr(expr.children[0])}"
+    if expr.kind == "implies":
+        a = _summarise_compound_expr(expr.children[0])
+        c = _summarise_compound_expr(expr.children[1])
+        return f"({a} IMPLIES {c})"
+    return f"<{expr.kind}>"
+
+
 def _emit_cross_region_sva_module(
     *,
     chart_name: str,
@@ -1443,11 +2034,20 @@ def _emit_cross_region_sva_module(
     # Collect the set of region observable ports the module needs to
     # expose. Iteration order is invariant-declaration order; dedup
     # preserves first-seen position so the emit is deterministic.
+    #
+    # Wave-4-future-compound (2026-05-24 §15): for compound invariants
+    # (``inv.expr is not None``), enumerate the regions referenced by
+    # any ``state_ref`` leaf of the compound AST. The legacy string
+    # form continues to pull from the antecedent/consequent fields.
     referenced_regions: list[str] = []
     seen: set[str] = set()
     for inv in invariants:
-        for r in (inv.antecedent_region, inv.consequent_region):
-            if r not in seen:
+        if inv.expr is not None:
+            inv_regions = [r for (r, _s) in _walk_compound_state_refs(inv.expr)]
+        else:
+            inv_regions = [inv.antecedent_region, inv.consequent_region]
+        for r in inv_regions:
+            if r and r not in seen:
                 referenced_regions.append(r)
                 seen.add(r)
 
@@ -1479,12 +2079,34 @@ def _emit_cross_region_sva_module(
 
     property_blocks: list[str] = []
     for inv in invariants:
+        prop_name = "p_" + _sanitize_sv_identifier(inv.id).lower()
+        asrt_name = _sanitize_sv_identifier(inv.id).upper()
+        if inv.expr is not None:
+            # Wave-4-future-compound (2026-05-24 §15): structured
+            # boolean composition over <sos:state_ref> leaves. The
+            # body is a same-cycle SVA expression (no temporal
+            # window). Implication uses |-> (overlapping) per
+            # IEEE 1800-2017 §16.12.2 — see ``_emit_compound_sv_expr``.
+            body_sv = _emit_compound_sv_expr(inv.expr)
+            chart_summary = _summarise_compound_expr(inv.expr)
+            fail_msg = (
+                f"[FAIL] chart `{chart_name}` cross-invariant `{inv.id}`: "
+                f"compound predicate `{chart_summary}` violated."
+            )
+            property_blocks.append(
+                f"    // {inv.id} (wave-4-future-compound): {chart_summary}\n"
+                f"    property {prop_name};\n"
+                f"        @(posedge clk) disable iff (rst)\n"
+                f"        {body_sv};\n"
+                f"    endproperty\n"
+                f"    {asrt_name}: assert property ({prop_name})\n"
+                f"        else $fatal(1, \"{fail_msg}\");"
+            )
+            continue
         a_obs = f"current_state_{_sanitize_sv_identifier(inv.antecedent_region)}"
         c_obs = f"current_state_{_sanitize_sv_identifier(inv.consequent_region)}"
         a_state_const = _state_constant_name(inv.antecedent_state)
         c_state_const = _state_constant_name(inv.consequent_state)
-        prop_name = "p_" + _sanitize_sv_identifier(inv.id).lower()
-        asrt_name = _sanitize_sv_identifier(inv.id).upper()
         within = inv.within
         # Chart-vocabulary failure message per INV-S-HDL-D-5 + INV-SOS-H.
         fail_msg = (
@@ -1669,10 +2291,19 @@ def _emit_cross_invariant_state_constants(
     seen: set[tuple[str, str]] = set()
     lines: list[str] = []
     for inv in invariants:
-        for region, state in (
-            (inv.antecedent_region, inv.antecedent_state),
-            (inv.consequent_region, inv.consequent_state),
-        ):
+        # Wave-4-future-compound (2026-05-24 §15): compound invariants
+        # walk their AST for state_ref leaves; legacy string invariants
+        # continue through the antecedent/consequent pair.
+        if inv.expr is not None:
+            inv_refs: list[tuple[str, str]] = _walk_compound_state_refs(inv.expr)
+        else:
+            inv_refs = [
+                (inv.antecedent_region, inv.antecedent_state),
+                (inv.consequent_region, inv.consequent_state),
+            ]
+        for region, state in inv_refs:
+            if not region or not state:
+                continue
             key = (region, state)
             if key in seen:
                 continue

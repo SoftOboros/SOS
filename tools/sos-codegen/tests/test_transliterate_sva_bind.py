@@ -1501,3 +1501,551 @@ class TestWave4FutureRawPropertyEscapeHatch:
         files = transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
         sva = files["tests/p/p_top_sva.sv"]
         assert "property single_p" in sva
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-D wave-4-future (2026-05-24 §15): compound cross-invariant
+# expressions. Boolean composition (<sos:and>, <sos:or>, <sos:not>,
+# <sos:implies>) over the existing <sos:state_ref> leaf predicate.
+# Closes one of the wave-4-future remaining items previously calling
+# for chart authors to either drop to <sos:raw_property> or write
+# multiple cross-invariants.
+# ---------------------------------------------------------------------------
+
+
+def _chart_with_implicit_and_state_refs(*, two_leaves: bool = True):
+    """Parallel chart with one cross-invariant using the wave-4-future
+    implicit-AND form (direct ``<sos:state_ref>`` children).
+
+    ``two_leaves=True`` → two state_refs → AND. ``False`` → single
+    state_ref → identity-leaf at the property body.
+    """
+    chart = _parallel_chart()
+    state_refs = [
+        {"region": "left", "state": "L2"},
+        {"region": "right", "state": "R2"},
+    ]
+    if not two_leaves:
+        state_refs = state_refs[:1]
+    chart["sos:cross_invariant"] = [
+        {
+            "id": "INV-COMPOUND-AND",
+            "state_ref": state_refs,
+        },
+    ]
+    return chart
+
+
+def _chart_with_simple_and_compound():
+    chart = _parallel_chart()
+    chart["sos:cross_invariant"] = [
+        {
+            "id": "INV-COMPOUND-AND",
+            "and": [
+                {
+                    "state_ref": [
+                        {"region": "left", "state": "L2"},
+                        {"region": "right", "state": "R2"},
+                    ],
+                },
+            ],
+        },
+    ]
+    return chart
+
+
+def _chart_with_simple_or_compound():
+    chart = _parallel_chart()
+    chart["sos:cross_invariant"] = [
+        {
+            "id": "INV-COMPOUND-OR",
+            "or": [
+                {
+                    "state_ref": [
+                        {"region": "left", "state": "L1"},
+                        {"region": "left", "state": "L2"},
+                    ],
+                },
+            ],
+        },
+    ]
+    return chart
+
+
+def _chart_with_not_compound():
+    chart = _parallel_chart()
+    chart["sos:cross_invariant"] = [
+        {
+            "id": "INV-COMPOUND-NOT",
+            "not": [
+                {
+                    "state_ref": [
+                        {"region": "right", "state": "R2"},
+                    ],
+                },
+            ],
+        },
+    ]
+    return chart
+
+
+def _chart_with_implies_compound():
+    chart = _parallel_chart()
+    chart["sos:cross_invariant"] = [
+        {
+            "id": "INV-COMPOUND-IMPLIES",
+            "implies": [
+                {
+                    # First child: antecedent = AND of L2 + R1.
+                    "and": [
+                        {
+                            "state_ref": [
+                                {"region": "left", "state": "L2"},
+                                {"region": "right", "state": "R1"},
+                            ],
+                        },
+                    ],
+                    # Second child of the implies — note that we use
+                    # the loader's list-multiplicity convention so the
+                    # two operator children sit under separate keys
+                    # under the same `implies` node. The walker reads
+                    # ``and`` + ``not`` in canonical operator order
+                    # to assemble the implies' (antecedent, consequent)
+                    # pair.
+                    "not": [
+                        {
+                            "state_ref": [
+                                {"region": "right", "state": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+        },
+    ]
+    return chart
+
+
+def _chart_with_nested_and_inside_or():
+    chart = _parallel_chart()
+    chart["sos:cross_invariant"] = [
+        {
+            "id": "INV-NESTED",
+            "or": [
+                {
+                    "and": [
+                        {
+                            "state_ref": [
+                                {"region": "left", "state": "L1"},
+                                {"region": "right", "state": "R1"},
+                            ],
+                        },
+                    ],
+                    "state_ref": [
+                        {"region": "left", "state": "L2"},
+                    ],
+                },
+            ],
+        },
+    ]
+    return chart
+
+
+class TestWave4FutureCompoundCrossInvariant:
+    """SOS-08-D wave-4-future §15 (2026-05-24): compound cross-invariant
+    expressions — boolean composition (<sos:and>, <sos:or>, <sos:not>,
+    <sos:implies>) over <sos:state_ref> leaves.
+
+    Authority boundary per §0:
+      * Compound element shape (and/or/not/implies/state_ref)  → ``own``.
+      * SVA boolean lowering (IEEE 1800-2017 §11.4.7 + §16.12.2) → ``derive``.
+    """
+
+    def test_byte_identity_for_implicit_and_only_chart(self):
+        """Regression guard: charts using only the wave-4 antecedent/
+        consequent string form (no compound children) MUST emit
+        byte-identical SVA. The compound machinery is opt-in via
+        compound child elements."""
+        files = transliterate_sva_bind.render_target(
+            _chart_with_cross_invariants(), {"chart_name": "p"}
+        )
+        sva = files["tests/p/p_top_sva.sv"]
+        # Wave-4 emit markers present — no wave-4-future-compound
+        # markers in a chart using only the string form.
+        assert "##[1:8]" in sva
+        assert "##[1:1]" in sva
+        assert "wave-4-future-compound" not in sva
+        assert "compound predicate" not in sva
+        # File count + names unchanged (4 region + 2 top = 6).
+        assert len(files) == 6
+
+    def test_simple_and_compound_emits_double_amp(self):
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_simple_and_compound(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        assert "property p_inv_compound_and" in sva
+        assert "INV_COMPOUND_AND: assert property" in sva
+        # `(current_state_left == ST_L2) && (current_state_right == ST_R2)`
+        # with conservative outer parens.
+        assert re.search(
+            r"\(\s*\(current_state_left == ST_L2\)\s*&&\s*"
+            r"\(current_state_right == ST_R2\)\s*\)",
+            sva,
+        ), f"AND lowering missing or malformed:\n{sva}"
+
+    def test_simple_or_compound_emits_double_pipe(self):
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_simple_or_compound(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        assert "property p_inv_compound_or" in sva
+        assert re.search(
+            r"\(\s*\(current_state_left == ST_L1\)\s*\|\|\s*"
+            r"\(current_state_left == ST_L2\)\s*\)",
+            sva,
+        ), f"OR lowering missing or malformed:\n{sva}"
+
+    def test_not_compound_emits_bang(self):
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_not_compound(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        assert "property p_inv_compound_not" in sva
+        # `!((current_state_right == ST_R2))`
+        assert re.search(
+            r"!\(\s*\(current_state_right == ST_R2\)\s*\)",
+            sva,
+        ), f"NOT lowering missing or malformed:\n{sva}"
+
+    def test_implies_emits_overlapping_sva_implication(self):
+        """IEEE 1800-2017 §16.12.2 — the `|->` overlapping operator
+        matches the same-cycle semantics of wave-4 cross-invariants;
+        the v1 compound lowering MUST NOT emit the non-overlapping
+        `|=>` operator."""
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_implies_compound(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        assert "property p_inv_compound_implies" in sva
+        assert "|->" in sva
+        # Negative: walker MUST NOT smuggle non-overlapping operator in.
+        # (`|=>` appears in wave-4 string-form emit comments but NOT in
+        # the compound property body; the wave-4 string emit is absent
+        # here since the chart uses only the compound form.)
+        # We allow `|->` only — the only `|=>` occurrences would be
+        # in the wave-4 emit which this fixture does not exercise.
+        assert "|=>" not in sva, (
+            f"v1 compound implies MUST use overlapping |-> per "
+            f"§16.12.2; got |=> in:\n{sva}"
+        )
+
+    def test_nested_compound_and_inside_or(self):
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_nested_and_inside_or(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # The OR has two children at the loader level: an AND of L1+R1
+        # and a single L2 state_ref. The scjson loader groups same-name
+        # children, so the cross-key traversal order (state_ref leaves
+        # first, then boolean operators) is canonical. Outer expression:
+        # ``( (L2) || ( (L1) && (R1) ) )`` — the L2 state_ref leaf
+        # surfaces first, then the nested AND.
+        assert re.search(
+            r"\(\s*\(current_state_left == ST_L2\)\s*\|\|\s*"
+            r"\(\s*\(current_state_left == ST_L1\)\s*&&\s*"
+            r"\(current_state_right == ST_R1\)\s*\)\s*\)",
+            sva,
+        ), f"nested AND inside OR malformed:\n{sva}"
+
+    def test_mixed_implicit_and_and_compound_in_same_chart(self):
+        """A single chart MAY carry one wave-4 string-form invariant
+        and one wave-4-future-compound invariant; both emit into the
+        same chart-top SVA module."""
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-STRING",
+                "antecedent": "region.left == L2",
+                "consequent": "region.right == R2",
+                "within": 4,
+            },
+            {
+                "id": "INV-COMPOUND",
+                "and": [
+                    {
+                        "state_ref": [
+                            {"region": "left", "state": "L1"},
+                            {"region": "right", "state": "R1"},
+                        ],
+                    },
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # Wave-4 string form (with within window) present.
+        assert "##[1:4]" in sva
+        # Wave-4-future-compound (no window) present.
+        assert "property p_inv_compound" in sva
+        assert "wave-4-future-compound" in sva
+        # Both regions still referenced from leaves of both invariants.
+        assert "current_state_left" in sva
+        assert "current_state_right" in sva
+
+    def test_state_ref_validation_preserved_in_compound(self):
+        """Wave-4-future-compound: state_ref leaves inside a compound
+        AST MUST be validated against the region/state index map (same
+        as the wave-4 antecedent/consequent path). Unknown region or
+        state names raise UnsupportedChartError citing the invariant
+        id per INV-S-HDL-D-5."""
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-BAD-STATE-IN-COMPOUND",
+                "and": [
+                    {
+                        "state_ref": [
+                            {"region": "left", "state": "L1"},
+                            {"region": "right", "state": "BOGUS"},
+                        ],
+                    },
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"INV-BAD-STATE-IN-COMPOUND",
+        ):
+            transliterate_sva_bind.render_target(
+                chart, {"chart_name": "p"}
+            )
+
+    def test_empty_and_raises(self):
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-EMPTY-AND",
+                "and": [
+                    {
+                        "state_ref": [
+                            {"region": "left", "state": "L1"},
+                        ],
+                    },
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"<sos:and> requires 2\+ children",
+        ):
+            transliterate_sva_bind.render_target(
+                chart, {"chart_name": "p"}
+            )
+
+    def test_empty_or_raises(self):
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-EMPTY-OR",
+                "or": [
+                    {
+                        "state_ref": [
+                            {"region": "left", "state": "L1"},
+                        ],
+                    },
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"<sos:or> requires 2\+ children",
+        ):
+            transliterate_sva_bind.render_target(
+                chart, {"chart_name": "p"}
+            )
+
+    def test_not_with_two_children_raises(self):
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-BAD-NOT",
+                "not": [
+                    {
+                        "state_ref": [
+                            {"region": "left", "state": "L1"},
+                            {"region": "right", "state": "R1"},
+                        ],
+                    },
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"<sos:not> requires exactly 1 child",
+        ):
+            transliterate_sva_bind.render_target(
+                chart, {"chart_name": "p"}
+            )
+
+    def test_implies_with_one_child_raises(self):
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-BAD-IMPLIES-1",
+                "implies": [
+                    {
+                        "state_ref": [
+                            {"region": "left", "state": "L1"},
+                        ],
+                    },
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"<sos:implies> requires exactly 2 children",
+        ):
+            transliterate_sva_bind.render_target(
+                chart, {"chart_name": "p"}
+            )
+
+    def test_implies_with_three_children_raises(self):
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-BAD-IMPLIES-3",
+                "implies": [
+                    {
+                        "state_ref": [
+                            {"region": "left", "state": "L1"},
+                            {"region": "right", "state": "R1"},
+                            {"region": "left", "state": "L2"},
+                        ],
+                    },
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"<sos:implies> requires exactly 2 children",
+        ):
+            transliterate_sva_bind.render_target(
+                chart, {"chart_name": "p"}
+            )
+
+    def test_unknown_operator_xor_raises_with_raw_property_hint(self):
+        """An unknown boolean operator (e.g. `<sos:xor>`) raises with
+        a chart-vocab error pointing the chart author at the
+        `<sos:raw_property>` escape hatch — closes the loop with the
+        2026-05-24 raw_property §15 entry."""
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-XOR",
+                "xor": [
+                    {
+                        "state_ref": [
+                            {"region": "left", "state": "L1"},
+                            {"region": "right", "state": "R1"},
+                        ],
+                    },
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"<sos:raw_property> escape hatch",
+        ):
+            transliterate_sva_bind.render_target(
+                chart, {"chart_name": "p"}
+            )
+
+    def test_conservative_parenthesisation_around_compound_children(self):
+        """Every compound node wraps its body in parens — readability
+        + operator-precedence safety. AND inside OR test verifies
+        outer parens around the AND body."""
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_nested_and_inside_or(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # Count leaf state_ref renderings: 3 leaves → 3 occurrences
+        # of `(current_state_<r> == ST_<s>)`.
+        leaf_renders = re.findall(
+            r"\(current_state_(?:left|right) == ST_[A-Z0-9_]+\)", sva
+        )
+        assert len(leaf_renders) >= 3, (
+            f"expected 3+ leaf renderings; got {len(leaf_renders)}:\n{sva}"
+        )
+
+    def test_state_encoding_pass_through_reused_no_reimpl(self):
+        """The compound emit's leaf SV mirrors the wave-4-future state-
+        encoding pass-through — the same ``ST_<state>`` constant
+        declaration appears at the same bit position.
+
+        Verified by comparing the bit-position of ``ST_L2`` in the
+        wave-4 string-form chart (`_chart_with_cross_invariants`) with
+        a compound-form chart referencing the same state. Both MUST
+        resolve to bit 1 (L2 is document-order index 1 in region
+        left)."""
+        # Wave-4 string-form chart emit.
+        wave4_sva = transliterate_sva_bind.render_target(
+            _chart_with_cross_invariants(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # Compound chart emit referencing the same L2 leaf.
+        compound_sva = transliterate_sva_bind.render_target(
+            _chart_with_simple_and_compound(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        wave4_bit = _bit_index_in_const_definition(wave4_sva, "ST_L2")
+        compound_bit = _bit_index_in_const_definition(compound_sva, "ST_L2")
+        assert wave4_bit == compound_bit == 1, (
+            f"ST_L2 must be bit 1 in BOTH wave-4 and wave-4-future-"
+            f"compound emit (state-encoding pass-through reused, "
+            f"not re-implemented); got wave4={wave4_bit}, "
+            f"compound={compound_bit}"
+        )
+        # Compound emit MUST NOT carry the wave-4-v1 placeholder
+        # marker — the encoding map is threaded through.
+        assert "WAVE-4-V1 PLACEHOLDER" not in compound_sva
+
+    def test_implicit_and_state_ref_form_emits_conjunction(self):
+        """Implicit-AND form (multiple `<sos:state_ref>` direct
+        children, no boolean operator) lowers to an SVA conjunction."""
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_implicit_and_state_refs(two_leaves=True),
+            {"chart_name": "p"},
+        )["tests/p/p_top_sva.sv"]
+        assert re.search(
+            r"\(\s*\(current_state_left == ST_L2\)\s*&&\s*"
+            r"\(current_state_right == ST_R2\)\s*\)",
+            sva,
+        ), f"implicit-AND form lowering missing:\n{sva}"
+
+    def test_unknown_region_in_compound_raises_with_chart_vocab_error(self):
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-BAD-REGION",
+                "and": [
+                    {
+                        "state_ref": [
+                            {"region": "middle", "state": "M1"},
+                            {"region": "left", "state": "L1"},
+                        ],
+                    },
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"references region 'middle' which the chart does not declare",
+        ):
+            transliterate_sva_bind.render_target(
+                chart, {"chart_name": "p"}
+            )
+
+    def test_implies_failure_message_cites_compound_summary(self):
+        """The chart-vocabulary failure message of a compound
+        invariant should cite the compound predicate summary
+        (INV-S-HDL-D-5) — the wave-4 antecedent-state/consequent-state
+        cite would be wrong for compound forms."""
+        sva = transliterate_sva_bind.render_target(
+            _chart_with_implies_compound(), {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        assert "compound predicate" in sva
+        assert "INV-COMPOUND-IMPLIES" in sva

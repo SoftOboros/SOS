@@ -906,3 +906,73 @@ All errors raise `UnsupportedChartError` with chart-vocabulary text naming the p
 **Cited invariants / PCDNs**: INV-S-HDL-D-4 (same SVA artifact feeds cocotb + formal — raw bodies pass through unchanged to both consumers); INV-S-HDL-D-5 (chart-vocabulary failure messages — extended to validation diagnostics for the raw-property collision + clock_region errors); §8 standards-integration matrix relationships `own` (element shape) + `derive` (SVA body — IEEE 1800-2017 §16).
 
 Status: 🟢 **wave-4-future complete** for `<sos:raw_property>` escape hatch. Compound antecedent/consequent expressions, multi-clock cross-region sampling, and shared-datamodel cross-region transition driving remain on the wave-4-future track.
+
+### 2026-05-24 — Impl wave-4-future: compound cross-invariant expressions (Ira)
+
+Closes the **compound cross-invariant expressions** carry-forward from the 2026-05-24 wave-4-future ratification entry. Today's `<sos:cross_invariant>` form supports either a wave-4 antecedent/consequent string pair OR an implicit AND of `<sos:state_ref>` direct children — a single conjunction of state-equality predicates. There was no structured way to express guarded mutual exclusion (`A AND B IMPLIES NOT C`), disjunction over the same region (`r0 == s0 OR r0 == s1`), or negation of an individual predicate. Chart authors needing any of these dropped to `<sos:raw_property>`, losing the structured analysis surface (named state-binding, automatic clock-region wiring, machine-readable invariant catalogue). This entry lands the **compound-expression** form alongside the existing implicit-AND + string-form paths so chart authors can express boolean composition without leaving the structured grammar.
+
+**Declaration form (frozen 2026-05-24 §15)** — supported element set:
+
+```xml
+<sos:cross_invariant id="INV-COMPOUND-1">
+  <sos:implies>
+    <sos:and>
+      <sos:state_ref region="left"  state="L2"/>
+      <sos:state_ref region="right" state="R1"/>
+    </sos:and>
+    <sos:not>
+      <sos:state_ref region="right" state="R2"/>
+    </sos:not>
+  </sos:implies>
+</sos:cross_invariant>
+```
+
+The walker detects the compound path by structural inspection: if the cross-invariant carries any `<sos:and>` / `<sos:or>` / `<sos:not>` / `<sos:implies>` / `<sos:state_ref>` child element, the compound path applies; otherwise the wave-4 antecedent/consequent string path applies. The detection is monotonic — a chart MAY mix string-form invariants and compound-form invariants in the same chart, and both forms emit into the same `<chart>_top_sva.sv` bind module.
+
+**Normative operator set** (registration policy = Standards Action per the §0 frozen-enum discipline):
+
+- `<sos:and>` MUST carry 2+ children (each a compound subexpression or `<sos:state_ref>` leaf); lowers to `(c1 && c2 && ...)`. Empty `<sos:and/>` MUST raise `UnsupportedChartError`.
+- `<sos:or>` MUST carry 2+ children; lowers to `(c1 || c2 || ...)`. Empty `<sos:or/>` MUST raise.
+- `<sos:not>` MUST carry exactly 1 child; lowers to `!(c)`. Multiple children MUST raise.
+- `<sos:implies>` MUST carry exactly 2 children — antecedent (first) + consequent (second); lowers to `(antecedent |-> consequent)` per IEEE 1800-2017 §16.12.2 overlapping-implication operator. The overlapping operator (`|->`) matches the same-cycle semantics of wave-4 cross-invariants; `|=>` (non-overlapping) is intentionally NOT supported at v1 — a §15 amendment is required to add it.
+- `<sos:state_ref region="..." state="..."/>` is the LEAF predicate; unchanged from the wave-4 implicit-AND form. Reuses the wave-4-future state-encoding pass-through machinery (`_build_region_state_indices` + per-region one-hot bit indices) for the emitted `(current_state_<region> == ST_<state>)` comparison — DO NOT re-implement.
+
+Operators outside this list MUST raise `UnsupportedChartError` with the canonical chart-vocab message: `unsupported boolean operator '<name>'; supported: and, or, not, implies, state_ref. For SVA-specific operators, use <sos:raw_property> escape hatch.` The escape-hatch citation closes the loop with the 2026-05-24 `<sos:raw_property>` §15 entry.
+
+**Normative rejected forms** (rejected as outside compound-expression v1; chart author MUST use `<sos:raw_property>` if needed):
+
+- SVA timing operators — `##N` (next-cycle), `##[m:n]` (bounded delay), `[*m]` (consecutive repetition), `[=m]` (non-consecutive repetition), `[->m]` (goto repetition), and other §16.9 sequence operators.
+- Sampled-value functions — `$rose`, `$fell`, `$past(...)`, `$stable`, `$changed`, `$sampled` (IEEE 1800-2017 §16.9.3).
+- Comparison-on-datamodel — expressions like `counter > 5` or `data.<X> == <K>`. The compound-expression v1 surface restricts leaves to **state-equality predicates**; datamodel-comparison support is a separate wave-3-e datamodel-comparison concern.
+- Arbitrary expression text — raw SV strings inside `<sos:and>` / `<sos:or>` / `<sos:not>` / `<sos:implies>` bodies. Compound subexpressions are themselves structured operator elements; embedded raw text MUST go through `<sos:raw_property>`.
+
+**Lowered SV** — compound expression render is single-cycle: `assert property(@(posedge clk) disable iff (rst) <compound_body>) else $fatal(1, "[FAIL] chart 'X' cross-invariant 'ID': compound predicate `<summary>` violated.")`. Unlike wave-4 cross-invariants (which use `(antecedent) |-> ##[1:within] (consequent)`), the compound emit has NO implicit temporal window — the `<sos:implies>` operator inside the compound carries the implication semantics directly via `|->`. Chart authors who want a multi-cycle window in a compound expression today MUST author either two structured invariants (one for the antecedent state-equality and one for the consequent state-equality wrapped in the wave-4 string form with `within`) or drop to `<sos:raw_property>` for the multi-cycle case.
+
+**Authority boundary declaration** (per §0 standards-integration discipline):
+
+- **Compound element set** (`<sos:and>`, `<sos:or>`, `<sos:not>`, `<sos:implies>`) — relationship `own`. SOS-08-D owns the element names, the arity constraints (1, 2, 2+), the precedence rule that compound children supersede flat antecedent/consequent attrs, the parenthesisation convention (conservative — every compound node wraps its body), and the chart-vocab error messages. Mutating these requires a §15 amendment to this doc.
+- **`<sos:state_ref>` leaf** — relationship `mirror`. SOS-08-D references the wave-4 `<sos:state_ref>` chart-vocab semantics (`region` + `state` attributes; chart-vocab validation against the per-region state index map) without modification. Wave-4's `<sos:state_ref>` definition is canonical; the compound path consumes it verbatim.
+- **SVA boolean lowering** (subset of IEEE 1800-2017 §11.4.7 logical operators `&&`/`||`/`!` + §16.12.2 `|->` overlapping implication) — relationship `derive`. IEEE 1800-2017 is the upstream authority for the boolean grammar; the walker selects an explicit subset (no `|=>`, no XOR, no `<->`, no `===`/`!==`/`==?`/`!=?`) and emits SV text against that subset. Adding operators to the lowered subset requires a §15 amendment.
+
+**Wave-4-future remaining** after this entry (the original wave-4-future carry-forward list, minus the closed `raw_property` + compound-expression items):
+
+- **Multi-clock cross-region sampling** (sample antecedent on its own clock and consequent on its own clock with a synchronisation handoff between them). Wave-4 emit samples both observables on the chart-top reference clock per INV-S-HDL-3 (regions are synced through `sos_synchronizer` before exposure). Cross-clock sampling primitives are a future amendment.
+- **Shared-datamodel cross-region driving** — extending cross_invariant `<sos:state_ref>` grammar to reference datamodel signals (`<sos:data_ref name="counter" value="5"/>` or similar) in addition to region states. Useful for invariants like "when shared counter reaches K, region.Y must be in STATE_Z within W cycles". Currently out of scope at v1; chart authors needing this drop to `<sos:raw_property>`.
+
+**Test count**: net +19 in `TestWave4FutureCompoundCrossInvariant` (one class in `tools/sos-codegen/tests/test_transliterate_sva_bind.py`):
+
+- Byte-identity regression: `test_byte_identity_for_implicit_and_only_chart` (charts using only wave-4 form emit unchanged).
+- Operator-shape lowering: `test_simple_and_compound_emits_double_amp`, `test_simple_or_compound_emits_double_pipe`, `test_not_compound_emits_bang`, `test_implies_emits_overlapping_sva_implication`, `test_nested_compound_and_inside_or`, `test_implicit_and_state_ref_form_emits_conjunction`.
+- Mixed-form: `test_mixed_implicit_and_and_compound_in_same_chart`.
+- Validation (chart vocab): `test_state_ref_validation_preserved_in_compound`, `test_unknown_region_in_compound_raises_with_chart_vocab_error`.
+- Validation (arity): `test_empty_and_raises`, `test_empty_or_raises`, `test_not_with_two_children_raises`, `test_implies_with_one_child_raises`, `test_implies_with_three_children_raises`.
+- Validation (unknown operator → raw_property hint): `test_unknown_operator_xor_raises_with_raw_property_hint`.
+- Parenthesisation: `test_conservative_parenthesisation_around_compound_children`.
+- State-encoding reuse: `test_state_encoding_pass_through_reused_no_reimpl` (no re-implementation of wave-4-future state-encoding pass-through).
+- Chart-vocab failure messages: `test_implies_failure_message_cites_compound_summary`.
+
+**Test suite**: 835/835 passing (816 prior + 19 new wave-4-future-compound). All existing wave-4 + wave-4-future state-encoding + raw_property tests unchanged — the compound path is opt-in via `<sos:and>` / `<sos:or>` / `<sos:not>` / `<sos:implies>` / `<sos:state_ref>` child elements; charts using only the wave-4 string form continue through the existing antecedent/consequent emit.
+
+**Cited invariants / PCDNs**: INV-S-HDL-D-2 (one-hot, reset-initial encoding — the compound emit's `<sos:state_ref>` leaves reuse the wave-4-future state-encoding pass-through, so encoding parity with SOS-08-C holds by-construction); INV-S-HDL-D-4 (same SVA artifact feeds cocotb + formal — compound lowering is plain SV, no simulator-specific extensions); INV-S-HDL-D-5 (chart-vocabulary failure messages — extended to the compound-predicate summary cite); §8 standards-integration matrix relationships `own` (compound operator set), `mirror` (`<sos:state_ref>` leaf), `derive` (SVA boolean lowering — IEEE 1800-2017 §11.4.7 + §16.12.2 subset).
+
+Status: 🟢 **wave-4-future complete** for compound cross-invariant expressions. Multi-clock cross-region sampling and shared-datamodel cross-region driving remain on the wave-4-future track.
