@@ -1052,3 +1052,39 @@ With this slice landed, the wave-3-future carry-forward set is **complete**. The
 **Cited PCDNs / invariants**: PCDN-SOS-08-E-001 / -002 / -004 unchanged; INV-S-HDL-E-1..6 preserved; new chart-vocab elements `<sos:clock_domains>` / `<sos:clock>` (mirrored from SOS-08-D wave-4) + `<sos:cdc_boundary>` (own); new SV contracts `clock_domain_of_step()` + ``string clock_domain`` hook parameter + `sos_<chart>_cdc_<from>_<to>_sync.svh` naming convention (own).
 
 Status: 🟢 **wave-3-future closed**. Multi-clock testbench wiring complete; LAST wave-3-future carry-forward landed. SOS-08-E v1 emission contract fully delivered.
+
+### 2026-05-25 — Post-wave-2 follow-up: `$display`→`$error` verb-change normative pin (Ira)
+
+This entry pins normatively the system-task verb shift introduced by wave-2 commit `fa06f7a` ("SOS08E3l: wave-3-future-remaining layered class hierarchy") in the checker's `on_invariant_fail` default body. The shift was observable in the diff but was not previously named in normative terms — downstream tooling (CI log parsers, scoreboards, regression dashboards) may have grepped for `$display` literally and silently broken on the new emission. This amendment makes the verb-change observable rather than buried.
+
+**Issue.** Wave-2 commit `fa06f7a` (SOS08E3l — layered class hierarchy refactor) shifted the SystemVerilog system-task verb in the walker-emitted `_checker_base.svh` default `on_invariant_fail` body from `$display` to `$error`. The chart-vocabulary format strings carrying state names, transition IDs, and invariant IDs are **byte-identical** across the verb-change — the §15 entry on `fa06f7a` notes the shift as "more semantically correct" but does not pin it as a normative requirement. This follow-up names it normatively.
+
+**Normative pin (MUST).** The walker-emitted `_checker_base.svh` MUST use `$error` (not `$display`) for invariant-failure dispatch in the default `on_invariant_fail` body. Downstream tooling that consumes SystemVerilog simulator output from this codegen path — CI log parsers, scoreboards, regression dashboards — MUST grep for `$error` (or for the simulator-emitted severity tag `%E` / `Error:`) when consuming the canonical chart-vocabulary failure messages from the walker-emitted default. Charts that override `on_invariant_fail` in a user-side subclass MAY use any system task (`$display`, `$warning`, `$info`, `$error`, `$fatal`) consistent with their project's reporting discipline — the MUST applies to the walker-emitted default body only. The format string passed through the hook carries the same chart-vocab content (state names, transition IDs, invariant IDs) byte-identical across the verb-change.
+
+**Rationale.** Per IEEE 1800-2017 §20.10.3, `$error` flags simulation severity to the simulator — vendor tools surface it as a tagged error log line, increment the simulator's error counter, and (per vendor configuration) can elevate to a non-zero exit code. `$display` is documented as an informational log task with no severity semantics. Treating SOS-08-E invariant violations as informational was incorrect: an invariant failure is a chart-contract violation, and the simulator's severity machinery is the correct conveyor. The wave-3 monolithic emit used `$display` because the dispatch was inline (no override hook); the wave-3-future layered hierarchy externalised the dispatch through `on_invariant_fail` and took the opportunity to escalate severity at the same time. This entry pins that decision.
+
+**Backwards-compatibility.** Any existing tooling parsing `$display` from prior pre-`fa06f7a` walker output (i.e. the wave-3 monolithic-emit era) MUST be updated to match the post-`fa06f7a` emission. The migration is:
+
+- **Old pattern (pre-`fa06f7a`):** `grep -E '^\$display.*\[FAIL\] vector V[0-9]+: chart' simulator.log` or simulator-tagged equivalents.
+- **New pattern (post-`fa06f7a`):** `grep -E '^(.*Error.*)?.*\[FAIL\] vector V[0-9]+: chart' simulator.log` — or, vendor-specific, match on `%E` / `Error:` severity tags emitted by the simulator on `$error` invocation.
+
+The format-string payload — the `[FAIL] vector V%0d: chart \`<chart>\` expected state=...` chart-vocab content — is unchanged. Only the dispatch verb is. Audit your CI log parsers for `\$display` patterns on SOS-08-E simulator output and migrate to `\$error` (or the corresponding severity-tag match).
+
+**Override-time exception.** This MUST applies only to the walker's default `on_invariant_fail` body inside `_checker_base.svh`. Customer-side subclasses extending `sos_<chart>_checker_base` MAY use any system task in their hook override consistent with their project's reporting discipline (subject to INV-S-HDL-E-4 — chart-vocabulary preservation; subject to recommendation to call `super.on_invariant_fail(invariant_id, message)` after any custom logging so the chart-vocab severity-tagged emission survives).
+
+**Tracking.** Resolving commit: `fa06f7a` ("SOS08E3l: wave-3-future-remaining layered class hierarchy"). Original §15 entry: 2026-05-24 "Impl wave-3-future-remaining: layered class hierarchy" (above) — see the bullet on `on_invariant_fail` default hook for the byte-level diff. The original entry described the verb change as "more semantically correct"; this follow-up pins it as a normative MUST.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-E-1** (no constrained-random) — unchanged; system-task selection has no constrained-random surface.
+- **INV-S-HDL-E-2** (no UVM) — unchanged; `$error` is a SystemVerilog built-in (not a UVM construct).
+- **INV-S-HDL-E-3** (no inline `assert property` outside bind files) — unchanged.
+- **INV-S-HDL-E-4** (chart-vocabulary failure messages) — preserved + strengthened. Format-string content is byte-identical across the verb-change; severity tagging now matches the chart-contract-violation semantics.
+- **INV-S-HDL-E-5** (per-simulator build wrapper) — unchanged; vendor simulators uniformly recognise `$error` per IEEE 1800-2017 §20.10.3.
+- **INV-S-HDL-E-6** (Verilator-subset compliance) — preserved; `$error` is in the Verilator documented subset.
+
+**Tests added**: existing test `test_chart_vocab_message_byte_identical_to_wave3_baseline` (added in the wave-3-future-remaining layered class hierarchy entry above) already pins the format-string byte-equivalence. This §15 amendment is doc-only — the test surface verifying the verb-change is the wave-2 conformance audit's [`tests/test_sos_08_wave2_conformance_and_e_verb_change.py`](../../tools/sos-codegen/tests/test_sos_08_wave2_conformance_and_e_verb_change.py), which asserts this §15 entry exists with the required normative content.
+
+**Cited PCDNs / invariants**: PCDN-SOS-08-E-001 (layered hierarchy resolved by `fa06f7a` — verb-change is a follow-up clarification on top of that resolution); INV-S-HDL-E-4 (chart-vocab failure messages — strengthened by severity tagging).
+
+Status: 🟢 **`$display`→`$error` verb-change normatively pinned**. Downstream tooling has a clear migration target; the chart-contract-violation semantics now match the simulator's severity machinery per IEEE 1800-2017 §20.10.3.
