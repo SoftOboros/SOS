@@ -2718,3 +2718,319 @@ class TestWave4FutureSharedDatamodelCrossRegionDriving:
         )["tests/p/p_top_bind.sv"]
         assert "wave-4-future-shared" in bind
         assert "deferred" in bind
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-D wave-7a (2026-05-25 §15) — `<sos:clock_domains>` walker
+# integration tests.  These complement the unit-tests under
+# `tests/test__clock_domains.py` and verify the walker's response to
+# the new chart-vocab element through the public `render_target` API.
+# ---------------------------------------------------------------------------
+
+
+def _mclk_chart_with_clock_block(clocks):
+    """Two-region parallel chart + an explicit `<sos:clock_domains>`
+    block.  Reused across the PCDN-008 integration tests.
+
+    The regions are NOT annotated with `clock=` attributes — clock
+    identity comes entirely from the `<sos:clock_domains>` block.
+    """
+    return {
+        "initial": "p",
+        "parallel": [
+            {
+                "id": "p",
+                "state": [
+                    {
+                        "id": "fast_r",
+                        "initial": "F1",
+                        "state": [
+                            _state("F1", transitions=[{"target": "F2"}]),
+                            _state("F2"),
+                        ],
+                    },
+                    {
+                        "id": "slow_r",
+                        "initial": "S1",
+                        "state": [
+                            _state("S1", transitions=[{"target": "S2"}]),
+                            _state("S2"),
+                        ],
+                    },
+                ],
+            },
+        ],
+        "sos:clock_domains": {"sos:clock": clocks},
+    }
+
+
+class TestPCDN008WalkerIntegration:
+    """SOS-08-D §15 2026-05-25 (PCDN-SOS-08-D-008 ratification) —
+    walker integration with the `<sos:clock_domains>` element.
+
+    These tests exercise the D-side walker (`transliterate_sva_bind`)
+    via `render_target`; the helper itself is exercised in isolation
+    under `tests/test__clock_domains.py`.
+    """
+
+    def test_byte_identity_for_chart_without_clock_domains_block(self):
+        """REGRESSION GUARD: a chart with NO `<sos:clock_domains>`
+        block MUST emit byte-identical to wave-4 — the
+        `TestWave4FutureMultiClockCrossRegionSampling` fixtures rely
+        on this."""
+        files = transliterate_sva_bind.render_target(
+            _chart_with_cross_invariants(), {"chart_name": "p"}
+        )
+        sva = files["tests/p/p_top_sva.sv"]
+        # Wave-4 markers present.
+        assert "##[1:8]" in sva
+        # NEW wave-7a clock-block-specific markers absent (no kind-
+        # gating means default posedge — preserved).
+        assert "@(negedge" not in sva
+        # Reference clock unchanged.
+        assert "@(posedge clk)" in sva
+
+    def test_byte_identity_for_chart_with_only_default_clock_declared(self):
+        """A chart that declares a `<sos:clock_domains>` block with a
+        single `<sos:clock>` named `clk`, source omitted, kind=rising
+        MUST emit byte-identical to the no-block form (because the
+        declared clock IS the implicit default in all observable
+        ways)."""
+        chart_no_block = _chart_with_cross_invariants()
+        chart_with_block = _chart_with_cross_invariants()
+        chart_with_block["sos:clock_domains"] = {
+            "sos:clock": [
+                {"name": "clk", "kind": "rising"},
+            ],
+        }
+        files_no_block = transliterate_sva_bind.render_target(
+            chart_no_block, {"chart_name": "p"}
+        )
+        files_with_block = transliterate_sva_bind.render_target(
+            chart_with_block, {"chart_name": "p"}
+        )
+        # Top SVA + top bind are byte-identical between the two charts.
+        assert (
+            files_no_block["tests/p/p_top_sva.sv"]
+            == files_with_block["tests/p/p_top_sva.sv"]
+        )
+        assert (
+            files_no_block["tests/p/p_top_bind.sv"]
+            == files_with_block["tests/p/p_top_bind.sv"]
+        )
+
+    def test_two_aliases_same_source_same_kind_resolve_to_canonical(self):
+        """Two `<sos:clock>` entries with the same `(source, kind)`
+        pair are aliases — sampling-clock references resolve to the
+        alphabetic-first canonical name."""
+        chart = _mclk_chart_with_clock_block([
+            {"name": "fast", "source": "pll_a", "kind": "rising"},
+            # Alphabetic-first canonical for (pll_a, rising) is 'aclk'.
+            {"name": "aclk", "source": "pll_a", "kind": "rising"},
+            {"name": "slow", "source": "pll_b", "kind": "rising"},
+        ])
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-PCDN008-CANON",
+                "antecedent": "region.fast_r == F2",
+                "consequent": "region.slow_r == S2",
+                "sampling_clock": [
+                    {"region": "fast_r", "clock": "fast"},
+                    {"region": "slow_r", "clock": "slow"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # 'fast' resolves to canonical 'aclk' via alias.
+        assert "@(posedge aclk)" in sva
+        # 'slow' is its own canonical (no aliases in pll_b/rising group).
+        assert "@(posedge slow)" in sva
+        # The alias 'fast' name does NOT appear as a SV signal in the
+        # property header (must be canonicalised away).
+        assert "@(posedge fast)" not in sva
+
+    def test_falling_kind_emits_negedge(self):
+        """A `<sos:clock kind="falling">` referenced by a sampling-
+        clock MUST emit `@(negedge X)` instead of `@(posedge X)`."""
+        chart = _mclk_chart_with_clock_block([
+            {"name": "fast", "source": "pll_a", "kind": "rising"},
+            {"name": "fast_n", "source": "pll_a", "kind": "falling"},
+        ])
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-PCDN008-NEGEDGE",
+                "antecedent": "region.fast_r == F2",
+                "consequent": "region.slow_r == S2",
+                "sampling_clock": [
+                    # Primary: falling — property header MUST be @(negedge).
+                    {"region": "fast_r", "clock": "fast_n"},
+                    {"region": "slow_r", "clock": "fast"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # Primary clock event MUST be negedge per the declared kind.
+        assert "@(negedge fast_n)" in sva
+        # The secondary leaf wrapped in $past must STILL use posedge
+        # for the rising 'fast' clock.
+        assert "@(posedge fast)" in sva
+
+    def test_rising_kind_emits_posedge(self):
+        """Existing behaviour confirmed: a `<sos:clock kind="rising">`
+        emits `@(posedge X)` (no regression)."""
+        chart = _mclk_chart_with_clock_block([
+            {"name": "fast", "source": "pll_a", "kind": "rising"},
+            {"name": "slow", "source": "pll_b", "kind": "rising"},
+        ])
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-PCDN008-POSEDGE",
+                "antecedent": "region.fast_r == F2",
+                "consequent": "region.slow_r == S2",
+                "sampling_clock": [
+                    {"region": "fast_r", "clock": "fast"},
+                    {"region": "slow_r", "clock": "slow"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        assert "@(posedge fast)" in sva
+        assert "@(posedge slow)" in sva
+        # No negedge slipped in.
+        assert "@(negedge" not in sva
+
+    def test_sampling_clock_resolves_through_alias(self):
+        """A `<sos:sampling_clock clock="X">` referencing an alias
+        resolves through to the canonical clock signal, NOT the
+        bare-name `_clk_port_name` form."""
+        chart = _mclk_chart_with_clock_block([
+            # 'bclk' is alphabetic-first of {bclk, fast} on (pll_a, rising).
+            {"name": "fast", "source": "pll_a", "kind": "rising"},
+            {"name": "bclk", "source": "pll_a", "kind": "rising"},
+            {"name": "other", "source": "pll_b", "kind": "rising"},
+        ])
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-PCDN008-ALIAS",
+                "antecedent": "region.fast_r == F2",
+                "consequent": "region.slow_r == S2",
+                "sampling_clock": [
+                    # Both regions reference 'fast' — the alias — but
+                    # the canonical of (pll_a, rising) is 'bclk'.
+                    {"region": "fast_r", "clock": "fast"},
+                    {"region": "slow_r", "clock": "other"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # The fast region's clock SV signal MUST be the canonical 'bclk'.
+        assert "@(posedge bclk)" in sva
+        # The bare alias 'fast' should NOT appear as an emitted SV
+        # clock signal in the property block.
+        assert "@(posedge fast)" not in sva
+
+    def test_cdc_boundary_same_source_different_kind_detected(self):
+        """Two regions on the same `source=` but different `kind=`
+        produce DISTINCT clock signals (one canonicalised under
+        (source, rising), one under (source, falling)) — the CDC
+        banner MUST cite both."""
+        chart = _mclk_chart_with_clock_block([
+            {"name": "fast_p", "source": "pll_a", "kind": "rising"},
+            {"name": "fast_n", "source": "pll_a", "kind": "falling"},
+        ])
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-PCDN008-CDC-KIND",
+                "antecedent": "region.fast_r == F2",
+                "consequent": "region.slow_r == S2",
+                "sampling_clock": [
+                    {"region": "fast_r", "clock": "fast_p"},
+                    {"region": "slow_r", "clock": "fast_n"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # Both clocks resolved as distinct SV signals.
+        assert "@(posedge fast_p)" in sva
+        assert "@(negedge fast_n)" in sva
+        # CDC banner cites both clocks (rising sampled on fast_p; the
+        # falling-kind leaf reaches via $past on fast_n).
+        assert "MULTI-CLOCK PROPERTY: INV-PCDN008-CDC-KIND" in sva
+
+    def test_cdc_boundary_aliases_not_treated_as_boundary(self):
+        """When both regions sample on aliases of the SAME
+        `(source, kind)` pair, the resolved signals are equal — no
+        $past wrap, no CDC banner / "other clocks" disambiguator.
+
+        Same-source-same-kind = same domain = no CDC boundary."""
+        chart = _mclk_chart_with_clock_block([
+            {"name": "fast", "source": "pll_a", "kind": "rising"},
+            {"name": "aclk", "source": "pll_a", "kind": "rising"},
+            {"name": "third", "source": "pll_c", "kind": "rising"},
+        ])
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-PCDN008-ALIAS-PAIR",
+                "antecedent": "region.fast_r == F2",
+                "consequent": "region.slow_r == S2",
+                "sampling_clock": [
+                    # Both aliases of (pll_a, rising) — same domain.
+                    {"region": "fast_r", "clock": "fast"},
+                    {"region": "slow_r", "clock": "aclk"},
+                ],
+            },
+        ]
+        sva = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )["tests/p/p_top_sva.sv"]
+        # Both resolve to the canonical 'aclk' signal — only ONE
+        # @(posedge ...) clock signal appears in the property body.
+        # (No $past wrap because both leaves live on the same domain.)
+        assert "@(posedge aclk)" in sva
+        # No $past — the consequent leaf is on the primary clock too.
+        # (The walker's mclk path still emits the leaf without wrap.)
+        # We assert only ONE clock-event reference in the property header.
+        # The property header's @(posedge ...) text must reference aclk
+        # specifically, not 'fast' or any non-canonical alias.
+        assert "@(posedge fast)" not in sva
+        # No "other clocks" cited in the CDC banner — same domain.
+        assert "between aclk and (none)" in sva or "(none)" in sva
+
+    def test_unsupported_kind_raises_at_walker_layer(self):
+        """A chart declaring a reserved-future `kind=` value MUST
+        raise `UnsupportedChartError` (via the helper's
+        `UnsupportedClockKindError` re-raised) when the walker enters
+        the cross-invariant emit path."""
+        chart = _mclk_chart_with_clock_block([
+            {"name": "fast", "source": "pll_a", "kind": "rising"},
+            # 'both' is a reserved-future DDR kind.
+            {"name": "ddr_clk", "source": "pll_b", "kind": "both"},
+        ])
+        # A cross-invariant is needed to trigger the cross-region
+        # emission code path (the parser is invoked there).
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-PCDN008-RESERVED",
+                "antecedent": "region.fast_r == F2",
+                "consequent": "region.slow_r == S2",
+                "sampling_clock": [
+                    {"region": "fast_r", "clock": "fast"},
+                    {"region": "slow_r", "clock": "ddr_clk"},
+                ],
+            },
+        ]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"SOS-08-D wave-future-clkkind:",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})

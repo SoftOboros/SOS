@@ -97,6 +97,22 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+# SOS-08-D wave-7a (2026-05-25 §15) — `<sos:clock_domains>` parser +
+# alias-resolution helper. Shared with the E-side walker
+# (`transliterate_hdl_sv_tb.py`, wave-7b). When the chart omits the
+# `<sos:clock_domains>` block, the helper returns the implicit default
+# `{"clk": ClockDecl(name="clk", source="chart_root", kind="rising")}`
+# map — pre-wave-7a charts emit byte-identical under this contract.
+from _clock_domains import (  # type: ignore
+    ClockDecl,
+    KIND_FALLING,
+    KIND_RISING,
+    UnsupportedClockKindError,
+    canonical_name_for_pair,
+    parse_clock_domains,
+    resolve_alias,
+)
+
 # ----------------------------------------------------------------------------
 # Optional hdl_common helpers — used for guard expression lowering when on
 # disk; degrade to a minimal inline rewrite if the sibling helper hasn't
@@ -2111,25 +2127,103 @@ def _summarise_compound_expr(expr: "_CompoundExpr") -> str:
     return f"<{expr.kind}>"
 
 
+def _chart_has_clock_domains_block(chart_ir: dict[str, Any] | None) -> bool:
+    """SOS-08-D wave-7a (2026-05-25 §15) — distinguish "chart declared
+    a wave-7a-shape ``<sos:clock_domains>`` block" from "implicit
+    default applied / sister walker's pre-7a block".
+
+    The helper's ``parse_clock_domains`` always returns at least one
+    entry (the implicit default), so its non-empty return is not a
+    reliable signal that the chart-author opted into the new model.
+    This predicate keys directly on the raw chart-IR shape AND probes
+    parseability: when the chart omits the block entirely, or carries
+    a block that fails the wave-7a parser (e.g. the sister
+    `transliterate_hdl_sv_tb` walker's pre-7a fixture shape that
+    omits ``kind=``), the walker takes the wave-4 code paths verbatim
+    (preserving byte-identity for the existing
+    `TestWave4FutureMultiClockCrossRegionSampling` regression guards
+    AND for the sister walker's pre-7a fixtures that re-enter
+    ``render_target`` with the same chart_ir).
+    """
+    if not isinstance(chart_ir, dict):
+        return False
+    if (
+        chart_ir.get("sos:clock_domains") is None
+        and chart_ir.get("clock_domains") is None
+    ):
+        return False
+    # Probe parseability: the block is present in the raw IR, but if
+    # it doesn't conform to the wave-7a shape we fall back to wave-4
+    # byte-identical behaviour rather than crashing the walker.
+    try:
+        parse_clock_domains(chart_ir)
+    except Exception:
+        return False
+    return True
+
+
+def _collect_chart_clock_decls(
+    chart_ir: dict[str, Any] | None,
+) -> dict[str, ClockDecl]:
+    """SOS-08-D wave-7a (2026-05-25 §15) — chart's ``<sos:clock>``
+    declarations, parsed into ``{name: ClockDecl}`` via the shared
+    helper.
+
+    Delegates to ``_clock_domains.parse_clock_domains``.  Returns the
+    implicit default-clock map when no block is declared (so callers
+    can always look up ``"clk"``).  Re-raises
+    ``UnsupportedClockKindError`` as ``UnsupportedChartError`` so the
+    error surface matches every other chart-vocab failure in this
+    module (INV-S-HDL-D-5).
+
+    Tolerance for cross-walker re-entrancy: ``transliterate_hdl_sv_tb``
+    (the E-side testbench walker) re-enters ``render_target`` with the
+    same chart_ir; its v-pre-wave-7a fixtures may declare
+    ``<sos:clock_domains>`` blocks in the older `name=` + `period_ns=`
+    shape without a ``kind=`` attribute. To preserve the
+    file-disjoint scope contract — sva_bind doesn't co-evolve with
+    sv_tb until wave-7b — we treat any
+    ``ClockDomainsParseError`` (intrinsic shape error inside
+    `<sos:clock_domains>`) as "no declared block from sva_bind's
+    perspective": fall back to the implicit-default map AND clear
+    ``chart_has_clock_block`` so downstream emit paths take the
+    wave-4 byte-identical code paths.
+    """
+    try:
+        return parse_clock_domains(chart_ir)
+    except UnsupportedClockKindError as exc:
+        raise UnsupportedChartError(str(exc)) from exc
+    except Exception:
+        # ClockDomainsParseError (or any future shape-error) — sva_bind
+        # falls back to implicit-default behaviour so a sister walker
+        # using the same chart_ir doesn't crash this one.  See
+        # _chart_has_clock_domains_block which is independently aware
+        # of the block's presence for emit-side gating.
+        from _clock_domains import implicit_default_clock as _idc  # type: ignore
+        default = _idc()
+        return {default.name: default}
+
+
 def _collect_chart_clock_domains(
     region_info: list[tuple[str, str | None]],
+    chart_ir: dict[str, Any] | None = None,
 ) -> set[str]:
     """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — set of declared
-    clock-domain identifiers the chart's regions expose.
-
-    Note on `<sos:clock_domains>` block: at the time of the
-    wave-4-future-mclk landing, there is no separately validated
-    `<sos:clock_domains>` chart-vocab element — clock identifiers are
-    derived from each region's ``clock="..."`` attribute (per SOS-08-C
-    wave-3 clock-distribution contract). This collector returns the
-    union of (a) every non-None clock-domain string declared by some
-    region, plus (b) the default chart-top reference clock identifier
-    ``clk`` (used by regions without a `clock=` annotation).
+    clock-domain identifiers the chart's regions expose; extended at
+    wave-7a (2026-05-25 §15) to additionally union in every
+    ``<sos:clock>`` name declared at the chart-top
+    ``<sos:clock_domains>`` block, plus every per-clock canonical-name
+    alias.
 
     The returned set is the validation target for
     ``_validate_sampling_clocks`` — a ``<sos:sampling_clock
     clock=...>`` value not in this set raises a chart-vocab error
     citing the canonical mclk error prefix.
+
+    Backwards-compat: when ``chart_ir`` is None or omits the
+    ``<sos:clock_domains>`` block, the helper's implicit-default-clock
+    contribution is exactly ``{"clk"}`` — identical to the wave-4
+    behaviour.
     """
     domains: set[str] = {"clk"}
     for _region, dom in region_info:
@@ -2140,6 +2234,13 @@ def _collect_chart_clock_domains(
             # interchangeably. Internally the walker emits via
             # ``_clk_port_name(<domain>)``.
             domains.add(_clk_port_name(dom))
+    # SOS-08-D wave-7a (2026-05-25 §15): chart-author-declared
+    # ``<sos:clock>`` names join the validation set, so a sampling-
+    # clock reference like ``clock="aclk"`` (declared at the chart
+    # top) is accepted even when no region carries ``clock="aclk"``.
+    if chart_ir is not None:
+        for decl_name in _collect_chart_clock_decls(chart_ir).keys():
+            domains.add(decl_name)
     return domains
 
 
@@ -2169,6 +2270,8 @@ def _resolve_sampling_clock_signal(
     region: str,
     sampling_clocks: dict[str, str],
     region_info: list[tuple[str, str | None]],
+    clock_decls: dict[str, ClockDecl] | None = None,
+    chart_has_clock_block: bool = False,
 ) -> str:
     """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — resolve the
     per-region SVA sampling clock for a multi-clock cross-invariant.
@@ -2178,10 +2281,31 @@ def _resolve_sampling_clock_signal(
     name is a bare domain (``"fast"``), it normalises through
     ``_clk_port_name``. Otherwise the region's intrinsic clock (per
     ``_resolve_region_clock_signal``) is used.
+
+    SOS-08-D wave-7a (2026-05-25 §15) — when the chart declares a
+    ``<sos:clock_domains>`` block and the explicit
+    ``<sos:sampling_clock clock=...>`` reference resolves to one of
+    the declared ``<sos:clock>`` names, the returned signal is the
+    alphabetic-first canonical name in that ``(source, kind)`` alias
+    set (so two `<sos:sampling_clock>` entries referencing the same
+    alias group emit on the same clock signal).  Charts without the
+    block fall through to the wave-4 lookup verbatim — preserves
+    byte-identity for the regression guards.
     """
     declared = sampling_clocks.get(region)
     if declared is None:
         return _resolve_region_clock_signal(region, region_info)
+    # SOS-08-D wave-7a (2026-05-25 §15): alias resolution against the
+    # chart-author-declared `<sos:clock_domains>` map.  Only applies
+    # when the chart explicitly declared the block; otherwise the
+    # wave-4 path is preserved byte-identical.
+    if (
+        chart_has_clock_block
+        and clock_decls is not None
+        and declared in clock_decls
+    ):
+        canonical, _, _ = resolve_alias(declared, clock_decls)
+        return canonical
     # Accept both bare-domain and pre-prefixed forms.
     if declared.startswith("clk"):
         return declared
@@ -2192,6 +2316,7 @@ def _validate_sampling_clocks(
     invariants: list[_CrossInvariant],
     region_info: list[tuple[str, str | None]],
     region_state_indices: dict[str, dict[str, int]],
+    chart_ir: dict[str, Any] | None = None,
 ) -> None:
     """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — chart-vocab
     validation pass for `<sos:sampling_clock>` declarations.
@@ -2208,8 +2333,16 @@ def _validate_sampling_clocks(
         leaves drawn from different declared clock domains — SVA's
         ``|->`` operator requires single-clock-domain operands per
         IEEE 1800-2017 §16.13.5.
+
+    SOS-08-D wave-7a (2026-05-25 §15) — when ``chart_ir`` is supplied
+    AND the chart declares a ``<sos:clock_domains>`` block, alias
+    resolution feeds into the mixed-clock-implies + downstream emit
+    logic.  Without the block (or without ``chart_ir``), the wave-4
+    behaviour is preserved byte-identical.
     """
-    declared_clocks = _collect_chart_clock_domains(region_info)
+    declared_clocks = _collect_chart_clock_domains(region_info, chart_ir)
+    clock_decls = _collect_chart_clock_decls(chart_ir) if chart_ir else {}
+    has_block = _chart_has_clock_domains_block(chart_ir)
     known_regions = set(region_state_indices.keys())
     for inv in invariants:
         if not inv.sampling_clocks:
@@ -2237,12 +2370,16 @@ def _validate_sampling_clocks(
         # consequent reach state_ref leaves in different declared
         # clock domains.
         if inv.expr is not None:
-            _reject_mixed_clock_implies(inv, region_info)
+            _reject_mixed_clock_implies(
+                inv, region_info, clock_decls, has_block,
+            )
 
 
 def _reject_mixed_clock_implies(
     inv: _CrossInvariant,
     region_info: list[tuple[str, str | None]],
+    clock_decls: dict[str, ClockDecl] | None = None,
+    chart_has_clock_block: bool = False,
 ) -> None:
     """Walk ``inv.expr`` looking for ``<sos:implies>`` whose antecedent
     and consequent leaves resolve to different clock signals. IEEE
@@ -2259,7 +2396,8 @@ def _reject_mixed_clock_implies(
             if e.region is None:
                 return set()
             return {_resolve_sampling_clock_signal(
-                e.region, inv.sampling_clocks, region_info
+                e.region, inv.sampling_clocks, region_info,
+                clock_decls, chart_has_clock_block,
             )}
         out: set[str] = set()
         for c in e.children:
@@ -2287,12 +2425,39 @@ def _reject_mixed_clock_implies(
         _scan(inv.expr)
 
 
+def _clock_event_for_sampling(
+    sampling_clocks: dict[str, str],
+    region: str,
+    clock_decls: dict[str, ClockDecl] | None,
+    chart_has_clock_block: bool,
+) -> str:
+    """SOS-08-D wave-7a (2026-05-25 §15) — return ``"posedge"`` or
+    ``"negedge"`` for a region's ``<sos:sampling_clock>``-referenced
+    clock based on the resolved kind from ``<sos:clock_domains>``.
+
+    Default is ``"posedge"`` (rising) — preserves wave-4 byte-identity
+    for charts without a ``<sos:clock_domains>`` block.  Only when the
+    chart declares the block AND the sampling-clock name resolves to a
+    declared clock with ``kind="falling"`` does the helper return
+    ``"negedge"``.
+    """
+    if not chart_has_clock_block or clock_decls is None:
+        return "posedge"
+    declared = sampling_clocks.get(region)
+    if declared is None or declared not in clock_decls:
+        return "posedge"
+    decl = clock_decls[declared]
+    return "negedge" if decl.kind == KIND_FALLING else "posedge"
+
+
 def _emit_mclk_leaf_for_region(
     region: str,
     state: str,
     primary_region: str,
     sampling_clocks: dict[str, str],
     region_info: list[tuple[str, str | None]],
+    clock_decls: dict[str, ClockDecl] | None = None,
+    chart_has_clock_block: bool = False,
 ) -> str:
     """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — render a single
     state_ref leaf for a multi-clock cross-invariant.
@@ -2304,6 +2469,12 @@ def _emit_mclk_leaf_for_region(
     IEEE 1800-2017 §16.13 multi-clocked assertion form, sampling the
     other region's observable on its own clock and feeding the result
     back to the primary clock's evaluation point.
+
+    SOS-08-D wave-7a (2026-05-25 §15) — when the chart declares a
+    ``<sos:clock_domains>`` block AND the region's sampling clock has
+    ``kind="falling"``, the ``$past`` event uses ``negedge`` instead
+    of ``posedge``.  Pre-wave-7a charts emit byte-identical via the
+    default-``posedge`` short-circuit in ``_clock_event_for_sampling``.
     """
     obs = f"current_state_{_sanitize_sv_identifier(region)}"
     const = _state_constant_name(state)
@@ -2311,11 +2482,15 @@ def _emit_mclk_leaf_for_region(
     if region == primary_region:
         return base
     its_clock = _resolve_sampling_clock_signal(
-        region, sampling_clocks, region_info
+        region, sampling_clocks, region_info,
+        clock_decls, chart_has_clock_block,
+    )
+    its_event = _clock_event_for_sampling(
+        sampling_clocks, region, clock_decls, chart_has_clock_block,
     )
     # IEEE 1800-2017 §16.13: $past with explicit clocking event lets
     # the property sample the operand on a different clock domain.
-    return f"$past({base}, 1, , @(posedge {its_clock}))"
+    return f"$past({base}, 1, , @({its_event} {its_clock}))"
 
 
 def _emit_mclk_compound_sv_expr(
@@ -2323,20 +2498,29 @@ def _emit_mclk_compound_sv_expr(
     primary_region: str,
     sampling_clocks: dict[str, str],
     region_info: list[tuple[str, str | None]],
+    clock_decls: dict[str, ClockDecl] | None = None,
+    chart_has_clock_block: bool = False,
 ) -> str:
     """SOS-08-D wave-4-future-mclk (2026-05-24 §15) — render a compound
     expression for the multi-clock path. Each state_ref leaf wraps
     individually via ``_emit_mclk_leaf_for_region``; boolean operators
-    compose verbatim with wave-4-future-compound's lowering rules."""
+    compose verbatim with wave-4-future-compound's lowering rules.
+
+    SOS-08-D wave-7a (2026-05-25 §15) — ``clock_decls`` +
+    ``chart_has_clock_block`` thread through so per-leaf ``$past``
+    events render with ``posedge``/``negedge`` per the declared kind.
+    """
     if expr.kind == "state_ref":
         return _emit_mclk_leaf_for_region(
             expr.region or "", expr.state or "",
             primary_region, sampling_clocks, region_info,
+            clock_decls, chart_has_clock_block,
         )
     if expr.kind == "and":
         rendered = " && ".join(
             _emit_mclk_compound_sv_expr(
-                c, primary_region, sampling_clocks, region_info
+                c, primary_region, sampling_clocks, region_info,
+                clock_decls, chart_has_clock_block,
             )
             for c in expr.children
         )
@@ -2344,7 +2528,8 @@ def _emit_mclk_compound_sv_expr(
     if expr.kind == "or":
         rendered = " || ".join(
             _emit_mclk_compound_sv_expr(
-                c, primary_region, sampling_clocks, region_info
+                c, primary_region, sampling_clocks, region_info,
+                clock_decls, chart_has_clock_block,
             )
             for c in expr.children
         )
@@ -2353,16 +2538,19 @@ def _emit_mclk_compound_sv_expr(
         return (
             "!("
             + _emit_mclk_compound_sv_expr(
-                expr.children[0], primary_region, sampling_clocks, region_info
+                expr.children[0], primary_region, sampling_clocks,
+                region_info, clock_decls, chart_has_clock_block,
             )
             + ")"
         )
     if expr.kind == "implies":
         a_sv = _emit_mclk_compound_sv_expr(
-            expr.children[0], primary_region, sampling_clocks, region_info
+            expr.children[0], primary_region, sampling_clocks,
+            region_info, clock_decls, chart_has_clock_block,
         )
         c_sv = _emit_mclk_compound_sv_expr(
-            expr.children[1], primary_region, sampling_clocks, region_info
+            expr.children[1], primary_region, sampling_clocks,
+            region_info, clock_decls, chart_has_clock_block,
         )
         return f"({a_sv} |-> {c_sv})"
     raise UnsupportedChartError(
@@ -2726,6 +2914,8 @@ def _emit_cross_region_sva_module(
     raw_properties: list[_RawProperty] | None = None,
     shared_signals: list[_SharedSignal] | None = None,
     regions: list[tuple[str, dict[str, Any]]] | None = None,
+    clock_decls: dict[str, ClockDecl] | None = None,
+    chart_has_clock_block: bool = False,
 ) -> str:
     """Emit ``<chart>_top_sva.sv`` — chart-top assertion module.
 
@@ -2842,7 +3032,16 @@ def _emit_cross_region_sva_module(
                 )
             )
             primary_clock = _resolve_sampling_clock_signal(
-                primary_region, inv.sampling_clocks, region_info
+                primary_region, inv.sampling_clocks, region_info,
+                clock_decls, chart_has_clock_block,
+            )
+            # SOS-08-D wave-7a (2026-05-25 §15) — primary clock event
+            # depends on the resolved kind from `<sos:clock_domains>`.
+            # Default `"posedge"` preserves wave-4 byte-identity when
+            # the chart omits the block.
+            primary_event = _clock_event_for_sampling(
+                inv.sampling_clocks, primary_region,
+                clock_decls, chart_has_clock_block,
             )
             # Collect other clock signals for the CDC banner / SVA port
             # list. Iterate the invariant's leaf regions.
@@ -2861,7 +3060,8 @@ def _emit_cross_region_sva_module(
                 if not r or r == primary_region:
                     continue
                 sig = _resolve_sampling_clock_signal(
-                    r, inv.sampling_clocks, region_info
+                    r, inv.sampling_clocks, region_info,
+                    clock_decls, chart_has_clock_block,
                 )
                 if sig != primary_clock and sig not in seen_other:
                     seen_other.add(sig)
@@ -2872,7 +3072,8 @@ def _emit_cross_region_sva_module(
                 if not r:
                     continue
                 sig = _resolve_sampling_clock_signal(
-                    r, inv.sampling_clocks, region_info
+                    r, inv.sampling_clocks, region_info,
+                    clock_decls, chart_has_clock_block,
                 )
                 if sig != "clk" and sig not in mclk_seen_clock_signals:
                     mclk_seen_clock_signals.add(sig)
@@ -2884,6 +3085,7 @@ def _emit_cross_region_sva_module(
                 body_sv = _emit_mclk_compound_sv_expr(
                     inv.expr, primary_region,
                     inv.sampling_clocks, region_info,
+                    clock_decls, chart_has_clock_block,
                 )
                 chart_summary = _summarise_compound_expr(inv.expr)
                 fail_msg = (
@@ -2896,7 +3098,7 @@ def _emit_cross_region_sva_module(
                     f"    // {inv.id} (wave-4-future-mclk compound): "
                     f"{chart_summary}\n"
                     f"    property {prop_name}_mclk;\n"
-                    f"        @(posedge {primary_clock})\n"
+                    f"        @({primary_event} {primary_clock})\n"
                     f"        {body_sv};\n"
                     f"    endproperty\n"
                     f"    {asrt_name}: assert property ({prop_name}_mclk)\n"
@@ -2907,18 +3109,20 @@ def _emit_cross_region_sva_module(
             a_leaf = _emit_mclk_leaf_for_region(
                 inv.antecedent_region, inv.antecedent_state,
                 primary_region, inv.sampling_clocks, region_info,
+                clock_decls, chart_has_clock_block,
             )
             c_leaf = _emit_mclk_leaf_for_region(
                 inv.consequent_region, inv.consequent_state,
                 primary_region, inv.sampling_clocks, region_info,
+                clock_decls, chart_has_clock_block,
             )
             fail_msg = (
                 f"[FAIL] chart `{chart_name}` cross-invariant `{inv.id}` "
                 f"(multi-clock): region `{inv.antecedent_region}` on "
-                f"clock `{_resolve_sampling_clock_signal(inv.antecedent_region, inv.sampling_clocks, region_info)}` "
+                f"clock `{_resolve_sampling_clock_signal(inv.antecedent_region, inv.sampling_clocks, region_info, clock_decls, chart_has_clock_block)}` "
                 f"entered state `{inv.antecedent_state}` but region "
                 f"`{inv.consequent_region}` on clock "
-                f"`{_resolve_sampling_clock_signal(inv.consequent_region, inv.sampling_clocks, region_info)}` "
+                f"`{_resolve_sampling_clock_signal(inv.consequent_region, inv.sampling_clocks, region_info, clock_decls, chart_has_clock_block)}` "
                 f"did not enter state `{inv.consequent_state}`."
             )
             property_blocks.append(
@@ -2927,7 +3131,7 @@ def _emit_cross_region_sva_module(
                 f"`{inv.antecedent_region}`.{inv.antecedent_state} && "
                 f"$past `{inv.consequent_region}`.{inv.consequent_state}\n"
                 f"    property {prop_name}_mclk;\n"
-                f"        @(posedge {primary_clock})\n"
+                f"        @({primary_event} {primary_clock})\n"
                 f"        {a_leaf} && {c_leaf};\n"
                 f"    endproperty\n"
                 f"    {asrt_name}: assert property ({prop_name}_mclk)\n"
@@ -3332,6 +3536,8 @@ def _emit_cross_region_bind_directive(
     region_info: list[tuple[str, str | None]],
     raw_properties: list[_RawProperty] | None = None,
     shared_signals: list[_SharedSignal] | None = None,
+    clock_decls: dict[str, ClockDecl] | None = None,
+    chart_has_clock_block: bool = False,
 ) -> str:
     """Emit ``<chart>_top_bind.sv`` — bind directive attaching the
     chart-top SVA module to the chart-top wrapper.
@@ -3396,7 +3602,8 @@ def _emit_cross_region_bind_directive(
             if not r:
                 continue
             sig = _resolve_sampling_clock_signal(
-                r, inv.sampling_clocks, region_info
+                r, inv.sampling_clocks, region_info,
+                clock_decls, chart_has_clock_block,
             )
             if sig == "clk":
                 continue
@@ -3680,6 +3887,13 @@ def _render_parallel(
     # <sos:shared_signal> + <sos:shared_signal_ref> declarations.
     shared_signals = _collect_shared_signals(chart_ir)
     shared_signal_refs = _collect_shared_signal_refs(chart_ir)
+    # SOS-08-D wave-7a (2026-05-25 §15) — `<sos:clock_domains>` parse +
+    # alias-resolution context, threaded into every downstream caller
+    # that needs to look up a clock kind or canonical name.  Charts
+    # without the block get `chart_has_clock_block = False`, so the
+    # downstream wave-4 code paths run byte-identical.
+    chart_clock_decls = _collect_chart_clock_decls(chart_ir)
+    chart_has_clock_block = _chart_has_clock_domains_block(chart_ir)
     if cross_invariants or raw_properties or shared_signals:
         # SOS-08-D wave-4-future (2026-05-24 §15): build per-region
         # state-encoding map matching SOS-08-C's document-order one-hot
@@ -3698,6 +3912,7 @@ def _render_parallel(
             # IEEE 1800-2017 §16.13.5.
             _validate_sampling_clocks(
                 cross_invariants, region_info, region_state_indices,
+                chart_ir,
             )
         # Raw-property validation: collision + clock_region resolution
         # against the chart's declared regions.
@@ -3719,6 +3934,8 @@ def _render_parallel(
             raw_properties=raw_properties,
             shared_signals=shared_signals,
             regions=regions,
+            clock_decls=chart_clock_decls,
+            chart_has_clock_block=chart_has_clock_block,
         )
         top_bind_body = _emit_cross_region_bind_directive(
             chart_name=chart_name,
@@ -3727,6 +3944,8 @@ def _render_parallel(
             region_info=region_info,
             raw_properties=raw_properties,
             shared_signals=shared_signals,
+            clock_decls=chart_clock_decls,
+            chart_has_clock_block=chart_has_clock_block,
         )
         out[f"tests/{base}/{base}_top_sva.sv"] = top_sva_body
         out[f"tests/{base}/{base}_top_bind.sv"] = top_bind_body
