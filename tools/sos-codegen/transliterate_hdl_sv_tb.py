@@ -110,6 +110,23 @@ from transliterate_sva_bind import (  # noqa: E402
     render_target as _render_sva_bind,
 )
 
+# SOS-08-D wave-7a (2026-05-25 §15) — shared `<sos:clock_domains>` parser
+# + alias-resolution helper.  Consuming the helper makes the E walker's
+# clock-domain handling coherent with the D walker (same parse, same
+# alias rules, same kind enum).  PCDN-SOS-08-D-008 §15 / wave-7b carry-
+# forward.
+from _clock_domains import (  # type: ignore  # noqa: E402
+    ClockDecl,
+    ClockDomainsParseError,
+    KIND_FALLING,
+    KIND_RISING,
+    UnsupportedClockKindError,
+    canonical_name_for_pair,
+    pair_of,
+    parse_clock_domains,
+    resolve_alias,
+)
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -524,103 +541,281 @@ def _validate_sv_clock_name(name: str) -> str:
     return name
 
 
+def _chart_has_clock_domains_block_raw(chart_ir: Any) -> bool:
+    """SOS-08-D wave-7b (2026-05-25 §15) — does the chart-IR raw dict
+    explicitly carry a ``<sos:clock_domains>`` element?
+
+    Returns ``True`` when either the namespaced (``sos:clock_domains``)
+    or the bare (``clock_domains``) key is present.  Used to gate the
+    multi-clock emit path: charts WITHOUT the block fall through to the
+    single-clock byte-identical emit; the implicit-default-clock map
+    that the shared helper synthesises in this case carries one entry
+    (``"clk"``) but MUST NOT be treated as a "declared" clock for emit-
+    layering purposes.
+    """
+    if not isinstance(chart_ir, dict):
+        return False
+    return (
+        chart_ir.get("sos:clock_domains") is not None
+        or chart_ir.get("clock_domains") is not None
+    )
+
+
+def _backfill_implicit_kind(chart_ir: Any) -> Any:
+    """SOS-08-D wave-7b (2026-05-25 §15) — Option B fixture-compat path.
+
+    The shared ``parse_clock_domains`` helper is strict about the wave-
+    7a element shape (``kind=`` attribute is REQUIRED on every
+    ``<sos:clock>``).  The E-walker's regression-guard fixtures
+    (TestWave3FutureMultiClockTestbenchWiring) predate the kind enum
+    and declare ``<sos:clock>`` elements with only ``name=``,
+    ``period_ns=``, ``duty_cycle=``.  Without backfill, those fixtures
+    would crash the helper at parse time and the wave-3 byte-identity
+    guards would break.
+
+    Per the wave-7b task spec we apply a soft reading at the E-walker
+    layer only: any ``<sos:clock>`` element missing ``kind=`` is
+    treated as ``kind="rising"`` (the implicit default per SOS-08-D §15
+    Q1 (a)).  The D walker (re-entered through ``_render_sva_bind``)
+    sees the ORIGINAL chart_ir without backfill, so its own
+    parseability fallback continues to handle the legacy shape as
+    "no declared block from sva_bind's perspective" — preserving the
+    file-disjoint contract until wave-7c does the unified clean-up.
+
+    Returns a shallow-cloned chart_ir with backfilled ``kind="rising"``
+    on every clock element that lacks ``kind=``.  When no backfill is
+    needed, returns ``chart_ir`` unchanged.
+    """
+    if not isinstance(chart_ir, dict):
+        return chart_ir
+    block = chart_ir.get("sos:clock_domains") or chart_ir.get("clock_domains")
+    if block is None:
+        return chart_ir
+
+    def _has_kind(clk: Any) -> bool:
+        if not isinstance(clk, dict):
+            return True  # leave non-dicts alone; helper will surface the error
+        return isinstance(clk.get("kind"), str) and bool(clk.get("kind").strip())
+
+    def _patch_clock_children(inner: Any) -> tuple[Any, bool]:
+        """Return ``(patched_inner, changed)``."""
+        if isinstance(inner, dict):
+            if _has_kind(inner):
+                return inner, False
+            patched = dict(inner)
+            patched["kind"] = KIND_RISING
+            return patched, True
+        if isinstance(inner, list):
+            changed_any = False
+            out_list: list[Any] = []
+            for clk in inner:
+                if isinstance(clk, dict) and not _has_kind(clk):
+                    patched = dict(clk)
+                    patched["kind"] = KIND_RISING
+                    out_list.append(patched)
+                    changed_any = True
+                else:
+                    out_list.append(clk)
+            return out_list, changed_any
+        return inner, False
+
+    def _patch_block(blk: Any) -> tuple[Any, bool]:
+        if isinstance(blk, dict):
+            inner_ns = blk.get("sos:clock")
+            inner_bare = blk.get("clock")
+            new_blk = dict(blk)
+            changed = False
+            if inner_ns is not None:
+                patched, ch = _patch_clock_children(inner_ns)
+                if ch:
+                    new_blk["sos:clock"] = patched
+                    changed = True
+            if inner_bare is not None:
+                patched, ch = _patch_clock_children(inner_bare)
+                if ch:
+                    new_blk["clock"] = patched
+                    changed = True
+            return new_blk, changed
+        if isinstance(blk, list):
+            changed_any = False
+            out_list: list[Any] = []
+            for entry in blk:
+                patched, ch = _patch_block(entry)
+                out_list.append(patched)
+                if ch:
+                    changed_any = True
+            return out_list, changed_any
+        return blk, False
+
+    new_block, changed = _patch_block(block)
+    if not changed:
+        return chart_ir
+    new_chart = dict(chart_ir)
+    if chart_ir.get("sos:clock_domains") is not None:
+        new_chart["sos:clock_domains"] = new_block
+    else:
+        new_chart["clock_domains"] = new_block
+    return new_chart
+
+
+def _collect_clock_decls_via_helper(
+    chart_ir: dict[str, Any],
+) -> dict[str, ClockDecl]:
+    """SOS-08-D wave-7b (2026-05-25 §15) — parse the chart's
+    ``<sos:clock_domains>`` block through the shared
+    ``_clock_domains.parse_clock_domains`` helper.
+
+    Behaviour:
+
+      * No block present → returns the implicit-default-clock map
+        ``{"clk": ClockDecl(name="clk", source="chart_root",
+        kind="rising", ...)}`` from the helper. The companion
+        ``_chart_has_clock_domains_block_raw`` predicate distinguishes
+        this case from a one-clock explicit declaration.
+      * Block present, ``kind=`` missing on a ``<sos:clock>`` element →
+        backfilled to ``kind="rising"`` per Option B (E-walker-only
+        soft reading).
+      * Block present and parses cleanly → the parsed map verbatim.
+      * Reserved-kind enum value (``both``, ``quadrature_pair``, ...) →
+        re-raises ``UnsupportedClockKindError`` for the caller to
+        propagate.  Per the task spec we do NOT catch — the verbatim
+        chart-vocab error preserves cross-walker error consistency
+        with the D walker.
+      * Intrinsic shape errors (``ClockDomainsParseError``) → re-raised
+        as ``UnsupportedChartError`` so the error surface matches every
+        other chart-vocab failure in this module (INV-S-HDL-E-4 / §5.5
+        chart-vocabulary wording).
+
+    Additionally validates SV-identifier shape on every declared name
+    via ``_validate_sv_clock_name`` so an invalid clock identifier
+    still lands as ``UnsupportedChartError`` (regression-guard test
+    ``test_invalid_sv_identifier_in_clock_name_raises``).
+    """
+    backfilled = _backfill_implicit_kind(chart_ir)
+    try:
+        clock_map = parse_clock_domains(backfilled)
+    except UnsupportedClockKindError:
+        # Per deliverable 5: propagate verbatim; do not catch.
+        raise
+    except ClockDomainsParseError as exc:
+        raise UnsupportedChartError(str(exc)) from exc
+    # SV-identifier sanity on every declared name — preserves wave-3-
+    # future-remaining-path regression guards.
+    for name in clock_map:
+        _validate_sv_clock_name(name)
+    return clock_map
+
+
+def _collect_clock_aliases(
+    clock_map: dict[str, ClockDecl],
+) -> dict[str, str]:
+    """SOS-08-D wave-7b (2026-05-25 §15) — given a parsed clock map,
+    return ``{alias_name: canonical_name}`` for every NON-canonical
+    declaration.
+
+    Aliases are ``<sos:clock>`` declarations sharing the same
+    ``(source, kind)`` pair as another declaration; the canonical name
+    is alphabetic-first within the alias group (per §15 Q3 (a)).  The
+    canonical name itself does NOT appear in the returned map (it has
+    no alias of its own).
+    """
+    out: dict[str, str] = {}
+    for name, decl in clock_map.items():
+        canonical = canonical_name_for_pair(decl.source, decl.kind, clock_map)
+        if canonical != name:
+            out[name] = canonical
+    return out
+
+
+def _canonical_clocks_legacy_shape(
+    clock_map: dict[str, ClockDecl],
+    has_block: bool,
+) -> list[dict[str, Any]]:
+    """SOS-08-D wave-7b (2026-05-25 §15) — adapt the helper's
+    ``dict[str, ClockDecl]`` into the legacy list-of-dicts shape the
+    downstream emit code expects.
+
+    Two normalisations:
+
+      1. Aliases collapse — only one entry per ``(source, kind)`` pair,
+         using the alphabetic-first canonical name (per §15 Q3 (a)).
+         Aliases are surfaced via a per-entry ``aliases`` list (sorted)
+         so the multi-clock emit can emit ``assign <alias> = <canonical>;``
+         continuous assignments + declare ``logic <alias>;`` at top-
+         module scope.
+      2. When ``has_block`` is ``False`` (no explicit
+         ``<sos:clock_domains>`` declared on the chart), returns the
+         empty list.  This preserves the wave-3-future-remaining-path
+         single-clock byte-identity path: ``is_multi_clock = len(...) >= 2``
+         stays ``False`` for charts without the block AND for charts
+         with one explicit declaration.
+
+    Each returned dict carries the legacy keys (``name``, ``period_ns``,
+    ``duty_cycle``) plus the new wave-7a fields (``kind``, ``source``,
+    ``aliases``) so downstream emit can branch on kind / alias them.
+    Order matches the original document order of canonical declarations.
+    """
+    if not has_block:
+        return []
+    # Group all declarations by (source, kind) pair so we can build
+    # alias lists per pair.
+    by_pair: dict[tuple[str, str], list[str]] = {}
+    for name, decl in clock_map.items():
+        by_pair.setdefault((decl.source, decl.kind), []).append(name)
+    seen_pairs: set[tuple[str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for name, decl in clock_map.items():
+        pair = (decl.source, decl.kind)
+        if pair in seen_pairs:
+            continue
+        canonical = canonical_name_for_pair(decl.source, decl.kind, clock_map)
+        if canonical != name:
+            # Skip non-canonical names; the canonical name (when we hit
+            # it in iteration order) carries this pair into the list.
+            continue
+        seen_pairs.add(pair)
+        aliases = sorted(n for n in by_pair[pair] if n != canonical)
+        # period_ns / duty_cycle stay numeric — the emit's f-string
+        # interpolation handles both int and float values.
+        out.append({
+            "name": canonical,
+            "period_ns": decl.period_ns,
+            "duty_cycle": decl.duty_cycle,
+            "kind": decl.kind,
+            "source": decl.source,
+            "aliases": aliases,
+        })
+    return out
+
+
 def _collect_clock_domains(
     chart_ir: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Wave-3-future-remaining (2026-05-24 §15): read the chart's
-    ``<sos:clock_domains>`` block and return one dict per declared clock.
+    """SOS-08-D wave-7b (2026-05-25 §15) — legacy entry point retained
+    as a thin shim over the shared helper.
 
-    Assumed wave-4 shape (mirrored from SOS-08-D wave-4 multi-clock-
-    domain bind wiring; documented in §15 since the upstream wave-4
-    element is landing in parallel with this slice):
+    Returns one dict per CANONICAL ``<sos:clock>`` declaration (alias
+    declarations collapse to the alphabetic-first canonical name per
+    SOS-08-D §15 Q3 (a)).  Returns an empty list when no
+    ``<sos:clock_domains>`` block is declared on the chart.
 
-        <sos:clock_domains>
-          <sos:clock name="clk_a" period_ns="10"   duty_cycle="0.5"/>
-          <sos:clock name="clk_b" period_ns="20.0" duty_cycle="0.5"/>
-        </sos:clock_domains>
-
-    Returns ``[{name, period_ns, duty_cycle}, ...]`` in document order;
-    the first-declared clock is the **primary** clock per the multi-
-    clock spec (used as the default return of
-    ``clock_domain_of_step()``).
-
-    Accepts both the SCXML-namespaced (``sos:clock_domains`` /
-    ``sos:clock``) and bare-namespace (``clock_domains`` / ``clock``)
-    keys — the scjson loader strips namespaces by default but raw-dict
-    chart fixtures may use either form.
-
-    Returns an empty list when no ``<sos:clock_domains>`` block exists.
-    The caller decides whether zero clocks means "use the default
-    100 MHz clock" (the byte-identity single-clock path) or a fail-fast
-    error.
+    Per the wave-7b deliverable, this shim consumes
+    ``_clock_domains.parse_clock_domains`` directly (the prior local
+    parser has been removed).  Reserved-kind enum values propagate via
+    ``UnsupportedClockKindError`` (cross-walker error consistency with
+    the D walker); intrinsic shape errors surface as
+    ``UnsupportedChartError`` with the chart-vocab failure-message
+    prefix per INV-S-HDL-E-4 / §5.5.
     """
-    if not isinstance(chart_ir, dict):
-        return []
-    block = (
-        chart_ir.get("sos:clock_domains")
-        or chart_ir.get("clock_domains")
-    )
-    if block is None:
-        return []
-    # Accept both list-of-blocks and single-block forms (the scjson
-    # loader's repeated-child handling can produce either).
-    if isinstance(block, list):
-        if not block:
-            return []
-        # Multiple <sos:clock_domains> blocks → take the union of their
-        # <sos:clock> children in document order.
-        clocks_raw: list[Any] = []
-        for b in block:
-            if not isinstance(b, dict):
-                continue
-            inner = b.get("sos:clock") or b.get("clock") or []
-            if isinstance(inner, dict):
-                clocks_raw.append(inner)
-            elif isinstance(inner, list):
-                clocks_raw.extend(inner)
-    elif isinstance(block, dict):
-        inner = block.get("sos:clock") or block.get("clock") or []
-        if isinstance(inner, dict):
-            clocks_raw = [inner]
-        elif isinstance(inner, list):
-            clocks_raw = list(inner)
-        else:
-            clocks_raw = []
-    else:
-        return []
-
-    seen_names: set[str] = set()
-    out: list[dict[str, Any]] = []
-    for clk in clocks_raw:
-        if not isinstance(clk, dict):
-            continue
-        name = clk.get("name")
-        name = _validate_sv_clock_name(name)
-        if name in seen_names:
-            # Duplicate clock declaration — first wins (deterministic).
-            continue
-        seen_names.add(name)
-        # period_ns / duty_cycle are advisory; keep raw values so the
-        # generator emit can use them verbatim. Default period_ns to
-        # 10 (100 MHz) when absent to match the wave-1 testbench top's
-        # ``CLK_PERIOD = 10`` default.
-        period_ns = clk.get("period_ns") or clk.get("period")
-        if period_ns is None:
-            period_ns = 10
-        duty = clk.get("duty_cycle") or clk.get("duty")
-        if duty is None:
-            duty = 0.5
-        out.append({
-            "name": name,
-            "period_ns": period_ns,
-            "duty_cycle": duty,
-        })
-    return out
+    has_block = _chart_has_clock_domains_block_raw(chart_ir)
+    clock_map = _collect_clock_decls_via_helper(chart_ir)
+    return _canonical_clocks_legacy_shape(clock_map, has_block)
 
 
 def _collect_cdc_boundaries(
     chart_ir: dict[str, Any],
     clock_names: list[str],
+    clock_map: dict[str, ClockDecl] | None = None,
 ) -> list[tuple[str, str]]:
     """Wave-3-future-remaining (2026-05-24 §15): enumerate the directional
     CDC boundaries declared on the chart.
@@ -649,17 +844,37 @@ def _collect_cdc_boundaries(
     Boundaries that name a clock NOT in ``clock_names`` raise
     ``UnsupportedChartError`` (chart-vocab gate — the testbench can't
     instantiate a sync stub for a clock the chart never declared).
+
+    SOS-08-D wave-7b (2026-05-25 §15) — alias-aware boundary keying.
+    When ``clock_map`` is supplied, the boundary's ``from``/``to``
+    clocks are resolved to their canonical names (alphabetic-first
+    within their ``(source, kind)`` pair).  Two clocks that share a
+    ``(source, kind)`` pair are aliases of one clock domain, so a
+    declared boundary between them is NOT a CDC — silently skipped
+    (mirrors the same-clock-name short-circuit).  When ``clock_map``
+    is ``None`` the wave-4 byte-identical behaviour is preserved.
     """
     known = set(clock_names)
     seen: set[tuple[str, str]] = set()
     out: list[tuple[str, str]] = []
 
+    def _resolve(clk: str) -> str:
+        """Map a declared clock name to its canonical name via the
+        ``(source, kind)`` pair.  No-op when ``clock_map`` is None or
+        ``clk`` is not in the map (preserves wave-4 behaviour)."""
+        if clock_map is None or clk not in clock_map:
+            return clk
+        canonical, _, _ = resolve_alias(clk, clock_map)
+        return canonical
+
+    def _pair_for(clk: str) -> tuple[str, str] | None:
+        """Return the ``(source, kind)`` pair for ``clk``, or ``None``
+        when ``clock_map`` is unavailable or ``clk`` is not declared."""
+        if clock_map is None or clk not in clock_map:
+            return None
+        return pair_of(clk, clock_map)
+
     def _add(from_clk: str, to_clk: str, source_label: str) -> None:
-        if from_clk == to_clk:
-            # Same-clock "boundary" is not a CDC; silently skip rather
-            # than raise — chart authors sometimes annotate same-clock
-            # invariants with sampling_clock for symmetry.
-            return
         for clk in (from_clk, to_clk):
             if clk not in known:
                 raise UnsupportedChartError(
@@ -668,7 +883,22 @@ def _collect_cdc_boundaries(
                     f"not in the chart's <sos:clock_domains> declaration. "
                     f"Declared clocks: {sorted(known)}."
                 )
-        key = (from_clk, to_clk)
+        # Alias collapse: two clocks sharing (source, kind) are the same
+        # domain — no CDC.  Wave-7b §15 Q3 (a) — aliases are NOT a
+        # boundary; cross-kind same-source IS a boundary (per §15 Q9).
+        from_pair = _pair_for(from_clk)
+        to_pair = _pair_for(to_clk)
+        if from_pair is not None and from_pair == to_pair:
+            return
+        # Same-clock-name short-circuit (preserves pre-wave-7b behaviour;
+        # subsumed by the alias-pair check when clock_map is present).
+        if from_clk == to_clk:
+            return
+        # Map to canonical names so two aliases on opposite ends of a
+        # boundary collapse to one stub file per directional pair.
+        from_c = _resolve(from_clk)
+        to_c = _resolve(to_clk)
+        key = (from_c, to_c)
         if key in seen:
             return
         seen.add(key)
@@ -841,7 +1071,14 @@ def expected_sv_tb_file_count(chart_xml: Any) -> int:
     # state-symbols = 14 baseline; SVA bind = 2 per region.
     if len(clocks) >= 2:
         base += 1  # clock_generators_<chart>.svh
-        base += len(_collect_cdc_boundaries(chart_xml, [c["name"] for c in clocks]))
+        # Wave-7b: alias-aware CDC enumeration consumes the parsed
+        # clock map so the canonical (source, kind) pair drives the
+        # boundary set (aliases collapse).
+        clock_map = _collect_clock_decls_via_helper(chart_xml)
+        all_names = sorted(clock_map.keys())
+        base += len(
+            _collect_cdc_boundaries(chart_xml, all_names, clock_map)
+        )
     return base
 
 
@@ -867,16 +1104,34 @@ def _emit_clock_generators_svh(
     for clk in clocks:
         name = clk["name"]
         period = clk["period_ns"]
+        # SOS-08-D wave-7b: kind=rising starts at 1'b0; kind=falling
+        # starts at 1'b1 (small convention so the first toggle matches
+        # the kind).  Pre-7a charts route through the rising-default
+        # backfill so byte-identity is preserved.  ``kind`` defaults to
+        # rising for legacy callers that built ``clocks`` outside the
+        # helper-backed pipeline.
+        kind = clk.get("kind", KIND_RISING)
+        init_val = "1'b1" if kind == KIND_FALLING else "1'b0"
         # Per-clock generator. Cast to real via ``/2.0`` per the spec;
         # ``#( real ) * 1ns`` is a Verilator-supported timing form.
         blocks.append(
             f"    // Clock generator for `{name}` "
-            f"(period_ns={period}, duty_cycle={clk.get('duty_cycle', 0.5)}).\n"
+            f"(period_ns={period}, duty_cycle={clk.get('duty_cycle', 0.5)}, "
+            f"kind={kind}).\n"
             f"    initial begin\n"
-            f"        {name} = 1'b0;\n"
+            f"        {name} = {init_val};\n"
             f"        forever #(({period})/2.0 * 1ns) {name} = ~{name};\n"
             f"    end"
         )
+        # Wave-7b: alias declarations get a continuous assign to the
+        # canonical clock so two `<sos:clock>` declarations sharing
+        # (source, kind) drive the same waveform.
+        for alias in clk.get("aliases", []):
+            blocks.append(
+                f"    // Alias `{alias}` shares (source={clk.get('source', name)}, "
+                f"kind={kind}) with canonical `{name}` — wave-7b alias collapse.\n"
+                f"    assign {alias} = {name};"
+            )
     body = "\n".join(blocks)
     return _HEADER_PREFIX + f"""//
 // Per-clock generator blocks for the {chart_name} chart testbench.
@@ -1521,10 +1776,22 @@ def _emit_driver_class_multi_clock(
     cls_base = f"sos_{base}_driver_base"
     base_svh = f"sos_{base}_driver_base.svh"
     primary = clocks[0]["name"]
-    case_arms = "\n".join(
-        f'            "{c["name"]}": @(posedge {c["name"]});'
-        for c in clocks
-    )
+    primary_kind = clocks[0].get("kind", KIND_RISING)
+    primary_edge = "negedge" if primary_kind == KIND_FALLING else "posedge"
+
+    def _arm(c: dict[str, Any]) -> str:
+        # Wave-7b: pick edge from kind. Aliases share canonical's edge
+        # (same kind by construction) and reference the canonical signal
+        # name — the alias signal is driven by ``assign`` in the clock-
+        # generators header.
+        ck = c.get("kind", KIND_RISING)
+        edge = "negedge" if ck == KIND_FALLING else "posedge"
+        lines = [f'            "{c["name"]}": @({edge} {c["name"]});']
+        for alias in c.get("aliases", []):
+            lines.append(f'            "{alias}": @({edge} {c["name"]});')
+        return "\n".join(lines)
+
+    case_arms = "\n".join(_arm(c) for c in clocks)
     return _HEADER_PREFIX + f"""//
 // Stimulus driver DEFAULT class for the {chart_name} chart testbench
 // (multi-clock).
@@ -1561,13 +1828,13 @@ class {cls} extends {cls_base};
         vif.event_in = rec.event_code[7:0];
         case (clock_domain)
 {case_arms}
-            default: @(posedge {primary});
+            default: @({primary_edge} {primary});
         endcase
         vif.event_in = '0;
         repeat (rec.cycles_wait - 1) begin
             case (clock_domain)
 {case_arms}
-                default: @(posedge {primary});
+                default: @({primary_edge} {primary});
             endcase
         end
 
@@ -2907,10 +3174,21 @@ def _emit_top_module_multi_clock(
     iface = virtual_if_name(chart_name)
     base = _normalise_chart_name(chart_name)
     primary = clocks[0]["name"]
-    clock_decls = "\n".join(
-        f"    logic {c['name']};  // period_ns={c['period_ns']}"
-        for c in clocks
-    )
+    # Wave-7b: emit one `logic` decl per declared name (canonical +
+    # aliases).  The per-clock generators emit `assign <alias> = <canonical>;`
+    # so the alias signals carry the canonical waveform.
+    clock_decl_lines: list[str] = []
+    for c in clocks:
+        clock_decl_lines.append(
+            f"    logic {c['name']};  // period_ns={c['period_ns']}, "
+            f"kind={c.get('kind', KIND_RISING)}"
+        )
+        for alias in c.get("aliases", []):
+            clock_decl_lines.append(
+                f"    logic {alias};  // alias of `{c['name']}` (same "
+                f"source+kind per wave-7b)"
+            )
+    clock_decls = "\n".join(clock_decl_lines)
     return _HEADER_PREFIX + f"""//
 // Top-level testbench module for the {chart_name} chart (multi-clock).
 //
@@ -3759,10 +4037,19 @@ def _emit_top_module_parallel(
     # virtual interface stay wired to the primary clock.
     if multi_clock:
         primary = clocks[0]["name"]
-        clock_decls = "\n".join(
-            f"    logic {c['name']};  // period_ns={c['period_ns']}"
-            for c in clocks
-        )
+        # Wave-7b: declare logic for canonical names + aliases.
+        clock_decl_lines: list[str] = []
+        for c in clocks:
+            clock_decl_lines.append(
+                f"    logic {c['name']};  // period_ns={c['period_ns']}, "
+                f"kind={c.get('kind', KIND_RISING)}"
+            )
+            for alias in c.get("aliases", []):
+                clock_decl_lines.append(
+                    f"    logic {alias};  // alias of `{c['name']}` "
+                    f"(same source+kind per wave-7b)"
+                )
+        clock_decls = "\n".join(clock_decl_lines)
         clock_block = (
             f"{clock_decls}\n\n"
             f"`include \"clock_generators_{base}.svh\"\n\n"
@@ -4182,11 +4469,19 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
     # Pass ``clocks`` to the per-file emitters only when multi-clock;
     # passing ``None`` (or len ≤ 1) takes the byte-identical path.
     emit_clocks = clocks if is_multi_clock else None
+    # Wave-7b: parse the full clock map (canonical + aliases) once for
+    # downstream alias-aware emit (CDC keying, generator-block aliasing,
+    # drive_step kind-resolution).  Empty/no-block charts get the
+    # implicit-default map (one entry); we only consume it for the
+    # multi-clock branch.
     if is_multi_clock:
+        clock_map_full = _collect_clock_decls_via_helper(chart_ir)
+        all_clock_names = sorted(clock_map_full.keys())
         cdc_boundaries = _collect_cdc_boundaries(
-            chart_ir, [c["name"] for c in clocks]
+            chart_ir, all_clock_names, clock_map_full
         )
     else:
+        clock_map_full = {}
         cdc_boundaries = []
 
     if regions:

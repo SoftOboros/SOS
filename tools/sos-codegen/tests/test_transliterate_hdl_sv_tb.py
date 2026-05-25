@@ -2507,8 +2507,12 @@ class TestWave3FutureMultiClockTestbenchWiring:
         # clk_a → period_ns=10; clk_b → period_ns=20.
         files = sv_tb.render_target(chart, {"chart_name": "demo"})
         gens = files["tb/sv/demo/clock_generators_demo.svh"]
-        assert "(10)/2.0" in gens
-        assert "(20)/2.0" in gens
+        # SOS-08-D wave-7b (2026-05-25 §15): the shared
+        # ``_clock_domains`` helper coerces ``period_ns`` to ``float``,
+        # so the emitted form is ``(10.0)/2.0`` rather than ``(10)/2.0``.
+        # Both are valid SV — accept either.
+        assert "(10.0)/2.0" in gens or "(10)/2.0" in gens
+        assert "(20.0)/2.0" in gens or "(20)/2.0" in gens
 
     # ---------- driver base: clock_domain_of_step + hook signatures ----------
 
@@ -2743,3 +2747,358 @@ class TestWave3FutureMultiClockTestbenchWiring:
         # And the default driver uses case-on-clock_domain.
         drv = files["tb/sv/p/sos_driver_p.sv"]
         assert "case (clock_domain)" in drv
+
+
+# ---------------------------------------------------------------------------
+# Wave-7b: E walker consumes the shared `_clock_domains` helper.
+#
+# @spec docs/concepts/SOS-08-D-CONCEPTS.md §15 (2026-05-25 PCDN-SOS-08-D-008
+#       ratification — source × kind orthogonal identity, alias collapse,
+#       implicit-default clock contract)
+# @spec tools/sos-codegen/_clock_domains.py (helper public API)
+#
+# The E walker (transliterate_hdl_sv_tb) used to carry its own
+# ``<sos:clock_domains>`` parser that pre-dated the wave-7a kind enum
+# and the alias-collapse rule. Wave-7b replaces that local parser with
+# calls into the shared helper so the D and E walkers agree on every
+# parse / alias / kind decision. Option B (E-walker-only implicit
+# `kind="rising"` backfill) preserves byte-identity for the wave-3
+# regression-guard fixtures that pre-date the kind enum.
+# ---------------------------------------------------------------------------
+
+
+def _chart_with_kinded_clocks(
+    decls: list[dict[str, object]], *, parallel: bool = False
+) -> dict:
+    """Build a chart fixture with explicit ``<sos:clock>`` declarations.
+
+    Each entry in ``decls`` is a dict of clock attributes (``name=``,
+    ``kind=``, ``source=``, ``period_ns=``, ``duty_cycle=``). Unlike
+    ``_chart_with_n_clocks`` this fixture exposes the full wave-7a
+    shape so wave-7b alias / kind tests can drive the new contract
+    surface directly.
+    """
+    if parallel:
+        body: dict = {
+            "initial": "regions",
+            "parallel": [
+                {
+                    "id": "regions",
+                    "state": [
+                        {
+                            "id": "left",
+                            "initial": "li",
+                            "state": [{"id": "li"}, {"id": "la"}],
+                        },
+                        {
+                            "id": "right",
+                            "initial": "ri",
+                            "state": [{"id": "ri"}, {"id": "ra"}],
+                        },
+                    ],
+                }
+            ],
+        }
+    else:
+        body = {
+            "initial": "idle",
+            "state": [{"id": "idle"}, {"id": "active"}],
+        }
+    body["sos:clock_domains"] = {"sos:clock": list(decls)}
+    return body
+
+
+class TestPCDN008WalkerEIntegration:
+    """SOS-08-D wave-7b (2026-05-25 §15) — E walker consumes the shared
+    ``_clock_domains.parse_clock_domains`` helper.
+
+    These tests pin the wave-7b contract:
+      * Charts without ``<sos:clock_domains>`` route through the
+        helper's implicit-default-clock map AND emit byte-identically
+        to the wave-3 baseline (single-clock path).
+      * Charts with a single explicit ``<sos:clock>`` keep the single-
+        clock byte-identical emit (alias-aware logic emits ONE generator).
+      * Two declarations sharing ``(source, kind)`` are aliases —
+        ONE clock generator + ``assign <alias> = <canonical>;`` for the
+        non-canonical name.
+      * ``kind="falling"`` propagates through to the ``drive_step``
+        ``case (clock_domain)`` arm as ``@(negedge <clk>)``.
+      * Same source, different kind → CDC boundary (per SOS-08-D §15 Q9).
+      * Aliases never produce CDC sync stubs.
+      * CDC sync stub filenames use canonical names.
+      * Reserved-kind enum values propagate as
+        ``UnsupportedClockKindError`` from the helper through the E
+        walker.
+    """
+
+    # ---------- byte-identity (helper-driven, no block) ----------
+
+    def test_byte_identity_for_chart_without_clock_domains_block_via_helper(self):
+        """Helper integration MUST preserve wave-3 byte-identity for
+        charts with no ``<sos:clock_domains>`` block — the helper's
+        implicit-default-clock map is collapsed to ``[]`` at the
+        legacy-shape layer so ``is_multi_clock`` stays ``False``."""
+        baseline = sv_tb.render_target(
+            _simple_chart(), {"chart_name": "demo"}
+        )
+        # No clock-generator or CDC sync stub files emitted.
+        for k in baseline:
+            assert "clock_generators_" not in k
+            assert "_cdc_" not in k
+        # The driver base is the wave-3 single-clock variant — no
+        # ``clock_domain`` parameter, no ``clock_domain_of_step`` manifest.
+        drv_base = baseline["tb/sv/demo/sos_demo_driver_base.svh"]
+        assert "clock_domain_of_step" not in drv_base
+        assert "string clock_domain" not in drv_base
+
+    def test_byte_identity_for_chart_with_only_default_clock(self):
+        """A chart with a ``<sos:clock_domains>`` block carrying ONE
+        explicit ``<sos:clock kind="rising">`` declaration stays in
+        the single-clock byte-identical emit path on the E-walker
+        emit surface (file SET unchanged, no clock-generator / CDC
+        sync files added, driver/checker/top unchanged from a chart
+        with no clock-domains block).
+
+        NOTE: the SVA bind file (owned by the D walker) MAY differ
+        between a no-block chart and a one-block chart — the D walker's
+        wave-7a integration takes different code paths based on
+        whether a ``<sos:clock_domains>`` block is declared. That's a
+        D-walker concern; this test pins the E-walker emit surface
+        only.
+        """
+        chart_no = _simple_chart()
+        chart_one = _chart_with_kinded_clocks(
+            [{"name": "clk_only", "kind": "rising", "period_ns": 10}]
+        )
+        baseline = sv_tb.render_target(chart_no, {"chart_name": "demo"})
+        one_clock = sv_tb.render_target(chart_one, {"chart_name": "demo"})
+        # File set is identical — single-clock chart MUST NOT add any
+        # new clock-generator / CDC sync stub files at the E layer.
+        assert sorted(baseline) == sorted(one_clock)
+        # E-walker-owned files (vif/driver/checker/top + their _base
+        # companions + build wrappers + verilator stubs + parser pkg +
+        # state symbols) MUST be byte-identical across the two charts.
+        # The SVA bind files (``<chart>_fsm_sva.sv`` /
+        # ``<chart>_fsm_bind.sv``) are D-walker owned and may differ.
+        for k in baseline:
+            if k.endswith("_fsm_sva.sv") or k.endswith("_fsm_bind.sv"):
+                continue
+            assert baseline[k] == one_clock[k], (
+                f"wave-7b helper integration regression for `{k}` "
+                f"(E-walker-owned file)"
+            )
+
+    # ---------- alias collapse ----------
+
+    def test_two_aliases_same_source_same_kind_emit_one_generator(self):
+        """Two ``<sos:clock>`` declarations sharing ``(source, kind)``
+        are aliases of one domain — exactly ONE ``initial`` /
+        ``forever`` generator block, not two."""
+        chart = _chart_with_kinded_clocks([
+            {"name": "core_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            {"name": "bus_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            # Independent third clock so the chart is multi-clock.
+            {"name": "ref_clk", "source": "xtal", "kind": "rising",
+             "period_ns": 20},
+        ])
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        gens = files["tb/sv/demo/clock_generators_demo.svh"]
+        # Exactly TWO ``forever`` blocks — one for the (sys_pll, rising)
+        # pair (canonical = alphabetic-first = ``bus_clk``) and one for
+        # the (xtal, rising) pair.
+        assert gens.count("forever ") == 2, (
+            "alias collapse: two clocks sharing (source, kind) MUST "
+            "emit ONE generator. Got " + str(gens.count("forever "))
+        )
+
+    def test_two_aliases_emit_continuous_assign_for_non_canonical(self):
+        """The non-canonical alias name gets a ``assign <alias> =
+        <canonical>;`` continuous assignment so its waveform tracks
+        the canonical generator."""
+        chart = _chart_with_kinded_clocks([
+            # Alphabetic order — ``bus_clk`` < ``core_clk`` so
+            # ``bus_clk`` is canonical.
+            {"name": "core_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            {"name": "bus_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            # Independent second domain so the chart is multi-clock.
+            {"name": "ref_clk", "source": "xtal", "kind": "rising",
+             "period_ns": 20},
+        ])
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        gens = files["tb/sv/demo/clock_generators_demo.svh"]
+        # Continuous assign mirrors the canonical name onto the alias.
+        assert "assign core_clk = bus_clk;" in gens
+        # The canonical name owns the generator initial-block.
+        assert "bus_clk = 1'b0;" in gens
+        # No spurious generator for the alias.
+        assert "core_clk = 1'b0;" not in gens
+
+    # ---------- kind-aware emit ----------
+
+    def test_falling_kind_drive_step_uses_negedge(self):
+        """A ``<sos:clock kind="falling">`` declaration MUST emit
+        ``@(negedge <clk>)`` in the multi-clock driver's
+        ``drive_step`` case arm."""
+        chart = _chart_with_kinded_clocks([
+            {"name": "clk_pos", "kind": "rising", "period_ns": 10},
+            {"name": "clk_neg", "kind": "falling", "period_ns": 10},
+        ])
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        drv = files["tb/sv/demo/sos_driver_demo.sv"]
+        assert '"clk_pos": @(posedge clk_pos);' in drv
+        assert '"clk_neg": @(negedge clk_neg);' in drv
+
+    def test_rising_kind_drive_step_uses_posedge(self):
+        """A ``<sos:clock kind="rising">`` declaration MUST emit
+        ``@(posedge <clk>)`` in the multi-clock driver's
+        ``drive_step`` case arm. This is the wave-3 byte-identical
+        default; the test exists to pin the kind→edge mapping under
+        explicit ``kind="rising"`` declarations."""
+        chart = _chart_with_kinded_clocks([
+            {"name": "clk_a", "kind": "rising", "period_ns": 10},
+            {"name": "clk_b", "kind": "rising", "period_ns": 20},
+        ])
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        drv = files["tb/sv/demo/sos_driver_demo.sv"]
+        assert '"clk_a": @(posedge clk_a);' in drv
+        assert '"clk_b": @(posedge clk_b);' in drv
+        # Default arm picks primary edge.
+        assert "default: @(posedge clk_a);" in drv
+
+    def test_falling_kind_emits_init_one_in_generator(self):
+        """``kind="falling"`` clocks start at 1'b1 (so the first
+        toggle is the falling edge); rising clocks stay at 1'b0."""
+        chart = _chart_with_kinded_clocks([
+            {"name": "clk_pos", "kind": "rising", "period_ns": 10},
+            {"name": "clk_neg", "kind": "falling", "period_ns": 10},
+        ])
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        gens = files["tb/sv/demo/clock_generators_demo.svh"]
+        assert "clk_pos = 1'b0;" in gens
+        assert "clk_neg = 1'b1;" in gens
+
+    # ---------- CDC boundary (alias-aware) ----------
+
+    def test_cdc_boundary_same_source_different_kind_emits_sync_stub(self):
+        """Two clocks sharing ``source`` but with different ``kind``
+        values are a CDC boundary (per SOS-08-D §15 Q9). The walker
+        emits a sync stub for each declared boundary direction."""
+        chart = _chart_with_kinded_clocks([
+            {"name": "clk_p", "source": "sys", "kind": "rising",
+             "period_ns": 10},
+            {"name": "clk_n", "source": "sys", "kind": "falling",
+             "period_ns": 10},
+        ])
+        chart["sos:cdc_boundary"] = [{"from": "clk_p", "to": "clk_n"}]
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        assert "tb/sv/demo/sos_demo_cdc_clk_p_clk_n_sync.svh" in files
+
+    def test_cdc_boundary_aliases_not_treated_as_boundary(self):
+        """A declared ``<sos:cdc_boundary>`` between two aliases (same
+        ``(source, kind)``) collapses — no sync stub file emitted."""
+        chart = _chart_with_kinded_clocks([
+            {"name": "core_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            {"name": "bus_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            # Independent third clock so the chart is multi-clock.
+            {"name": "ref_clk", "source": "xtal", "kind": "rising",
+             "period_ns": 20},
+        ])
+        chart["sos:cdc_boundary"] = [
+            # Boundary "between" two aliases — should collapse.
+            {"from": "core_clk", "to": "bus_clk"},
+        ]
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        # No CDC sync stub for the alias pair.
+        assert not any(
+            "_cdc_core_clk_bus_clk_" in k or "_cdc_bus_clk_core_clk_" in k
+            for k in files
+        )
+
+    def test_cdc_sync_stub_filename_uses_canonical_names(self):
+        """When a ``<sos:cdc_boundary>`` references an alias, the
+        emitted sync stub filename uses the canonical name on both
+        ends."""
+        chart = _chart_with_kinded_clocks([
+            # Canonical for sys_pll/rising = bus_clk.
+            {"name": "core_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            {"name": "bus_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            # Independent destination domain.
+            {"name": "ref_clk", "source": "xtal", "kind": "rising",
+             "period_ns": 20},
+        ])
+        # Boundary names the alias (core_clk), not the canonical
+        # (bus_clk). The walker resolves to canonical on emit.
+        chart["sos:cdc_boundary"] = [{"from": "core_clk", "to": "ref_clk"}]
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        # The emitted file uses the canonical name on the from side.
+        assert "tb/sv/demo/sos_demo_cdc_bus_clk_ref_clk_sync.svh" in files
+        # The alias-named filename MUST NOT exist.
+        assert "tb/sv/demo/sos_demo_cdc_core_clk_ref_clk_sync.svh" not in files
+
+    # ---------- error propagation ----------
+
+    def test_unsupported_kind_raises_at_e_walker_layer(self):
+        """A ``<sos:clock kind="...">`` value in
+        ``_clock_domains.RESERVED_KINDS`` raises
+        ``UnsupportedClockKindError`` (NOT swallowed at the E-walker
+        layer per deliverable 5)."""
+        # Lazy import to avoid coupling test-suite import order to the
+        # helper's path.
+        import _clock_domains as cd
+        chart = _chart_with_kinded_clocks([
+            {"name": "clk_a", "kind": "rising", "period_ns": 10},
+            {"name": "clk_ddr", "kind": "both", "period_ns": 10},
+        ])
+        with pytest.raises(cd.UnsupportedClockKindError):
+            sv_tb.render_target(chart, {"chart_name": "demo"})
+
+    # ---------- canonical-name surface ----------
+
+    def test_clock_domain_of_step_returns_canonical_name(self):
+        """``clock_domain_of_step``'s default body returns the primary
+        (first-declared) clock name verbatim. When the first declaration
+        is itself a canonical (alphabetic-first) name in its alias
+        group, the return value IS the canonical name."""
+        chart = _chart_with_kinded_clocks([
+            # bus_clk < core_clk alphabetically → bus_clk is canonical.
+            {"name": "bus_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            {"name": "core_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            {"name": "ref_clk", "source": "xtal", "kind": "rising",
+             "period_ns": 20},
+        ])
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        drv_base = files["tb/sv/demo/sos_demo_driver_base.svh"]
+        # Primary (and canonical) is bus_clk — the (sys_pll, rising)
+        # canonical name appears in the legacy list before ref_clk
+        # because the helper iterates declaration order and we drop
+        # non-canonical names.
+        assert 'return "bus_clk";' in drv_base
+        assert 'return "core_clk";' not in drv_base
+
+    def test_multi_clock_top_module_declares_logic_for_aliases(self):
+        """The top-module declares ``logic <name>;`` for every declared
+        clock name (canonical + aliases) so the alias signal is a real
+        SV signal the ``assign`` statement can drive."""
+        chart = _chart_with_kinded_clocks([
+            {"name": "bus_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            {"name": "core_clk", "source": "sys_pll", "kind": "rising",
+             "period_ns": 10},
+            {"name": "ref_clk", "source": "xtal", "kind": "rising",
+             "period_ns": 20},
+        ])
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        top = files["tb/sv/demo/tb_demo.sv"]
+        assert "logic bus_clk;" in top
+        assert "logic core_clk;" in top
+        assert "logic ref_clk;" in top
