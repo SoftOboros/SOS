@@ -174,6 +174,47 @@ def discover_waveform_paths(path: Path) -> list[Path]:
     ]
 
 
+def load_overlay_header(path: Path) -> dict:
+    """Return the parsed `_meta` envelope from the overlay's first line.
+
+    Wave-3c-future helper — viewer integrations consult the header to
+    drive features beyond per-record render: `waveform_prefix` for
+    discovery (wave-3b), `vector_source` for §6 (f) drill-down
+    (wave-3c-future).
+
+    Returns the unwrapped `_meta` dict (e.g. ``{"schema": "...",
+    "vector_source": "vectors/...json"}``). Raises ``ValueError`` when
+    the header line is missing or malformed; ``FileNotFoundError``
+    when the overlay is absent.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"annotation overlay not found at {path!s}"
+        )
+    text = path.read_text(encoding="utf-8")
+    header_line = next(
+        (ln for ln in text.splitlines() if ln.strip()),
+        None,
+    )
+    if header_line is None:
+        raise ValueError(
+            f"annotation overlay {path!s} is empty; "
+            f"per INV-S-HDL-G-3 the first line MUST be the schema header"
+        )
+    try:
+        header = json.loads(header_line)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"annotation overlay {path!s} line 0 is not valid JSON: {exc}"
+        ) from exc
+    if isinstance(header, dict) and "_meta" in header:
+        return header["_meta"] if isinstance(header["_meta"], dict) else {}
+    # Tolerate flat shape for backwards compatibility with overlays
+    # authored before the `_meta` envelope landed in PCDN-G-001.
+    return header if isinstance(header, dict) else {}
+
+
 def load_annotations(path: Path) -> list[dict]:
     """Load + validate an SOS-08-G annotation overlay file.
 
@@ -299,7 +340,10 @@ def _tcl_escape(value: object) -> str:
     )
 
 
-def to_gtkwave_tcl(annotations: Sequence[dict]) -> str:
+def to_gtkwave_tcl(
+    annotations: Sequence[dict],
+    vector_source: str | None = None,
+) -> str:
     """Emit a GTKWave Tcl script that installs chart-state markers +
     comment-trace overlay tracks.
 
@@ -416,6 +460,46 @@ def to_gtkwave_tcl(annotations: Sequence[dict]) -> str:
         )
     lines.append("")
 
+    # --- Section 4 (wave-3c-future §6 (f)): vector-citation drill-down --- #
+    #
+    # When the overlay header carried `_meta.vector_source`, the Tcl
+    # plugin's `sos_open_vector` proc resolves a vector_index click to
+    # the SOS-03 vector JSON file via this global. Emitting the global
+    # + per-record vector-citation aliases lets a user invoke
+    # `sos_open_vector_at <vector_index>` (or a key-bound hook in
+    # sos_overlay.tcl) to open the chart's vector source in $EDITOR.
+    # When `vector_source` is absent the section is omitted — the
+    # wave-3c GTKWave behaviour stays byte-identical for overlays that
+    # didn't author a vector_source header.
+    vector_records = [
+        record
+        for record in sorted_recs
+        if record.get("vector_index") is not None
+    ]
+    if vector_source is not None or vector_records:
+        lines.append("# --- vector-citation drill-down (§6 (f) — wave-3c-future) ---")
+        if vector_source is not None:
+            lines.append(
+                f"set ::sos_vector_source \"{_tcl_escape(vector_source)}\""
+            )
+        else:
+            # Header didn't carry vector_source — clear the global so a
+            # previous overlay's path doesn't bleed into this overlay's
+            # drill-down resolution.
+            lines.append("set ::sos_vector_source \"\"")
+        for record in vector_records:
+            cycle = record.get("cycle", 0)
+            vector_index = record.get("vector_index")
+            chart_state = record.get("chart_state", "?")
+            # Conventional alias surface — sos_overlay.tcl's
+            # `sos_open_vector_at` proc + downstream wave-3c-future
+            # viewer hooks grep this for routing the click.
+            lines.append(
+                f"mark_vector_citation {cycle} {vector_index} "
+                f"\"{_tcl_escape(chart_state)}\""
+            )
+        lines.append("")
+
     # --- Section 3: invariant-fire comment-trace track (§6 (e)) --- #
     invariants = [
         record
@@ -495,7 +579,18 @@ def main(argv: Iterable[str] | None = None) -> int:
     # `tcl` and `gtkwave` are equivalent aliases — the latter is the
     # explicit name the wave-3c sos_overlay.tcl loader uses when
     # shelling out from inside the GTKWave Tcl interpreter.
-    tcl = to_gtkwave_tcl(records)
+    # Wave-3c-future (§6 (f)): consult the overlay's `_meta` envelope
+    # for the optional `vector_source` field; thread it into the Tcl
+    # emit so the drill-down section can resolve clicks to the chart's
+    # SOS-03 vector file.
+    try:
+        meta = load_overlay_header(args.annotations)
+    except (FileNotFoundError, ValueError):
+        meta = {}
+    vector_source = meta.get("vector_source") if isinstance(meta, dict) else None
+    if not isinstance(vector_source, str) or not vector_source:
+        vector_source = None
+    tcl = to_gtkwave_tcl(records, vector_source=vector_source)
     if args.output is None:
         sys.stdout.write(tcl)
     else:

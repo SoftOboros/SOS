@@ -674,3 +674,81 @@ Wave-3c closes the wave-3 GUI-integration boundary the wave-1 + wave-2 §15 entr
 **Cited PCDNs**: PCDN-G-004 (in-subrepo distribution honoured); PCDN-G-001 (`_meta` envelope preserved); PCDN-G-002 (`chart_path_max_depth: 8` mirrored into Rust constant); PCDN-G-005 / PCDN-G-006 (unchanged); INV-S-HDL-G-1/-2/-3/-4/-6.
 
 Status: 🟢 **wave-3c complete** — full GUI integration landed. SOS-08-G §6 (a)–(e) conformance gates satisfied by both viewers; (f) vector-citation drill-down remains the wave-3c-future open item (gated on upstream viewer-API stability). The SOS-11 chart-diff + SOS-08-G waveform-diff parity claim per INV-S-HDL-G-6 is now end-to-end operational.
+
+### 2026-05-24 — Impl wave-3c-future: §6 (f) vector-citation drill-down — data layer (Ira)
+
+Lands the first wave-3c-future carry-forward: the **data-layer half** of §6 (f) vector-citation drill-down. The wave-3c §15 entry deferred this carry-forward on the grounds that GTKWave's `set_pattern_filename`-equivalent link-back hook + Surfer's host-side link-back API both lack a stabilised upstream release for the **GUI invocation half**. This entry splits the gate:
+
+- **§6 (f.1) data layer** — overlay header carries `_meta.vector_source`; both viewers' emitters render the drill-down section; the GTKWave Tcl plugin defines `sos_open_vector_at <vector_index>` that resolves the click via `$EDITOR`. **CLOSED by this entry.**
+- **§6 (f.2) GUI invocation layer** — host-side click handler that consumes the drill-down command. **Still gated** on upstream viewer-API stability; the wave-3c-future emit is forward-compatible with that future stabilisation (legacy hosts stub the command as a no-op; future hosts route it).
+
+Re-reading §6 (f) under this split, both viewers' conformance status moves from ⏸ to 🟡 (partial — data layer landed; GUI invocation pending).
+
+**Implementation surface**:
+
+- **`transliterate_cocotb.py` writer** — `AnnotationWriter.__init__` gains an optional `vector_source: str | None = None` kwarg. When provided, the value lands in `_meta.vector_source` of the overlay's first-line header. Both emitted test bodies (single-region path at line 1233 and parallel-chart path at line 1422) construct the writer with `vector_source=str(_VECTORS_DIR / "<vector_id>.json")` so the SOS-03 vector path threads through by construction — no per-test author touch required.
+- **`tools/sos-codegen/viewers/gtkwave/sos_gtkwave_ext.py`** — new `load_overlay_header(path)` helper returns the unwrapped `_meta` dict (or tolerates the flat shape for backwards compatibility); `to_gtkwave_tcl(annotations, vector_source=None)` gains the kwarg + emits a new "vector-citation drill-down" section that (i) sets `::sos_vector_source` Tcl global, (ii) emits one `mark_vector_citation <cycle> <vector_index> "<chart_state>"` per record carrying `vector_index`. The CLI threads `vector_source` from the overlay header automatically.
+- **`tools/sos-codegen/viewers/gtkwave/sos_overlay.tcl`** — defines `sos_open_vector_at <vector_index>` proc. Consults `::sos_vector_source` global + `$env(EDITOR)`, invokes `exec $editor "+$line_hint" $src &` to open the SOS-03 vector source at the matching step (line N+2 in the typical `[meta, step0, step1, …]` JSON shape). Soft-fail when EDITOR is unset or the global is empty — logs the diagnostic and returns 0 (no exception in the GUI thread).
+- **`tools/sos-codegen/viewers/surfer/sos_surfer_ext.py`** — re-exports `load_overlay_header` from the GTKWave module; `to_surfer_commands(annotations, vector_source=None)` emits a parallel drill-down section with `set_vector_source "<path>"` + per-record `open_vector_source "<path>" <vector_index> <cycle> "<chart_state>"` lines. CLI threads `vector_source` from the overlay header automatically. **Backwards-compatible**: when `vector_source` is `None`, the drill-down section is omitted entirely (Surfer's command list is consumed once at overlay-load — unlike the persistent GTKWave Tcl global — so there's no value in a cleared-path sentinel).
+- **`tools/sos-codegen/viewers/surfer/sos-surfer-plugin/src/lib.rs`** — `SchemaMeta.vector_source: Option<String>` field; new `SurferCommand::OpenVectorSource { vector_source, vector_index, time, chart_state }` enum variant; new `render_commands_with_vector_source(records, vector_source)` entry point that emits `OpenVectorSource` per record with `vector_index` when `vector_source` is non-empty. Legacy `render_commands(records)` signature (no `vector_source` arg) MUST NOT emit drill-down commands — wave-3c byte-identity preserved for downstream callers that haven't been migrated.
+
+**Sample emit change** (GTKWave Tcl, for an overlay with `_meta.vector_source = "vectors/0001-two-tasks-yield.json"` and four `vector_index`-bearing records):
+
+```tcl
+# --- vector-citation drill-down (§6 (f) — wave-3c-future) ---
+set ::sos_vector_source "vectors/0001-two-tasks-yield.json"
+mark_vector_citation 12 0 "arming"
+mark_vector_citation 47 1 "running"
+mark_vector_citation 102 3 "acquired"
+mark_vector_citation 156 7 "halted"
+```
+
+**Sample emit change** (Surfer command script, same overlay):
+
+```
+# --- vector-citation drill-down (§6 (f) — wave-3c-future) ---
+set_vector_source "vectors/0001-two-tasks-yield.json"
+open_vector_source "vectors/0001-two-tasks-yield.json" 0 12 "arming"
+open_vector_source "vectors/0001-two-tasks-yield.json" 1 47 "running"
+open_vector_source "vectors/0001-two-tasks-yield.json" 3 102 "acquired"
+open_vector_source "vectors/0001-two-tasks-yield.json" 7 156 "halted"
+```
+
+**End-user flow** (post wave-3c-future, GTKWave reference):
+
+1. SOS-08-D codegen emits a test that loads `vectors/0001-two-tasks-yield.json` and instruments via `AnnotationWriter(..., vector_source=str(_VECTORS_DIR / "0001-two-tasks-yield.json"))`.
+2. cocotb run produces `<test>.fst|.vcd|.annotations.jsonl`; the overlay's `_meta.vector_source` records the vector path.
+3. User opens the FST in GTKWave with `--script sos_overlay.tcl`. Tcl plugin discovers the overlay, calls `sos_gtkwave_ext --format gtkwave`, eval's the result — which includes the drill-down section setting `::sos_vector_source` + `mark_vector_citation` per record.
+4. User wants to inspect what step N drives the badge at cycle K. They invoke `sos_open_vector_at <N>` (manually from the Tcl console, or via a `~/.gtkwaverc` keybind). The proc spawns `$EDITOR "+<line_hint>" "vectors/0001-two-tasks-yield.json"` — the user's editor opens the JSON at the matching step.
+
+The Surfer reference flow is identical structurally; the host-side wiring of `OpenVectorSource` to the editor is the §6 (f.2) work that stays gated on upstream API stability.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-G-1** (three-file output coupling) — unchanged; the drill-down is an in-overlay addition, no new files.
+- **INV-S-HDL-G-2** (chart-vocabulary mandatory) — extended in spirit: the drill-down link target carries chart vocabulary (chart_state) so the editor-side context (tooltip / link-text) renders in chart vocabulary, not RTL-signal vocabulary.
+- **INV-S-HDL-G-3** (schema-version header required) — preserved + extended: the `_meta` envelope at line 0 now optionally carries `vector_source` per the SOS-08-G §5.2 envelope-extensibility-at-v1.0 contract ratified in the wave-3b §15 entry (additive fields under v1.0 are forward-compatible).
+- **INV-S-HDL-G-4** (build-output discipline) — preserved; `_meta.vector_source` references the chart's tracked vector file (in source control), but the overlay itself remains a build output.
+- **INV-S-HDL-G-5** (generation co-located with test body) — preserved; `vector_source` is set inside the `@cocotb.test()` body at writer-construction time, mirroring the wave-3b `waveform_prefix` pattern.
+- **INV-S-HDL-G-6** (chart-diff + waveform-diff parity for MCP-workflow review) — strengthened: the review surface can now drill from a waveform badge directly to the vector definition that produced it, closing the loop chart-edit → regen → review at a finer grain.
+- **PCDN-G-001** (`_meta` envelope at v1.0) — preserved; the envelope's "additive optional fields" contract is honoured (wave-3b added `waveform_prefix`; wave-3c-future adds `vector_source`).
+- **PCDN-G-002** (`chart_path_max_depth: 8`) — unchanged.
+- **PCDN-G-003** (one file per test run) — unchanged.
+- **PCDN-G-005 / PCDN-G-006** (per-event default / line-buffered flush) — unchanged.
+
+**Wave-3c-future remaining boundary**:
+
+- **§6 (f.2) GUI invocation layer** — host-side click handler routing. GTKWave: bind `sos_open_vector_at` to a key via `~/.gtkwaverc` (documented in the plugin README); the Tcl plugin emit is correct and ready, but autobinding lands when GTKWave's keyaction-from-plugin API is exposed. Surfer: the `OpenVectorSource` command is emitted; routing to the user's editor lands when Surfer's plugin-host link-back API stabilises.
+- **Cross-overlay merge** (a single waveform with multiple per-test overlays merged into one timeline view) — wave-4 candidate per the wave-3c entry; unchanged.
+- **Time-scale-multiplier propagation** (cycle → ns) — wave-4 candidate per the wave-3c entry; unchanged.
+
+**Test count**: net +22 Python tests across `tools/sos-codegen/viewers/tests/test_wave_3c_gui_integration.py` + 5 new Rust unit tests in `sos-surfer-plugin/src/lib.rs`:
+
+- Python (22): `TestWave3cFutureDrillDownDataLayer` (3 — fixture presence; `load_overlay_header` returns `vector_source`; field absent in legacy overlay), `TestWave3cFutureGtkwaveTclEmit` (7 — drill-down section emitted; `::sos_vector_source` set; one `mark_vector_citation` per `vector_index`-bearing record; line content; clears global when `vector_source=None`; omits section when neither `vector_source` nor `vector_index`-bearing records present; legacy signature byte-identity), `TestWave3cFutureSurferCommandEmit` (4 — `set_vector_source` emit; one `open_vector_source` per vector record; chart_state argument present; legacy signature MUST NOT emit drill-down), `TestWave3cFutureGtkwaveTclPluginProc` (4 — `sos_open_vector_at` proc declared; reads `::sos_vector_source` global; uses `$env(EDITOR)`; passes `+<line>` hint), `TestWave3cFutureWriterVectorSourceHeader` (4 — `AnnotationWriter` accepts `vector_source` kwarg; header carries the field when provided; header omits field when absent; emitted test body passes `vector_source=str(_VECTORS_DIR / "<vector_id>.json")`).
+- Rust (5): `parses_vector_source_from_header`; `open_vector_source_commands_emitted_when_threaded`; `open_vector_source_omitted_when_vector_source_absent`; `open_vector_source_omitted_for_empty_vector_source`; `render_commands_legacy_signature_omits_drill_down`.
+
+**Test suite**: Python: 643/643 passing (621 prior incl. wave-3c viewers/tests baseline + 22 new wave-3c-future). Rust: 9/9 passing (4 prior + 5 new wave-3c-future).
+
+**Cited PCDNs / invariants**: PCDN-G-001 (envelope extensibility at v1.0 — `vector_source` is an additive optional field under the wave-3b precedent); PCDN-G-003 / -005 / -006 (unchanged); INV-S-HDL-G-1 through G-6 (preserved, with G-2 and G-6 extended in spirit per above); INV-SOS-H (chart vocabulary survives into the editor-side link target).
+
+Status: 🟢 **wave-3c-future (f.1) data layer complete**. §6 (f) splits cleanly: f.1 closed by this entry; f.2 GUI invocation layer remains gated on upstream viewer-API stability with the wave-3c-future emit forward-compatible with that future stabilisation. Both viewers' §6 (f) status: ⏸ → 🟡 (partial — data layer landed; host-side invocation pending).

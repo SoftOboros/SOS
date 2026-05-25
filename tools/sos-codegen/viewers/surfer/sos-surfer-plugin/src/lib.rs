@@ -147,6 +147,15 @@ pub struct SchemaMeta {
     /// directory.
     #[serde(default)]
     pub waveform_prefix: Option<String>,
+    /// SOS-08-G wave-3c-future additive field (§15 2026-05-24): path
+    /// to the SOS-03 vector JSON file the cocotb test loaded. When
+    /// present, the plugin emits `OpenVectorSource` commands for each
+    /// record carrying `vector_index`, closing §6 (f) drill-down on
+    /// the data-layer side. The host's link-back API consumes the
+    /// command at runtime (when stabilised); forward-compat hosts
+    /// stub the command as a no-op.
+    #[serde(default)]
+    pub vector_source: Option<String>,
 }
 
 /// Errors raised by [`parse_overlay`].
@@ -211,6 +220,18 @@ pub enum SurferCommand {
     },
     /// Apply the invariant-fire visual-treatment override (§6 (e)).
     MarkInvariant { time: u64, label: String },
+    /// SOS-08-G wave-3c-future §6 (f): drill-down click target. The
+    /// host's plugin link-back API routes the click to the user's
+    /// editor (or a no-op stub on hosts without the link-back hook).
+    /// `vector_source` mirrors `_meta.vector_source`; `vector_index`
+    /// names the step within that file; `time` + `chart_state` give
+    /// the host a chart-vocabulary tooltip for the link.
+    OpenVectorSource {
+        vector_source: String,
+        vector_index: u64,
+        time: u64,
+        chart_state: String,
+    },
 }
 
 /// Render the parsed annotation set into a flat list of Surfer
@@ -223,7 +244,27 @@ pub enum SurferCommand {
 ///    (§6 (d) chart-path navigation SHOULD).
 /// 3. Optional `sos:invariants` overlay track + `MarkInvariant`
 ///    highlights for records with `invariant_id != None` (§6 (e)).
+/// 4. Optional `OpenVectorSource` commands for records carrying
+///    `vector_index` when `vector_source` is non-empty (§6 (f) —
+///    wave-3c-future drill-down). The Python `render_commands`
+///    binding takes the value from `_meta.vector_source`; this Rust
+///    entry-point overload accepts it as an explicit argument.
 pub fn render_commands(records: &[AnnotationRecord]) -> Vec<SurferCommand> {
+    render_commands_with_vector_source(records, None)
+}
+
+/// Variant of [`render_commands`] that threads the overlay's
+/// `_meta.vector_source` through so the emit can produce
+/// `OpenVectorSource` commands (§6 (f) wave-3c-future drill-down).
+///
+/// Callers that have parsed the overlay header (via [`parse_overlay`])
+/// SHOULD pass `header.meta.vector_source.as_deref()`; the
+/// drill-down commands emit when both the header carries a non-empty
+/// `vector_source` AND the record has a `vector_index`.
+pub fn render_commands_with_vector_source(
+    records: &[AnnotationRecord],
+    vector_source: Option<&str>,
+) -> Vec<SurferCommand> {
     use std::collections::BTreeMap;
 
     let mut cmds: Vec<SurferCommand> = Vec::new();
@@ -295,6 +336,20 @@ pub fn render_commands(records: &[AnnotationRecord]) -> Vec<SurferCommand> {
         }
     }
 
+    // --- §6 (f) drill-down commands (wave-3c-future) --- //
+    if let Some(src) = vector_source.filter(|s| !s.is_empty()) {
+        for record in &sorted {
+            if let Some(vi) = record.vector_index {
+                cmds.push(SurferCommand::OpenVectorSource {
+                    vector_source: String::from(src),
+                    vector_index: vi,
+                    time: record.cycle,
+                    chart_state: record.chart_state.clone(),
+                });
+            }
+        }
+    }
+
     cmds
 }
 
@@ -360,6 +415,110 @@ mod tests {
         assert!(cmds
             .iter()
             .any(|c| matches!(c, SurferCommand::MarkInvariant { .. })));
+    }
+
+    const OVERLAY_WITH_VECTOR_SOURCE: &str = concat!(
+        r#"{"_meta": {"schema": "sos-08-g/annotations", "version": "1.0", "#,
+        r#""vector_source": "vectors/0001-two-tasks-yield.json"}}"#,
+        "\n",
+        r#"{"cycle": 5, "signal": "dut.cs", "chart_state": "idle", "#,
+        r#""transition_id": null, "chart_path": "/orchestrator", "region": null, "#,
+        r#""vector_index": 0}"#,
+        "\n",
+        r#"{"cycle": 17, "signal": "dut.cs", "chart_state": "running", "#,
+        r#""transition_id": "t1", "chart_path": "/orchestrator", "region": null, "#,
+        r#""vector_index": 2}"#,
+        "\n",
+        r#"{"cycle": 23, "signal": "dut.cs", "chart_state": "done", "#,
+        r#""transition_id": null, "chart_path": "/orchestrator", "region": null}"#,
+        "\n",
+    );
+
+    #[test]
+    fn parses_vector_source_from_header() {
+        // SOS-08-G wave-3c-future §15 (2026-05-24): `_meta.vector_source`
+        // is the per-overlay drill-down link target.
+        let (header, records) = parse_overlay(OVERLAY_WITH_VECTOR_SOURCE).unwrap();
+        assert_eq!(
+            header.meta.vector_source.as_deref(),
+            Some("vectors/0001-two-tasks-yield.json"),
+        );
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].vector_index, Some(0));
+        assert_eq!(records[1].vector_index, Some(2));
+        assert_eq!(records[2].vector_index, None);
+    }
+
+    #[test]
+    fn open_vector_source_commands_emitted_when_threaded() {
+        let (header, records) = parse_overlay(OVERLAY_WITH_VECTOR_SOURCE).unwrap();
+        let cmds = render_commands_with_vector_source(
+            &records,
+            header.meta.vector_source.as_deref(),
+        );
+        let openings: Vec<&SurferCommand> = cmds
+            .iter()
+            .filter(|c| matches!(c, SurferCommand::OpenVectorSource { .. }))
+            .collect();
+        // Two records carry `vector_index`; the third doesn't.
+        assert_eq!(openings.len(), 2);
+        // First emit corresponds to the cycle=5 record (vector_index=0).
+        match openings[0] {
+            SurferCommand::OpenVectorSource {
+                vector_source,
+                vector_index,
+                time,
+                chart_state,
+            } => {
+                assert_eq!(vector_source, "vectors/0001-two-tasks-yield.json");
+                assert_eq!(*vector_index, 0);
+                assert_eq!(*time, 5);
+                assert_eq!(chart_state, "idle");
+            }
+            _ => panic!("expected OpenVectorSource"),
+        }
+    }
+
+    #[test]
+    fn open_vector_source_omitted_when_vector_source_absent() {
+        // Backwards-compat: legacy overlays without `_meta.vector_source`
+        // do NOT emit drill-down commands — the wave-3c emit shape is
+        // unchanged for them.
+        let (_, records) = parse_overlay(SIMPLE_OVERLAY).unwrap();
+        let cmds = render_commands_with_vector_source(&records, None);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, SurferCommand::OpenVectorSource { .. })),
+            "OpenVectorSource MUST NOT emit without _meta.vector_source"
+        );
+    }
+
+    #[test]
+    fn open_vector_source_omitted_for_empty_vector_source() {
+        let (_, records) = parse_overlay(OVERLAY_WITH_VECTOR_SOURCE).unwrap();
+        let cmds = render_commands_with_vector_source(&records, Some(""));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, SurferCommand::OpenVectorSource { .. })),
+            "empty vector_source string MUST NOT trigger drill-down emit"
+        );
+    }
+
+    #[test]
+    fn render_commands_legacy_signature_omits_drill_down() {
+        // Legacy `render_commands(records)` callers receive the wave-3c
+        // emit shape verbatim — no OpenVectorSource even when records
+        // carry vector_index.
+        let (_, records) = parse_overlay(OVERLAY_WITH_VECTOR_SOURCE).unwrap();
+        let cmds = render_commands(&records);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, SurferCommand::OpenVectorSource { .. })),
+            "render_commands() (no vector_source arg) MUST NOT emit drill-down"
+        );
     }
 
     #[test]

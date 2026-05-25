@@ -896,6 +896,7 @@ class AnnotationWriter:
         test_name: str,
         output_dir: Path | str | None = None,
         waveform_prefix: str | None = None,
+        vector_source: str | None = None,
     ) -> None:
         # SOS-08-G wave-3b / PCDN-G-wave1-003: output_dir defaults to
         # the cocotb-classic `SIM_BUILD` directory so annotations land
@@ -926,6 +927,14 @@ class AnnotationWriter:
                 or os.environ.get(self._MODULE_ENV_VAR)
             )
         self.waveform_prefix: str | None = waveform_prefix
+        # SOS-08-G wave-3c-future §15 (2026-05-24): vector-citation
+        # drill-down (§6 (f)). When present, ``vector_source`` is the
+        # path to the SOS-03 vector JSON file the test loaded; the
+        # viewer's drill-down click maps each annotation record's
+        # ``vector_index`` to a step within this file. One source per
+        # overlay because a conforming SOS-08-D test runs exactly one
+        # vector per ``@cocotb.test()``.
+        self.vector_source: str | None = vector_source
         self.output_dir.mkdir(parents=True, exist_ok=True)
         # PCDN-G-006: line-buffered (flush at every newline).
         self._fh = open(self.path, "w", buffering=1, encoding="utf-8")
@@ -937,9 +946,16 @@ class AnnotationWriter:
         # present, conforming viewer extensions locate the waveform
         # via `<output_dir>/<waveform_prefix>.fst|.vcd` instead of
         # the wave-1 same-prefix-as-overlay convention.
+        # SOS-08-G wave-3c-future §15 (2026-05-24): the envelope
+        # gains an optional `vector_source` field; viewer extensions
+        # use it to resolve drill-down click-throughs to the chart's
+        # vector definition (§6 (f) — data layer landed; GUI
+        # invocation per-viewer per its link-back API).
         header = {{"_meta": dict(self._SCHEMA_HEADER_BASE["_meta"])}}
         if self.waveform_prefix is not None:
             header["_meta"]["waveform_prefix"] = self.waveform_prefix
+        if self.vector_source is not None:
+            header["_meta"]["vector_source"] = self.vector_source
         self._fh.write(json.dumps(header) + "\\n")
 
     def record_transition(
@@ -1214,7 +1230,13 @@ async def test_vector_{slug}(dut):
     # SOS-08-G §5.6 (PCDN-G-003): one annotation file per test run.
     # Created at test start; closed in the `finally` so the file is
     # well-formed even when the test body raises.
-    writer = AnnotationWriter(test_name="test_vector_{slug}")
+    # SOS-08-G wave-3c-future §15 (2026-05-24): vector_source threads
+    # the SOS-03 vector JSON path into the overlay's _meta envelope so
+    # viewer extensions can resolve §6 (f) drill-down clicks.
+    writer = AnnotationWriter(
+        test_name="test_vector_{slug}",
+        vector_source=str(_VECTORS_DIR / "{vector_id}.json"),
+    )
     # SOS-08-G wave-3a / PCDN-G-005: per-cycle density opt-in. When
     # the writer's density resolved to "cycle" (env var
     # `SOS_ANNOTATION_DENSITY=cycle`) spawn the per-cycle recorder
@@ -1403,7 +1425,14 @@ async def test_vector_{slug}(dut):
     vector = load_vector(_VECTORS_DIR / "{vector_id}.json")
     cocotb.start_soon(Clock(dut.clk, _CLOCK_PERIOD_NS, units="ns").start())
 
-    writer = AnnotationWriter(test_name="test_vector_{slug}")
+    # SOS-08-G wave-3c-future §15 (2026-05-24): vector_source threads
+    # the SOS-03 vector JSON path into the overlay's _meta envelope so
+    # viewer extensions can resolve §6 (f) drill-down clicks (parallel
+    # path; mirrors the single-region path above).
+    writer = AnnotationWriter(
+        test_name="test_vector_{slug}",
+        vector_source=str(_VECTORS_DIR / "{vector_id}.json"),
+    )
     # SOS-08-G wave-3a / PCDN-G-005: per-cycle density opt-in for
     # parallel charts. One recorder per region so each region's
     # annotation stream is tagged with its own region name and

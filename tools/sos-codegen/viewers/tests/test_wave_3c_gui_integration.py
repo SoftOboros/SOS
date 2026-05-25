@@ -379,3 +379,286 @@ class TestWave3cReadmes:
         readme = (_GTKWAVE_DIR / "README.md").read_text(encoding="utf-8")
         assert "gtkwave --script" in readme
         assert "sos_overlay.tcl" in readme
+
+
+# ---------------------------------------------------------------------------
+# 6. wave-3c-future §6 (f) drill-down — data-layer landing
+# ---------------------------------------------------------------------------
+#
+# Wave-3c-future closes the §6 (f) vector-citation drill-down on the
+# data-layer side: writer threads `_meta.vector_source` through the
+# overlay header; both viewers' emitters render per-record drill-down
+# bindings; the Tcl plugin defines `sos_open_vector_at`. The GUI
+# invocation layer (host-side link-back call) stays gated on upstream
+# viewer-API stability — the wave-3c-future emit is forward-compatible
+# with that future stabilisation.
+
+_FIXTURE_VEC = _VIEWERS / "tests" / "fixtures" / "example_with_vector_source.jsonl"
+
+
+class TestWave3cFutureDrillDownDataLayer:
+    """Wave-3c-future writer + emit path for §6 (f)."""
+
+    def test_fixture_present(self):
+        assert _FIXTURE_VEC.exists()
+
+    def test_overlay_header_exposes_vector_source(self):
+        """`load_overlay_header` returns the `_meta.vector_source`
+        field when the overlay declares it."""
+        from gtkwave.sos_gtkwave_ext import load_overlay_header
+        meta = load_overlay_header(_FIXTURE_VEC)
+        assert meta.get("vector_source") == "vectors/0001-two-tasks-yield.json"
+
+    def test_load_overlay_header_omits_field_when_absent(self):
+        """Legacy overlay without `_meta.vector_source` returns a
+        header where the field is absent — drill-down emit MUST then
+        be skipped (wave-3c emit byte-identity preserved)."""
+        from gtkwave.sos_gtkwave_ext import load_overlay_header
+        meta = load_overlay_header(_FIXTURE)
+        assert "vector_source" not in meta
+
+
+class TestWave3cFutureGtkwaveTclEmit:
+    """`to_gtkwave_tcl(..., vector_source=...)` emits the drill-down
+    section."""
+
+    def _tcl(self):
+        records = load_annotations(_FIXTURE_VEC)
+        return to_gtkwave_tcl(
+            records,
+            vector_source="vectors/0001-two-tasks-yield.json",
+        )
+
+    def test_emit_sets_sos_vector_source_global(self):
+        tcl = self._tcl()
+        assert (
+            'set ::sos_vector_source "vectors/0001-two-tasks-yield.json"'
+            in tcl
+        )
+
+    def test_emit_has_drill_down_section_header(self):
+        tcl = self._tcl()
+        assert "vector-citation drill-down" in tcl
+
+    def test_emit_one_mark_vector_citation_per_vector_record(self):
+        """Fixture has 4 records with `vector_index` — emit MUST
+        produce one `mark_vector_citation` per record."""
+        tcl = self._tcl()
+        count = len(re.findall(r"^mark_vector_citation ", tcl, re.MULTILINE))
+        assert count == 4
+
+    def test_emit_mark_vector_citation_includes_cycle_index_and_state(self):
+        """Each `mark_vector_citation` line names cycle, vector_index,
+        and chart_state so a downstream Tcl hook can build a chart-
+        vocabulary tooltip without re-parsing the overlay."""
+        tcl = self._tcl()
+        # The cycle=12, vector_index=0, chart_state="arming" record.
+        assert 'mark_vector_citation 12 0 "arming"' in tcl
+        # The cycle=102, vector_index=3, chart_state="acquired" record.
+        assert 'mark_vector_citation 102 3 "acquired"' in tcl
+
+    def test_emit_clears_global_when_vector_source_none(self):
+        """When `vector_source=None` AND records carry `vector_index`,
+        emit MUST clear the global so a stale path from a previous
+        overlay install doesn't bleed into the new overlay's
+        drill-down resolution."""
+        records = load_annotations(_FIXTURE_VEC)
+        tcl = to_gtkwave_tcl(records, vector_source=None)
+        assert 'set ::sos_vector_source ""' in tcl
+
+    def test_emit_omits_section_when_no_vector_source_and_no_vector_records(self):
+        """An overlay with neither `vector_source` nor any
+        `vector_index`-bearing records does NOT emit the drill-down
+        section at all — wave-3c emit shape byte-preserved."""
+        records = [
+            {
+                "cycle": 0,
+                "signal": "s",
+                "chart_state": "idle",
+                "transition_id": None,
+                "chart_path": "/orchestrator",
+                "region": None,
+            }
+        ]
+        tcl = to_gtkwave_tcl(records, vector_source=None)
+        assert "vector-citation drill-down" not in tcl
+
+    def test_legacy_signature_omits_drill_down_section(self):
+        """`to_gtkwave_tcl(records)` (no vector_source kwarg) emits the
+        wave-3c byte-identity result — drill-down section appears only
+        when records carry vector_index AND the section is opened by
+        the `or vector_records` clause; in this case fixture HAS
+        vector_index records so the section emits but with a cleared
+        global (matches the previous test's contract)."""
+        records = load_annotations(_FIXTURE_VEC)
+        tcl = to_gtkwave_tcl(records)
+        # No vector_source threading → global is cleared, but section
+        # opens because the records carry vector_index (lets a
+        # downstream hook surface "this overlay has vectorable badges
+        # but no source path" as a visible diagnostic).
+        assert 'set ::sos_vector_source ""' in tcl
+
+
+class TestWave3cFutureSurferCommandEmit:
+    """`to_surfer_commands(..., vector_source=...)` emits the
+    drill-down section."""
+
+    def _cmds(self):
+        records = load_annotations(_FIXTURE_VEC)
+        return to_surfer_commands(
+            records,
+            vector_source="vectors/0001-two-tasks-yield.json",
+        )
+
+    def test_emit_sets_vector_source(self):
+        cmds = self._cmds()
+        assert (
+            'set_vector_source "vectors/0001-two-tasks-yield.json"' in cmds
+        )
+
+    def test_emit_one_open_vector_source_per_record(self):
+        cmds = self._cmds()
+        count = len(re.findall(r"^open_vector_source ", cmds, re.MULTILINE))
+        assert count == 4
+
+    def test_emit_open_vector_source_carries_chart_state(self):
+        cmds = self._cmds()
+        # Record cycle=12, vector_index=0, chart_state="arming".
+        assert (
+            'open_vector_source "vectors/0001-two-tasks-yield.json" 0 12 "arming"'
+            in cmds
+        )
+
+    def test_legacy_signature_omits_drill_down_commands(self):
+        """`to_surfer_commands(records)` without vector_source emits
+        no `open_vector_source` lines — wave-3c byte-identity for
+        legacy callers."""
+        records = load_annotations(_FIXTURE_VEC)
+        cmds = to_surfer_commands(records)
+        assert "open_vector_source" not in cmds
+
+
+class TestWave3cFutureGtkwaveTclPluginProc:
+    """The `sos_overlay.tcl` plugin gains the `sos_open_vector_at` proc."""
+
+    def test_proc_declared(self):
+        src = (_GTKWAVE_DIR / "sos_overlay.tcl").read_text(encoding="utf-8")
+        assert re.search(
+            r"^proc\s+sos_open_vector_at\s+\{", src, re.MULTILINE
+        )
+
+    def test_proc_consults_sos_vector_source_global(self):
+        src = (_GTKWAVE_DIR / "sos_overlay.tcl").read_text(encoding="utf-8")
+        assert "::sos_vector_source" in src
+
+    def test_proc_uses_editor_env(self):
+        src = (_GTKWAVE_DIR / "sos_overlay.tcl").read_text(encoding="utf-8")
+        # The proc consults $env(EDITOR) for the fallback editor.
+        assert "env(EDITOR)" in src
+
+    def test_proc_passes_line_hint_to_editor(self):
+        """The proc passes a `+<line>` argument so most editors jump
+        to the right step in the vector JSON (line N+2 matches the
+        typical SOS-03 vector-trace shape)."""
+        src = (_GTKWAVE_DIR / "sos_overlay.tcl").read_text(encoding="utf-8")
+        assert 'exec $editor "+$line_hint"' in src
+
+
+class TestWave3cFutureWriterVectorSourceHeader:
+    """The cocotb-emitted `AnnotationWriter` accepts `vector_source`
+    and writes it into the `_meta` envelope. Verified by exec'ing the
+    emitted helpers module + inspecting an instantiated writer's
+    on-disk header line."""
+
+    @staticmethod
+    def _simple_chart():
+        return {
+            "initial": "A",
+            "state": [
+                {"id": "A", "transition": [{"target": "B"}]},
+                {"id": "B", "transition": [{"target": "C"}]},
+                {"id": "C", "transition": [{"target": "A"}]},
+            ],
+        }
+
+    @staticmethod
+    def _render():
+        # Mirror tests/test_transliterate_cocotb.py::_exec_helpers shape.
+        sys.path.insert(0, str(_VIEWERS.parent))
+        try:
+            from transliterate_cocotb import render_target  # noqa: E402
+        finally:
+            sys.path.pop(0)
+        return render_target(
+            TestWave3cFutureWriterVectorSourceHeader._simple_chart(),
+            {"chart_name": "demo"},
+        )
+
+    def _exec_helpers(self):
+        files = self._render()
+        helpers_src = files["tests/demo/_cocotb_helpers.py"]
+        ns: dict = {}
+        exec(compile(helpers_src, "_cocotb_helpers.py", "exec"), ns)
+        return ns, helpers_src
+
+    def test_annotation_writer_accepts_vector_source_kwarg(self):
+        """Wave-3c-future: `AnnotationWriter.__init__` takes a
+        `vector_source` kwarg the test body passes through from the
+        loaded SOS-03 vector path."""
+        ns, _ = self._exec_helpers()
+        import inspect
+        sig = inspect.signature(ns["AnnotationWriter"].__init__)
+        assert "vector_source" in sig.parameters
+
+    def test_header_carries_vector_source_when_provided(
+        self, tmp_path, monkeypatch
+    ):
+        """When the writer is given a `vector_source`, the on-disk
+        first-line `_meta` envelope MUST carry it for viewer
+        extensions to consult per §6 (f)."""
+        monkeypatch.delenv("SOS_WAVEFORM_PREFIX", raising=False)
+        monkeypatch.delenv("MODULE", raising=False)
+        ns, _ = self._exec_helpers()
+        writer = ns["AnnotationWriter"](
+            "drill",
+            output_dir=tmp_path,
+            vector_source="vectors/0001-two-tasks-yield.json",
+        )
+        writer.close()
+        import json as _json
+        first_line = (tmp_path / "drill.annotations.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()[0]
+        meta = _json.loads(first_line)["_meta"]
+        assert meta["vector_source"] == "vectors/0001-two-tasks-yield.json"
+
+    def test_header_omits_vector_source_when_absent(
+        self, tmp_path, monkeypatch
+    ):
+        """Wave-3c byte-identity for legacy callers: without
+        `vector_source`, the header MUST NOT carry the field — viewer
+        extensions then skip drill-down emit entirely."""
+        monkeypatch.delenv("SOS_WAVEFORM_PREFIX", raising=False)
+        monkeypatch.delenv("MODULE", raising=False)
+        ns, _ = self._exec_helpers()
+        writer = ns["AnnotationWriter"]("nodrill", output_dir=tmp_path)
+        writer.close()
+        import json as _json
+        first_line = (tmp_path / "nodrill.annotations.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()[0]
+        meta = _json.loads(first_line)["_meta"]
+        assert "vector_source" not in meta
+
+    def test_test_body_passes_vector_source_to_writer(self):
+        """The generated single-region cocotb test body MUST pass
+        `vector_source=str(_VECTORS_DIR / "<vector>.json")` when
+        constructing the AnnotationWriter so the SOS-03 vector path
+        threads through by construction."""
+        files = self._render()
+        test_module = next(
+            v
+            for k, v in files.items()
+            if k.endswith("test_demo_fsm.py")
+        )
+        assert "vector_source=str(_VECTORS_DIR" in test_module

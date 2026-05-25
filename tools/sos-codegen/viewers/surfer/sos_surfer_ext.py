@@ -71,6 +71,7 @@ try:  # pragma: no cover - tested indirectly via the surfer scaffold tests
         SCHEMA_VERSION,
         discover_waveform_paths,
         load_annotations,
+        load_overlay_header,
         validate_schema_header,
     )
 except ImportError:  # pragma: no cover - standalone invocation fallback
@@ -91,6 +92,7 @@ except ImportError:  # pragma: no cover - standalone invocation fallback
         SCHEMA_VERSION,
         discover_waveform_paths,
         load_annotations,
+        load_overlay_header,
         validate_schema_header,
     )
 
@@ -103,6 +105,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "discover_waveform_paths",
     "load_annotations",
+    "load_overlay_header",
     "validate_schema_header",
     "render_to_stdout",
     "to_surfer_commands",
@@ -185,7 +188,10 @@ def _surfer_escape(value: object) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def to_surfer_commands(annotations: Sequence[dict]) -> str:
+def to_surfer_commands(
+    annotations: Sequence[dict],
+    vector_source: str | None = None,
+) -> str:
     """Emit a Surfer command-script that installs chart-state markers +
     per-chart_path overlay tracks.
 
@@ -277,6 +283,49 @@ def to_surfer_commands(annotations: Sequence[dict]) -> str:
             )
     lines.append("")
 
+    # --- Section 4 (wave-3c-future §6 (f)): vector-citation drill-down --- #
+    #
+    # When `vector_source` is provided (read from `_meta.vector_source`
+    # in the overlay header) emit one `open_vector_source <path> <idx>`
+    # command per annotation record carrying `vector_index`. Surfer's
+    # plugin host either routes the command via its link-back API
+    # (when the host releases a stabilised hook), or stubs it as a
+    # no-op (forward-compatible — the wave-3c-future emit is correct
+    # regardless of host-side adoption).
+    #
+    # When `vector_source` is None we emit NOTHING in this section —
+    # Surfer's command list is consumed once at overlay-load time
+    # (unlike the GTKWave Tcl plugin which retains the global across
+    # subsequent installs), so there's no value in surfacing a
+    # cleared-path sentinel. Wave-3c byte-identity preserved for the
+    # legacy `to_surfer_commands(records)` call shape.
+    if vector_source is not None:
+        vector_records = [
+            record
+            for record in sorted_recs
+            if record.get("vector_index") is not None
+        ]
+        lines.append(
+            "# --- vector-citation drill-down (§6 (f) — wave-3c-future) ---"
+        )
+        lines.append(
+            f'set_vector_source "{_surfer_escape(vector_source)}"'
+        )
+        for record in vector_records:
+            cycle = record.get("cycle", 0)
+            vector_index = record.get("vector_index")
+            chart_state = record.get("chart_state", "?")
+            # Each emitted `open_vector_source` is a click-target the
+            # host's plugin can wire to the user's editor at runtime.
+            # The chart_state token gives the host a chart-vocabulary
+            # tooltip for the link.
+            lines.append(
+                f'open_vector_source "{_surfer_escape(vector_source)}" '
+                f'{vector_index} {cycle} '
+                f'"{_surfer_escape(chart_state)}"'
+            )
+        lines.append("")
+
     # --- Section 3: invariant-fire overlay track (§6 (e)) --- #
     invariants = [
         record
@@ -344,7 +393,17 @@ def main(argv: Iterable[str] | None = None) -> int:
     if args.format == "stdout":
         render_to_stdout(records)
         return 0
-    text = to_surfer_commands(records)
+    # Wave-3c-future (§6 (f)): thread `_meta.vector_source` from the
+    # overlay header so emitted commands include the drill-down link
+    # target. Mirrors the GTKWave extension's CLI surface.
+    try:
+        meta = load_overlay_header(args.annotations)
+    except (FileNotFoundError, ValueError):
+        meta = {}
+    vector_source = meta.get("vector_source") if isinstance(meta, dict) else None
+    if not isinstance(vector_source, str) or not vector_source:
+        vector_source = None
+    text = to_surfer_commands(records, vector_source=vector_source)
     if args.output is None:
         sys.stdout.write(text)
     else:

@@ -173,8 +173,11 @@ proc sos_overlay_install {overlay_path} {
     }
     # The emitted Tcl is a sequence of gtkwave::/Edit/Set_Named_Marker
     # + gtkwave::/Edit/Set_Marker_Name calls plus the conventional
-    # add_marker / mark_invariant aliases the wave-1 emit shape uses.
-    # `eval` executes them in the current interp.
+    # add_marker / mark_invariant / mark_vector_citation aliases the
+    # wave-1 + wave-3c-future emit shapes use. `eval` executes them in
+    # the current interp. Wave-3c-future: emitted Tcl MAY include a
+    # `set ::sos_vector_source "<path>"` line that the eval lands; the
+    # `sos_open_vector_at` proc below consults the resulting global.
     if {[catch {
         eval $tcl_output
     } err]} {
@@ -186,6 +189,56 @@ proc sos_overlay_install {overlay_path} {
     # capped at 26 (A..Z) per GTKWave's named-marker model.
     set count [regexp -all {^add_marker } $tcl_output]
     return $count
+}
+
+# SOS-08-G wave-3c-future §6 (f) — vector-citation drill-down.
+#
+# `sos_open_vector_at <vector_index>` resolves the click-through for a
+# badge with vector_index=N. Strategy:
+#   1. Read the per-overlay vector_source path from the global
+#      `::sos_vector_source` set by sos_overlay_install via the emit
+#      from `to_gtkwave_tcl(..., vector_source=...)`.
+#   2. Spawn `${EDITOR}` (env var) against the resolved path. Most
+#      editors accept a `+<line>` argument to jump to a specific line;
+#      we pass `+<vector_index+2>` as a best-effort target (vector
+#      step N appears around line N+2 in the JSON for the typical
+#      SOS-03 vector-trace shape: `[meta, step0, step1, ...]`).
+#   3. When `$env(EDITOR)` is unset or the file path is empty, the
+#      proc logs the diagnostic + returns 0 without raising — keeps
+#      key-bound invocations soft-fail in GTKWave's GUI context.
+#
+# The proc is INSTALLED unconditionally at plugin load so users can
+# rebind it to any key via their `~/.gtkwaverc` `keyactions` section.
+# The default binding is documented in the plugin README (no Tcl
+# binding emitted here so a user's existing key map is unaffected).
+proc sos_open_vector_at {vector_index} {
+    if {![info exists ::sos_vector_source]} {
+        sos_log "sos_open_vector_at: no ::sos_vector_source global set; \
+                  overlay header missing _meta.vector_source"
+        return 0
+    }
+    set src $::sos_vector_source
+    if {$src eq ""} {
+        sos_log "sos_open_vector_at: ::sos_vector_source is empty; \
+                  overlay header missing _meta.vector_source"
+        return 0
+    }
+    if {![info exists ::env(EDITOR)] || $::env(EDITOR) eq ""} {
+        sos_log "sos_open_vector_at: \$EDITOR is unset; cannot open \
+                  $src at vector_index=$vector_index"
+        return 0
+    }
+    set editor $::env(EDITOR)
+    set line_hint [expr {$vector_index + 2}]
+    sos_log "sos_open_vector_at: $editor +$line_hint $src \
+              (vector_index=$vector_index)"
+    if {[catch {
+        exec $editor "+$line_hint" $src &
+    } err]} {
+        sos_log "WARN: sos_open_vector_at exec failed: $err"
+        return 0
+    }
+    return 1
 }
 
 proc sos_overlay_main {} {
