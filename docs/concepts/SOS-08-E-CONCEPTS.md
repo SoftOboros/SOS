@@ -822,4 +822,123 @@ The chart-vocabulary `[FAIL] vector V%0d: chart \`demo\` ...` format strings liv
 
 **Cited PCDNs / invariants**: PCDN-SOS-08-E-001 **resolved via layered-hierarchy opt-in** (the walker keeps the flat `_default` as the byte-identical wave-3 emit; layered consumers extend `_base`); INV-S-HDL-E-1..6 preserved; §12 gate (a) updated to mark PCDN-SOS-08-E-001 as resolved.
 
+### 2026-05-24 — Impl wave-3-future-remaining-path: deeper-than-one-level nested-JSON parser (Ira)
+
+Lifts the wave-3-future-remaining **one-level-deep** cap on the nested-JSON parser. The wave-3-future-remaining slice (committed at `9010510`) added `sos_jsonl_parse_nested_int` / `_string` for `<param name="outer.inner"/>` declarations and raised `UnsupportedChartError` on `<param name="a.b.c"/>` (two or more dots). This wave-3-future-remaining-path slice closes the deeper-nesting carry-forward: `<param>` names with two or more dots no longer raise — they lower to a **path-segment-based** chain of nested-object descents via two new SV functions.
+
+The remaining wave-3-future carry-forward (**multi-clock testbench wiring**) stays deferred.
+
+**Implementation surface**:
+
+- **`_emit_jsonl_parser_pkg(chart_name)`** — extended to additionally emit two new SystemVerilog functions, alongside the unchanged wave-3-future top-level + wave-3-future-remaining one-level-deep parsers. The wave-3-future-remaining `_nested_*` functions stay **byte-identical** (regression guard `test_byte_identity_when_chart_uses_only_depth_1_nested_params` is the load-bearing check):
+
+    * `function automatic int sos_jsonl_parse_path_int(input string line, input string path_dot_separated, output int value);` — splits `path_dot_separated` on `.`, descends through nested objects level by level. Returns 1 on success + populates `value`; returns 0 on absence at any descent level, malformed scalar mid-path (defensive — not a parse error), or window exhaustion. Path-segment iteration uses a `(win_lo, win_hi)` window pair that narrows on each intermediate descent into the brace-paired contents of the matched key's value.
+    * `function automatic int sos_jsonl_parse_path_string(input string line, input string path_dot_separated, output string value);` — same shape, string leaf. **1024-character cap** preserved (mirrors the wave-3-future top-level + `_nested_*` extractors). Escape-aware at the leaf: a backslash before a quote consumes the quote as a literal.
+
+  Both functions emit a one-line **`$warning`** if `path_dot_separated` contains an empty segment at runtime (e.g. `"a..b"`, `".a"`, `"a."`). The build-time chart-vocab gate normally catches these in chart source; the `$warning` is a runtime defence against malformed JSONL-side input data. `$warning` is acceptable in checker context per INV-S-HDL-E-1..6.
+
+- **`_validate_path_segments(p_name)`** (new helper) — build-time chart-vocab gate. Splits `p_name` on `.`, validates each segment against `^[A-Za-z_][A-Za-z0-9_]*$` (SV identifier rules). Raises `UnsupportedChartError` on:
+    * Empty segments (`"a..b"`, `".a"`, `"a."`) — message: `SOS-08-E wave-3-future-path: <param name='<name>'/> contains an empty path segment; use dot-separated identifiers only.`
+    * Non-identifier characters in a segment (`"a-b.c"`, `"a/b.c"`, digits-first) — message names the offending segment and cites the SV identifier rules.
+
+- **`_collect_nested_params(chart_ir)`** (refactored) — wave-3-future-remaining semantics preserved for depth-1 (`outer.inner`); two-or-more-dot names no longer raise here but instead route to `_collect_path_params`. The chart-vocab gate (empty / non-identifier) is invoked via `_validate_path_segments` so both collectors share the same rules.
+
+- **`_collect_path_params(chart_ir)`** (new) — sibling collector for depth-≥2 declarations. Returns the list of unique `(segments_tuple, value_type)` pairs in document order. Walks the same transition + raise + param shape as `_collect_nested_params`. Path-segment validation is shared via `_validate_path_segments`.
+
+- **`_render_nested_param_blocks(nested_params, decl_indent, parse_indent, path_params=None)`** (extended) — now also emits `sos_jsonl_parse_path_*` decls + call sites when `path_params` is non-empty. Charts using only depth-0 or depth-1 params emit byte-identically to the prior wave-3-future-remaining baseline (load-bearing regression-guard).
+
+- **`_emit_checker_class_base(chart_name, nested_params, path_params)`** — extended to accept the new `path_params` list and forward it to `_render_nested_param_blocks`. Wave-3-future-remaining call sites for `sos_jsonl_parse_nested_int` / `_string` are preserved verbatim where they exist today.
+
+- **`_emit_checker_class_base_parallel(chart_name, regions, nested_params, path_params)`** — same extension on the parallel path.
+
+- **`_emit_checker_class` / `_emit_checker_class_parallel`** — accept `path_params` for API symmetry; both forward it to the base emitters and emit no `path_*` content themselves (the `_default.svh` body stays parameter-blind per the layered-hierarchy convention).
+
+- **`render_target`** — calls `_collect_path_params(chart_ir)` once before dispatching to the single-region vs parallel emit branch; forwards the result alongside `nested_params` to whichever checker emit runs. Build-time chart-vocab errors raise fail-fast at the walker entry, never deep inside an emitter.
+
+**Convention — deep dot-path `<param>` shape**:
+
+A `<param name="a.b.c.d"/>` (depth ≥ 2, all segments are SV identifiers) on a `<raise>` inside a `<transition>` declares that the SOS-03 vector trace MAY carry a `"a": {"b": {"c": {"d": <value>}}}` payload that the checker SHOULD parse out of each trace step. The walker emits the parse call regardless of whether any given trace step actually carries the field — `sos_jsonl_parse_path_int` / `_string` returns 0 on miss without altering the output.
+
+Path syntax (chart-vocab):
+
+- **MUST** match `[a-zA-Z_][a-zA-Z0-9_]*` per segment (SV identifier rules).
+- **MUST NOT** contain empty segments (leading / trailing / repeated dots).
+- **MAY** be arbitrary depth; SV string length is the only ceiling. The implementation has no hard cap.
+
+**Build-time vs runtime error split**:
+
+- **Build-time** chart-vocab error (`UnsupportedChartError`) — syntactic malformation in chart source. Examples: `<param name="a..b"/>`, `<param name="a-b.c"/>`, `<param name=".a.b"/>`. These fail codegen.
+- **Runtime** `$warning` — semantic malformation in input JSONL data. Example: a chart-vocab-valid `<param name="payload.value"/>` whose runtime JSONL line carries an unexpected empty intermediate segment in a relayed path field. The `$warning` makes the malformation visible without aborting simulation; the parse returns 0 so the checker proceeds with default values.
+
+**Authority boundary declaration** (per the standards-integration matrix discipline):
+
+- **Dot-path convention** (the `<param name="a.b.c"/>` chart-vocab shape) — relationship: **own**. This repo authors the convention; full mutation rights gated by the spec-before-code discipline.
+- **IEEE 1800-2017 string-handling functions** (`string.len()`, `string.getc()`, concatenation `{}`) — relationship: **derive**. The SV emit uses upstream IEEE 1800-2017 grammar without owning it; outputs (the emitted SV source) are local; inputs (the language semantics) are upstream.
+
+**Emit shape (example)**:
+
+For a single-region chart with `<transition><raise event="tick"><param name="payload.metadata.value" expr="42"/></raise></transition>`, the emitted checker's `run()` task body grows two new lines in the locals block + a four-line parse block inside the per-step loop:
+
+```systemverilog
+    task run();
+        // ... wave-3-future-remaining + wave-3-future locals ...
+        // Wave-3-future-remaining-path: deep-nested-payload locals.
+        int    path_payload_metadata_value;
+        int    parsed_path_payload_metadata_value;
+
+        // ... wave-3-future $fopen + clk wait ...
+
+        while (!$feof(fh)) begin
+            rc = $fgets(line, fh);
+            if (rc == 0) break;
+
+            // ... wave-3-future top-level + wave-3-future-remaining nested parses ...
+            // Wave-3-future-remaining-path: arbitrary-depth nested-payload
+            // extraction per chart-declared <param name="a.b.c"/>.
+            path_payload_metadata_value = 0;
+            parsed_path_payload_metadata_value = sos_jsonl_parse_path_int(
+                line, "payload.metadata.value", path_payload_metadata_value
+            );
+            // ... wave-3-future resolve + compare ...
+        end
+```
+
+**Invariants upheld**:
+
+- **INV-S-HDL-E-1** (no constrained-random) — preserved. The two new SV functions use only basic control flow, integer arithmetic, and `string.getc` / `string.len`; `$warning` is an SV system task with no random-stimulus semantics.
+- **INV-S-HDL-E-2** (no UVM) — preserved.
+- **INV-S-HDL-E-3** (no inline `assert property` outside bind files) — preserved.
+- **INV-S-HDL-E-4** (chart-vocabulary failure messages) — preserved. The `$warning` text names the path literal so chart authors can grep their JSONL traces; this is informational diagnostic, not a failure-message change.
+- **INV-S-HDL-E-5** (per-simulator build wrapper) — preserved unchanged.
+- **INV-S-HDL-E-6** (Verilator-subset compliance) — preserved. `$warning` is supported by Verilator (it lowers to a `$display` + return). No other new SV constructs land.
+- **PCDN-SOS-08-E-001** — already resolved by the layered-hierarchy refactor; unchanged here.
+
+**Tests added**: 17 new test methods on `TestWave3FuturePathNestedJsonParser`:
+
+- `test_parser_pkg_emits_path_int_function` / `test_parser_pkg_emits_path_string_function` — the two new functions are emitted with the contracted signatures.
+- `test_byte_identity_when_chart_uses_only_depth_0_params` — regression guard: no nested/path call sites for a chart with no nested `<param>`.
+- `test_byte_identity_when_chart_uses_only_depth_1_nested_params` — regression guard: `sos_jsonl_parse_nested_int(` call site preserved verbatim; no `sos_jsonl_parse_path_*` references.
+- `test_three_level_path_param_emits_path_int_call` / `test_four_level_path_param_emits_path_int_call` — depth-2 and depth-3 charts lower to `sos_jsonl_parse_path_int` calls with the dot-separated path literal.
+- `test_path_int_handles_missing_key_at_intermediate_level` — the per-segment match-scan falls through to `return 0;` on miss.
+- `test_path_int_handles_malformed_intermediate_scalar` — intermediate brace-required check returns 0 on scalar (defensive).
+- `test_path_string_handles_escaped_quotes_at_leaf` — leaf-string escape-aware scan; 1024-character cap preserved.
+- `test_path_int_emits_warning_on_empty_segment_at_runtime` — runtime `$warning` is emitted in both `path_int` + `path_string` bodies with the function name in the message.
+- `test_chart_vocab_rejects_empty_segment_at_build_time` / `test_chart_vocab_rejects_leading_dot` / `test_chart_vocab_rejects_trailing_dot` — empty segments raise `UnsupportedChartError` at codegen.
+- `test_chart_vocab_rejects_non_identifier_in_segment` / `test_chart_vocab_rejects_segment_starting_with_digit` — non-identifier segments raise citing SV identifier rules.
+- `test_parallel_checker_uses_path_parser_for_deep_params` — parallel-region mirror.
+- `test_render_target_path_emit_invariant_clean` — round-trip both single-region + parallel path-param charts through `render_target` without `InvariantAuditError`.
+
+In addition, the obsolete `test_two_level_dotted_param_raises_actionable_error` (which asserted the `a.b.c` raise) is renamed to `test_two_level_dotted_param_now_emits_path_parser_call` and asserts the new emit behaviour — the chart-vocab error gate for depth-≥2 names moved from "always raise" to "raise on malformed segments only".
+
+**Test suite**: 833/833 passing (816 prior + 17 new wave-3-future-remaining-path; 1 skipped when neither SV syntax tool is installed).
+
+**Wave-3-future remaining boundary** (still deferred):
+
+- **Multi-clock-domain testbench wiring** — per-region `clk_<dom>` / `rst_<dom>` on the chart-top wrapper per SOS-08-C §6.10's multi-clock contract. Wave-2b ratified single-clock parallel as the v1 baseline; this slice inherits that constraint unchanged. This is now the **only** remaining wave-3-future carry-forward.
+- **Nested-payload-aware failure messages** — unchanged from the prior §15 entries. The path-parser lands the value in a local variable that downstream emit extensions can read; failure-message integration is deferred until the SOS-03 vector schema specifies the nested-comparison semantics.
+
+**Cited PCDNs / invariants**: PCDN-SOS-08-E-001 unchanged (already resolved); INV-S-HDL-E-1..6 preserved; new chart-vocab convention `<param name="a.b.c"/>` (dot-separated SV identifiers, arbitrary depth) introduced as the chart-author-facing trigger for the new parser functions. The wave-3-future-remaining one-level-deep nested parser stays byte-identical (regression-guard tests in place).
+
+Status: 🟢 **wave-3-future-remaining-path nested-JSON parser landed (arbitrary depth)**. Multi-clock testbench wiring remains the sole wave-3-future carry-forward.
+
 Status: 🟢 **wave-3-future-remaining layered class hierarchy landed**. File shape: 16 files single-region, 18 files parallel. `_base` is the supported extension point; users override by extending it. The walker continues to emit `_default` byte-identical to wave-3 chart-vocab. Multi-clock testbench wiring + deeper-than-one-level nesting remain on the wave-3-future track.

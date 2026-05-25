@@ -304,6 +304,45 @@ def _classify_param_type(param: dict[str, Any]) -> str:
     return "int"
 
 
+_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_path_segments(p_name: str) -> list[str]:
+    """Wave-3-future-remaining-path (2026-05-24 §15): validate the dot-
+    separated path ``p_name`` and return its segment list.
+
+    Build-time chart-vocab gate for ``<param name="..."/>`` declarations
+    with one or more dots. Per §15 (2026-05-24 wave-3-future-path):
+
+      * Every segment MUST match ``[A-Za-z_][A-Za-z0-9_]*`` (SV
+        identifier rules).
+      * Empty segments (``"a..b"``, ``".a"``, ``"a."``) raise
+        ``UnsupportedChartError``.
+      * Non-identifier characters in a segment (``"a-b"``, ``"a/b"``,
+        digits-first) raise ``UnsupportedChartError``.
+
+    The runtime ``$warning`` (in the emitted SV) handles malformed
+    JSONL-side input data; this build-time gate handles malformed chart
+    source so the failure surfaces during codegen.
+    """
+    segments = p_name.split(".")
+    for seg in segments:
+        if seg == "":
+            raise UnsupportedChartError(
+                "SOS-08-E wave-3-future-path: <param "
+                f'name="{p_name}"/> contains an empty path segment; '
+                "use dot-separated identifiers only."
+            )
+        if not _PATH_SEGMENT_RE.match(seg):
+            raise UnsupportedChartError(
+                "SOS-08-E wave-3-future-path: <param "
+                f'name="{p_name}"/> segment "{seg}" violates SV '
+                "identifier rules ``[A-Za-z_][A-Za-z0-9_]*``; use "
+                "dot-separated identifiers only."
+            )
+    return segments
+
+
 def _collect_nested_params(
     chart_ir: dict[str, Any],
 ) -> list[tuple[str, str, str]]:
@@ -312,17 +351,19 @@ def _collect_nested_params(
 
     Walks all transitions (single-region + parallel-region) and every
     ``<raise>`` child's ``<param>`` list. A param's ``name`` attribute
-    of shape ``"outer.inner"`` triggers the nested-payload emit path
-    in the checker class (see ``_emit_checker_class``).
+    of shape ``"outer.inner"`` (exactly one dot) triggers the nested-
+    payload emit path in the checker class (see ``_emit_checker_class``).
 
     Returns the list of unique ``(outer, inner, value_type)`` triples
     in document order; duplicates (same outer.inner appearing under
     multiple events) are collapsed — the checker emits one parse call
     per unique nested field, not one per raising event.
 
-    Raises ``UnsupportedChartError`` when a ``<param name="a.b.c"/>``
-    (two or more dots) is encountered — only one level deep is in
-    scope for this wave per §15.
+    Wave-3-future-path (2026-05-24 §15): ``<param>`` names with two or
+    more dots (``"a.b.c"``, ``"a.b.c.d"``, ...) are collected by
+    ``_collect_path_params`` instead. The build-time chart-vocab gate
+    (empty segments, non-identifier chars) runs in
+    ``_validate_path_segments`` and is invoked from both collectors.
     """
     seen: dict[tuple[str, str], str] = {}
     out: list[tuple[str, str, str]] = []
@@ -334,28 +375,78 @@ def _collect_nested_params(
                     p_name = p.get("name")
                     if not isinstance(p_name, str):
                         continue
-                    if p_name.count(".") == 0:
-                        # Top-level param — wave-3-future top-level
-                        # parsers cover these; not a nested-payload
-                        # trigger.
+                    if p_name.count(".") != 1:
+                        # Depth-0 (top-level) and depth-≥2 (path) are
+                        # not nested-payload triggers — depth-0 goes
+                        # through the wave-3-future top-level parsers;
+                        # depth-≥2 goes through ``_collect_path_params``
+                        # and the ``sos_jsonl_parse_path_*`` emit.
                         continue
-                    if p_name.count(".") >= 2:
-                        raise UnsupportedChartError(
-                            "SOS-08-E wave-3-future: <param "
-                            f"name=\"{p_name}\"/> exceeds one-level-"
-                            "deep nested-payload support; flatten in "
-                            "the raise-side instead."
-                        )
-                    outer, inner = p_name.split(".", 1)
-                    if not outer or not inner:
-                        # Malformed (leading/trailing dot) — skip.
-                        continue
+                    segments = _validate_path_segments(p_name)
+                    outer, inner = segments
                     vtype = _classify_param_type(p)
                     key = (outer, inner)
                     if key in seen:
                         continue
                     seen[key] = vtype
                     out.append((outer, inner, vtype))
+
+    def _visit_state(state: dict[str, Any]) -> None:
+        _visit_transitions(state)
+        for child in state.get("state") or []:
+            _visit_state(child)
+        for par in state.get("parallel") or []:
+            for region in par.get("state") or []:
+                _visit_state(region)
+
+    _visit_transitions(chart_ir)
+    for st in chart_ir.get("state") or []:
+        _visit_state(st)
+    for par in chart_ir.get("parallel") or []:
+        for region in par.get("state") or []:
+            _visit_state(region)
+
+    return out
+
+
+def _collect_path_params(
+    chart_ir: dict[str, Any],
+) -> list[tuple[tuple[str, ...], str]]:
+    """Wave-3-future-remaining-path (2026-05-24 §15): collect every
+    deeper-than-one-level nested ``<param>`` declaration in the chart.
+
+    Sibling of ``_collect_nested_params``. A param's ``name`` attribute
+    of shape ``"a.b.c"`` (two or more dots) triggers the path-parser
+    emit path in the checker class — a chain of object descents lowering
+    to ``sos_jsonl_parse_path_int`` / ``sos_jsonl_parse_path_string``.
+
+    Returns the list of unique ``(segments_tuple, value_type)`` pairs in
+    document order; duplicates are collapsed.
+
+    Build-time chart-vocab errors (empty segments, non-identifier
+    characters, leading/trailing dots) raise ``UnsupportedChartError``
+    via ``_validate_path_segments``.
+    """
+    seen: dict[tuple[str, ...], str] = {}
+    out: list[tuple[tuple[str, ...], str]] = []
+
+    def _visit_transitions(container: dict[str, Any]) -> None:
+        for tr in container.get("transition", []) or []:
+            for r in tr.get("raise_value", []) or []:
+                for p in r.get("param", []) or []:
+                    p_name = p.get("name")
+                    if not isinstance(p_name, str):
+                        continue
+                    if p_name.count(".") < 2:
+                        # Depth-0 (top-level) and depth-1 (nested) are
+                        # handled elsewhere.
+                        continue
+                    segments = tuple(_validate_path_segments(p_name))
+                    vtype = _classify_param_type(p)
+                    if segments in seen:
+                        continue
+                    seen[segments] = vtype
+                    out.append((segments, vtype))
 
     def _visit_state(state: dict[str, Any]) -> None:
         _visit_transitions(state)
@@ -735,7 +826,21 @@ def _emit_jsonl_parser_pkg(chart_name: str) -> str:
         are bare identifiers with no special characters per §5.4 of
         the SOS-03 vector schema spec.
 
-    Per INV-S-HDL-E-1 both functions are constrained-random-free.
+    Wave-3-future-remaining-path (2026-05-24 §15): adds two new
+    functions for arbitrary-depth dot-path descent, alongside the
+    existing one-level-deep ``_nested_*`` functions (kept byte-identical
+    for regression-guard purposes):
+
+      * ``sos_jsonl_parse_path_int(line, path_dot_separated, value)`` —
+        splits ``path_dot_separated`` on ``.``, descends through nested
+        objects level by level, extracts the leaf integer. 1 on hit, 0
+        on absence at any level / malformed scalar mid-path / empty
+        segment (with a one-line ``$warning`` for empty segments since
+        the build-time chart-vocab gate should have caught those).
+      * ``sos_jsonl_parse_path_string(line, path_dot_separated, value)``
+        — same shape, string leaf, 1024-character cap preserved.
+
+    Per INV-S-HDL-E-1 all four functions are constrained-random-free.
     Per INV-S-HDL-E-2 no UVM symbols are referenced.
     Per INV-S-HDL-E-3 no SVA properties are declared.
     """
@@ -1084,6 +1189,275 @@ function automatic int sos_jsonl_parse_nested_string(
     return 0;
 endfunction
 
+// ---------------------------------------------------------------------------
+// sos_jsonl_parse_path_int — arbitrary-depth nested-object integer
+// field extractor. ``path_dot_separated`` is split on ``.``; the parser
+// descends through each named object level, then extracts the leaf
+// integer at the innermost key. Returns 1 on hit, 0 on miss / malformed
+// at any descent level.
+//
+// SOS-08-E wave-3-future-remaining-path (2026-05-24 §15): lifts the
+// one-level-deep cap from the ``_nested_*`` extractors. Defensive at
+// every level — a malformed scalar mid-path returns 0 (not a parse
+// error). An empty segment (``"a..b"``) emits a one-line ``$warning``
+// at runtime so the chart author sees the malformed JSONL input;
+// build-time chart-vocab malformation is gated by the walker.
+//
+// Algorithm sketch: walk ``path_dot_separated`` segment-by-segment.
+// For each segment, locate ``"<segment>":`` inside the current
+// substring window (initially the full ``line``; subsequently bounded
+// by the previously located object's brace pair). On the final
+// segment, expect a bare integer; on intermediate segments, expect
+// ``{{`` and update the window to the contents of that object.
+// ---------------------------------------------------------------------------
+function automatic int sos_jsonl_parse_path_int(
+    input  string line,
+    input  string path_dot_separated,
+    output int    value
+);
+    int   slen;
+    int   plen;
+    int   i;
+    int   j;
+    int   k;
+    int   depth;
+    int   win_lo;
+    int   win_hi;
+    int   seg_lo;
+    int   seg_hi;
+    int   total_segments;
+    int   seg_idx;
+    int   match_seg;
+    int   sign;
+    int   acc;
+    int   seg_len;
+    int   is_last;
+    int   warned_empty;
+    byte  ch;
+    slen = line.len();
+    plen = path_dot_separated.len();
+    // Count segments + sanity-check for empty segments. Empty segments
+    // at runtime indicate a malformed chart-vocab string (the build-
+    // time gate normally rejects these); emit a one-line $warning so
+    // the chart author sees it and return 0.
+    total_segments = 0;
+    warned_empty = 0;
+    seg_lo = 0;
+    for (i = 0; i <= plen; i++) begin
+        if (i == plen || path_dot_separated.getc(i) == ".") begin
+            if (i == seg_lo) begin
+                if (!warned_empty) begin
+                    $warning("sos_jsonl_parse_path_int: empty path segment in \\"%s\\"; returning 0.", path_dot_separated);
+                    warned_empty = 1;
+                end
+                return 0;
+            end
+            total_segments = total_segments + 1;
+            seg_lo = i + 1;
+        end
+    end
+    if (total_segments == 0) return 0;
+    // Descend: for each segment, locate the key inside [win_lo, win_hi)
+    // and either narrow the window to the contained object (non-final)
+    // or extract the leaf integer (final).
+    win_lo = 0;
+    win_hi = slen;
+    seg_lo = 0;
+    for (seg_idx = 0; seg_idx < total_segments; seg_idx = seg_idx + 1) begin
+        // Find the end of this segment in path_dot_separated.
+        seg_hi = seg_lo;
+        while (seg_hi < plen && path_dot_separated.getc(seg_hi) != ".") begin
+            seg_hi = seg_hi + 1;
+        end
+        seg_len = seg_hi - seg_lo;
+        is_last = (seg_idx == total_segments - 1);
+        // Scan [win_lo, win_hi) for ``"<segment>"``.
+        match_seg = 0;
+        for (i = win_lo; i + seg_len + 2 <= win_hi; i = i + 1) begin
+            if (line.getc(i) != "\\"") continue;
+            match_seg = 1;
+            for (j = 0; j < seg_len; j = j + 1) begin
+                if (line.getc(i + 1 + j) != path_dot_separated.getc(seg_lo + j)) begin
+                    match_seg = 0;
+                    break;
+                end
+            end
+            if (!match_seg) continue;
+            if (line.getc(i + 1 + seg_len) != "\\"") begin
+                match_seg = 0;
+                continue;
+            end
+            // Found ``"<segment>"``. Skip whitespace + colon.
+            j = i + 2 + seg_len;
+            while (j < win_hi &&
+                  (line.getc(j) == " " || line.getc(j) == ":" ||
+                   line.getc(j) == 9)) j = j + 1;
+            if (is_last) begin
+                // Leaf: expect bare integer (with optional sign).
+                sign = 1;
+                if (j < win_hi && line.getc(j) == "-") begin
+                    sign = -1;
+                    j = j + 1;
+                end
+                // Defensive: require at least one digit.
+                if (j >= win_hi || line.getc(j) < "0" || line.getc(j) > "9") begin
+                    return 0;
+                end
+                acc = 0;
+                while (j < win_hi &&
+                      line.getc(j) >= "0" && line.getc(j) <= "9") begin
+                    ch = line.getc(j);
+                    acc = acc * 10 + (ch - 8'h30);
+                    j = j + 1;
+                end
+                value = sign * acc;
+                return 1;
+            end else begin
+                // Intermediate: expect ``{{`` and narrow the window to
+                // the matching close-brace range.
+                if (j >= win_hi || line.getc(j) != "{{") return 0;
+                depth = 1;
+                k = j + 1;
+                while (k < win_hi && depth > 0) begin
+                    ch = line.getc(k);
+                    if (ch == "{{") depth = depth + 1;
+                    else if (ch == "}}") depth = depth - 1;
+                    k = k + 1;
+                end
+                // k is now one past the matching ``}}`` (or win_hi if
+                // unterminated). Narrow window to (j+1, k-1).
+                win_lo = j + 1;
+                win_hi = (k > 0) ? (k - 1) : k;
+                seg_lo = seg_hi + 1;
+                break;
+            end
+        end
+        if (!match_seg) return 0;
+    end
+    return 0;
+endfunction
+
+// ---------------------------------------------------------------------------
+// sos_jsonl_parse_path_string — arbitrary-depth nested-object string
+// field extractor. Same shape as ``sos_jsonl_parse_path_int`` but the
+// leaf is a quoted string. 1024-character cap preserved (mirrors the
+// wave-3-future top-level + ``_nested_string`` extractors). Escape-
+// aware: a backslash before a quote consumes the quote as a literal.
+// ---------------------------------------------------------------------------
+function automatic int sos_jsonl_parse_path_string(
+    input  string line,
+    input  string path_dot_separated,
+    output string value
+);
+    int   slen;
+    int   plen;
+    int   i;
+    int   j;
+    int   k;
+    int   depth;
+    int   win_lo;
+    int   win_hi;
+    int   seg_lo;
+    int   seg_hi;
+    int   total_segments;
+    int   seg_idx;
+    int   match_seg;
+    int   seg_len;
+    int   is_last;
+    int   cap;
+    int   warned_empty;
+    byte  ch;
+    byte  prev_ch;
+    slen = line.len();
+    plen = path_dot_separated.len();
+    total_segments = 0;
+    warned_empty = 0;
+    seg_lo = 0;
+    for (i = 0; i <= plen; i = i + 1) begin
+        if (i == plen || path_dot_separated.getc(i) == ".") begin
+            if (i == seg_lo) begin
+                if (!warned_empty) begin
+                    $warning("sos_jsonl_parse_path_string: empty path segment in \\"%s\\"; returning 0.", path_dot_separated);
+                    warned_empty = 1;
+                end
+                return 0;
+            end
+            total_segments = total_segments + 1;
+            seg_lo = i + 1;
+        end
+    end
+    if (total_segments == 0) return 0;
+    win_lo = 0;
+    win_hi = slen;
+    seg_lo = 0;
+    for (seg_idx = 0; seg_idx < total_segments; seg_idx = seg_idx + 1) begin
+        seg_hi = seg_lo;
+        while (seg_hi < plen && path_dot_separated.getc(seg_hi) != ".") begin
+            seg_hi = seg_hi + 1;
+        end
+        seg_len = seg_hi - seg_lo;
+        is_last = (seg_idx == total_segments - 1);
+        match_seg = 0;
+        for (i = win_lo; i + seg_len + 2 <= win_hi; i = i + 1) begin
+            if (line.getc(i) != "\\"") continue;
+            match_seg = 1;
+            for (j = 0; j < seg_len; j = j + 1) begin
+                if (line.getc(i + 1 + j) != path_dot_separated.getc(seg_lo + j)) begin
+                    match_seg = 0;
+                    break;
+                end
+            end
+            if (!match_seg) continue;
+            if (line.getc(i + 1 + seg_len) != "\\"") begin
+                match_seg = 0;
+                continue;
+            end
+            j = i + 2 + seg_len;
+            while (j < win_hi &&
+                  (line.getc(j) == " " || line.getc(j) == ":" ||
+                   line.getc(j) == 9)) j = j + 1;
+            if (is_last) begin
+                // Leaf: expect opening quote.
+                if (j >= win_hi || line.getc(j) != "\\"") return 0;
+                j = j + 1;
+                value = "";
+                cap = 0;
+                prev_ch = 0;
+                while (j < win_hi) begin
+                    ch = line.getc(j);
+                    if (ch == "\\"" && prev_ch != "\\\\") begin
+                        return 1;
+                    end
+                    value = {{value, string'(ch)}};
+                    prev_ch = ch;
+                    j = j + 1;
+                    cap = cap + 1;
+                    if (cap >= 1024) return 1;
+                end
+                // Hit window end before closing quote — defensive
+                // return-what-we-have to avoid spinning.
+                return 1;
+            end else begin
+                if (j >= win_hi || line.getc(j) != "{{") return 0;
+                depth = 1;
+                k = j + 1;
+                while (k < win_hi && depth > 0) begin
+                    ch = line.getc(k);
+                    if (ch == "{{") depth = depth + 1;
+                    else if (ch == "}}") depth = depth - 1;
+                    k = k + 1;
+                end
+                win_lo = j + 1;
+                win_hi = (k > 0) ? (k - 1) : k;
+                seg_lo = seg_hi + 1;
+                break;
+            end
+        end
+        if (!match_seg) return 0;
+    end
+    return 0;
+endfunction
+
 `endif // {guard}
 """
 
@@ -1139,79 +1513,142 @@ def _render_nested_param_blocks(
     nested_params: list[tuple[str, str, str]],
     decl_indent: str,
     parse_indent: str,
+    path_params: list[tuple[tuple[str, ...], str]] | None = None,
 ) -> tuple[str, str]:
     """Wave-3-future-remaining (2026-05-24 §15): emit the SV declaration
     + parse blocks for one-level-deep nested ``<param>`` fields.
 
     Returns ``(decls, parse_block)`` — both empty strings when
-    ``nested_params`` is empty, so callers' f-strings can interpolate
-    them unconditionally without disturbing the wave-3-future
-    byte-identical baseline.
+    ``nested_params`` and ``path_params`` are both empty, so callers'
+    f-strings can interpolate them unconditionally without disturbing
+    the wave-3-future byte-identical baseline.
 
     ``decl_indent`` is the column prefix for the local-variable
     declarations at the top of ``run()`` (typically 8 spaces).
     ``parse_indent`` is the column prefix for the parse calls inside
     the per-step loop (typically 12 spaces).
+
+    Wave-3-future-remaining-path (2026-05-24 §15): ``path_params``
+    (depth-≥2 declarations) MAY be passed. When non-empty, additional
+    decls + ``sos_jsonl_parse_path_*`` calls are emitted after the
+    depth-1 blocks. Charts using only depth-0 or depth-1 params get
+    byte-identical emit to the prior wave-3-future-remaining baseline.
     """
-    if not nested_params:
+    path_params = path_params or []
+    if not nested_params and not path_params:
         return "", ""
     decl_lines: list[str] = []
     parse_lines: list[str] = []
-    decl_lines.append("")
-    decl_lines.append(
-        f"{decl_indent}// Wave-3-future-remaining: nested-payload locals."
-    )
-    parse_lines.append("")
-    parse_lines.append(
-        f"{parse_indent}// Wave-3-future-remaining: nested-payload extraction"
-    )
-    parse_lines.append(
-        f"{parse_indent}// (one level deep) per chart-declared <param "
-        "name=\"outer.inner\"/>."
-    )
-    for outer, inner, vtype in nested_params:
-        var = _sanitize_sv_identifier(f"{outer}_{inner}")
-        parsed_var = f"parsed_nested_{var}"
-        if vtype == "string":
-            decl_lines.append(
-                f"{decl_indent}string nested_{var};"
-            )
-            decl_lines.append(
-                f"{decl_indent}int    {parsed_var};"
-            )
-            parse_lines.append(
-                f'{parse_indent}nested_{var} = "";'
-            )
-            parse_lines.append(
-                f"{parse_indent}{parsed_var} = sos_jsonl_parse_nested_string("
-            )
-            parse_lines.append(
-                f'{parse_indent}    line, "{outer}", "{inner}", nested_{var}'
-            )
-            parse_lines.append(f"{parse_indent});")
-        else:
-            decl_lines.append(
-                f"{decl_indent}int    nested_{var};"
-            )
-            decl_lines.append(
-                f"{decl_indent}int    {parsed_var};"
-            )
-            parse_lines.append(
-                f"{parse_indent}nested_{var} = 0;"
-            )
-            parse_lines.append(
-                f"{parse_indent}{parsed_var} = sos_jsonl_parse_nested_int("
-            )
-            parse_lines.append(
-                f'{parse_indent}    line, "{outer}", "{inner}", nested_{var}'
-            )
-            parse_lines.append(f"{parse_indent});")
+    if nested_params:
+        decl_lines.append("")
+        decl_lines.append(
+            f"{decl_indent}// Wave-3-future-remaining: nested-payload locals."
+        )
+        parse_lines.append("")
+        parse_lines.append(
+            f"{parse_indent}// Wave-3-future-remaining: nested-payload extraction"
+        )
+        parse_lines.append(
+            f"{parse_indent}// (one level deep) per chart-declared <param "
+            "name=\"outer.inner\"/>."
+        )
+        for outer, inner, vtype in nested_params:
+            var = _sanitize_sv_identifier(f"{outer}_{inner}")
+            parsed_var = f"parsed_nested_{var}"
+            if vtype == "string":
+                decl_lines.append(
+                    f"{decl_indent}string nested_{var};"
+                )
+                decl_lines.append(
+                    f"{decl_indent}int    {parsed_var};"
+                )
+                parse_lines.append(
+                    f'{parse_indent}nested_{var} = "";'
+                )
+                parse_lines.append(
+                    f"{parse_indent}{parsed_var} = sos_jsonl_parse_nested_string("
+                )
+                parse_lines.append(
+                    f'{parse_indent}    line, "{outer}", "{inner}", nested_{var}'
+                )
+                parse_lines.append(f"{parse_indent});")
+            else:
+                decl_lines.append(
+                    f"{decl_indent}int    nested_{var};"
+                )
+                decl_lines.append(
+                    f"{decl_indent}int    {parsed_var};"
+                )
+                parse_lines.append(
+                    f"{parse_indent}nested_{var} = 0;"
+                )
+                parse_lines.append(
+                    f"{parse_indent}{parsed_var} = sos_jsonl_parse_nested_int("
+                )
+                parse_lines.append(
+                    f'{parse_indent}    line, "{outer}", "{inner}", nested_{var}'
+                )
+                parse_lines.append(f"{parse_indent});")
+    if path_params:
+        decl_lines.append("")
+        decl_lines.append(
+            f"{decl_indent}// Wave-3-future-remaining-path: deep-nested-"
+            "payload locals."
+        )
+        parse_lines.append("")
+        parse_lines.append(
+            f"{parse_indent}// Wave-3-future-remaining-path: arbitrary-"
+            "depth nested-payload"
+        )
+        parse_lines.append(
+            f"{parse_indent}// extraction per chart-declared <param "
+            "name=\"a.b.c\"/>."
+        )
+        for segments, vtype in path_params:
+            var = _sanitize_sv_identifier("_".join(segments))
+            parsed_var = f"parsed_path_{var}"
+            path_literal = ".".join(segments)
+            if vtype == "string":
+                decl_lines.append(
+                    f"{decl_indent}string path_{var};"
+                )
+                decl_lines.append(
+                    f"{decl_indent}int    {parsed_var};"
+                )
+                parse_lines.append(
+                    f'{parse_indent}path_{var} = "";'
+                )
+                parse_lines.append(
+                    f"{parse_indent}{parsed_var} = sos_jsonl_parse_path_string("
+                )
+                parse_lines.append(
+                    f'{parse_indent}    line, "{path_literal}", path_{var}'
+                )
+                parse_lines.append(f"{parse_indent});")
+            else:
+                decl_lines.append(
+                    f"{decl_indent}int    path_{var};"
+                )
+                decl_lines.append(
+                    f"{decl_indent}int    {parsed_var};"
+                )
+                parse_lines.append(
+                    f"{parse_indent}path_{var} = 0;"
+                )
+                parse_lines.append(
+                    f"{parse_indent}{parsed_var} = sos_jsonl_parse_path_int("
+                )
+                parse_lines.append(
+                    f'{parse_indent}    line, "{path_literal}", path_{var}'
+                )
+                parse_lines.append(f"{parse_indent});")
     return "\n".join(decl_lines), "\n".join(parse_lines)
 
 
 def _emit_checker_class_base(
     chart_name: str,
     nested_params: list[tuple[str, str, str]] | None = None,
+    path_params: list[tuple[tuple[str, ...], str]] | None = None,
 ) -> str:
     """``sos_<chart>_checker_base.svh`` — response checker BASE class.
 
@@ -1248,6 +1685,7 @@ def _emit_checker_class_base(
         nested_params or [],
         decl_indent="        ",
         parse_indent="            ",
+        path_params=path_params or [],
     )
     return _HEADER_PREFIX + f"""//
 // Response checker BASE class for the {chart_name} chart testbench.
@@ -1452,6 +1890,7 @@ endclass
 def _emit_checker_class(
     chart_name: str,
     nested_params: list[tuple[str, str, str]] | None = None,
+    path_params: list[tuple[tuple[str, ...], str]] | None = None,
 ) -> str:
     """``sos_checker_<chart>.sv`` — response checker DEFAULT class.
 
@@ -1463,16 +1902,19 @@ def _emit_checker_class(
     byte-identical to wave-3 chart-vocab.
 
     The ``run()`` skeleton lives in ``_base.svh``. ``nested_params``
-    is forwarded to the base emitter (it carries the wave-3-future-
-    remaining nested-payload locals and parse calls). When the list
-    is empty the base emit is byte-identical to the wave-3-future
-    baseline.
+    and ``path_params`` are forwarded to the base emitter (they carry
+    the wave-3-future-remaining nested-payload + wave-3-future-
+    remaining-path deep-nested-payload locals and parse calls). When
+    both lists are empty the base emit is byte-identical to the
+    wave-3-future baseline.
     """
     cls = checker_class_name(chart_name)
     base = _normalise_chart_name(chart_name)
     cls_base = f"sos_{base}_checker_base"
     base_svh = f"sos_{base}_checker_base.svh"
     iface = virtual_if_name(chart_name)
+    del nested_params
+    del path_params
     return _HEADER_PREFIX + f"""//
 // Response checker DEFAULT class for the {chart_name} chart testbench.
 //
@@ -2012,6 +2454,7 @@ def _emit_checker_class_base_parallel(
     chart_name: str,
     regions: list[tuple[str, str | None, list[str]]],
     nested_params: list[tuple[str, str, str]] | None = None,
+    path_params: list[tuple[tuple[str, ...], str]] | None = None,
 ) -> str:
     """``sos_<chart>_checker_base.svh`` — parallel-chart BASE class.
 
@@ -2035,6 +2478,7 @@ def _emit_checker_class_base_parallel(
         nested_params or [],
         decl_indent="        ",
         parse_indent="            ",
+        path_params=path_params or [],
     )
 
     region_reads = []
@@ -2253,6 +2697,7 @@ def _emit_checker_class_parallel(
     chart_name: str,
     regions: list[tuple[str, str | None, list[str]]],
     nested_params: list[tuple[str, str, str]] | None = None,
+    path_params: list[tuple[tuple[str, ...], str]] | None = None,
 ) -> str:
     """``sos_checker_<chart>.sv`` — parallel-chart DEFAULT class.
 
@@ -2267,9 +2712,9 @@ def _emit_checker_class_parallel(
     names the failing region. Per INV-S-HDL-E-3 no inline
     ``assert property``.
 
-    ``regions`` and ``nested_params`` are consumed by the base
-    emitter; this default class only wires the constructor + hook
-    overrides.
+    ``regions``, ``nested_params``, and ``path_params`` are consumed by
+    the base emitter; this default class only wires the constructor +
+    hook overrides.
     """
     cls = checker_class_name(chart_name)
     base = _normalise_chart_name(chart_name)
@@ -2278,6 +2723,7 @@ def _emit_checker_class_parallel(
     iface = virtual_if_name(chart_name)
     del regions
     del nested_params
+    del path_params
     return _HEADER_PREFIX + f"""//
 // Response checker DEFAULT class for chart `{chart_name}` (parallel).
 //
@@ -2758,11 +3204,14 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
 
     # Wave-3-future-remaining (2026-05-24 §15): collect one-level-deep
     # nested ``<param name="outer.inner"/>`` declarations across all
-    # transitions. ``_collect_nested_params`` raises
-    # ``UnsupportedChartError`` on any two-or-more-dot name (e.g.
-    # ``"a.b.c"``) so the checker emit never silently truncates the
-    # nesting depth.
+    # transitions. Wave-3-future-remaining-path (2026-05-24 §15) adds
+    # ``_collect_path_params`` for depth-≥2 declarations, lowered to
+    # ``sos_jsonl_parse_path_*`` calls in the checker emit. Both
+    # collectors share ``_validate_path_segments`` for the build-time
+    # chart-vocab gate (empty segments, non-identifier chars, leading/
+    # trailing dots).
     nested_params = _collect_nested_params(chart_ir)
+    path_params = _collect_path_params(chart_ir)
 
     if regions:
         # Parallel-chart emit (wave-3): per-region virtual interface +
@@ -2780,11 +3229,11 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
                 _emit_driver_class(chart_name),
             f"tb/sv/{base}/sos_{base}_checker_base.svh":
                 _emit_checker_class_base_parallel(
-                    chart_name, regions, nested_params
+                    chart_name, regions, nested_params, path_params
                 ),
             f"tb/sv/{base}/sos_checker_{base}.sv":
                 _emit_checker_class_parallel(
-                    chart_name, regions, nested_params
+                    chart_name, regions, nested_params, path_params
                 ),
             f"tb/sv/{base}/tb_{base}.sv":
                 _emit_top_module_parallel(chart_name, regions),
@@ -2810,9 +3259,11 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
             f"tb/sv/{base}/sos_driver_{base}.sv":
                 _emit_driver_class(chart_name),
             f"tb/sv/{base}/sos_{base}_checker_base.svh":
-                _emit_checker_class_base(chart_name, nested_params),
+                _emit_checker_class_base(
+                    chart_name, nested_params, path_params
+                ),
             f"tb/sv/{base}/sos_checker_{base}.sv":
-                _emit_checker_class(chart_name, nested_params),
+                _emit_checker_class(chart_name, nested_params, path_params),
             f"tb/sv/{base}/tb_{base}.sv":
                 _emit_top_module(chart_name, n_states),
             f"tb/sv/{base}/run_verilator.mk":

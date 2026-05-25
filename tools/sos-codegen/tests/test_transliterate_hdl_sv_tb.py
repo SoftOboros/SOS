@@ -1654,18 +1654,19 @@ class TestWave3FutureNestedJsonParser:
         assert "sos_jsonl_parse_nested_int(" in checker_base
         assert '"payload", "value"' in checker_base
 
-    def test_two_level_dotted_param_raises_actionable_error(self):
-        """Deliverable 2 (error path): a ``<param name="a.b.c"/>`` with
-        two or more dots MUST raise ``UnsupportedChartError`` with a
-        message that names the wave + the suggested fix (flatten in
-        the raise-side)."""
+    def test_two_level_dotted_param_now_emits_path_parser_call(self):
+        """Wave-3-future-remaining-path (2026-05-24 §15) supersedes the
+        wave-3-future ``one-level-deep`` raise: ``<param name="a.b.c"/>``
+        no longer raises ``UnsupportedChartError``. The chart-vocab
+        error gate moves up to ``_validate_path_segments`` (which
+        rejects empty / non-identifier segments); valid dot-separated
+        identifiers at depth ≥ 2 lower to ``sos_jsonl_parse_path_*``.
+        """
         chart = _chart_with_nested_param(outer="a", inner="b.c", expr="1")
-        with pytest.raises(sv_tb.UnsupportedChartError) as exc_info:
-            sv_tb.render_target(chart, {"chart_name": "demo"})
-        msg = str(exc_info.value)
-        assert "SOS-08-E wave-3-future" in msg
-        assert "one-level-deep" in msg
-        assert "flatten in the raise-side" in msg
+        files = sv_tb.render_target(chart, {"chart_name": "demo"})
+        checker_base = files["tb/sv/demo/sos_demo_checker_base.svh"]
+        assert "sos_jsonl_parse_path_int(" in checker_base
+        assert '"a.b.c"' in checker_base
 
     def test_no_nested_param_keeps_emit_byte_identical_with_wave3(self):
         """Regression guard: a single-region chart WITHOUT any nested
@@ -1952,3 +1953,355 @@ class TestWave3FutureLayeredClassHierarchy:
         # exception means the audit passed.
         sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
         sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
+
+
+# ---------------------------------------------------------------------------
+# Wave-3-future remaining: deeper-than-one-level nested JSON parser
+# (path-segment based). Lifts the wave-3-future "one level deep" cap so
+# ``<param name="a.b.c"/>`` (and deeper) lowers to a chain of nested-
+# object descents via the new ``sos_jsonl_parse_path_*`` helpers.
+#
+# @spec docs/concepts/SOS-08-E-CONCEPTS.md §15 (2026-05-24 wave-3-future
+#       remaining — deeper-than-one-level nested JSON parser)
+# ---------------------------------------------------------------------------
+
+
+def _chart_with_path_param(
+    path: str = "a.b.c",
+    expr: str = "42",
+) -> dict:
+    """Single-region chart with a transition that raises an event with a
+    deeper-than-one-level nested ``<param>`` (depth ≥ 2)."""
+    return {
+        "initial": "idle",
+        "state": [
+            {
+                "id": "idle",
+                "transition": [
+                    {
+                        "event": "start",
+                        "target": "active",
+                        "raise_value": [
+                            {
+                                "event": "tick",
+                                "param": [
+                                    {"name": path, "expr": expr},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+            {"id": "active"},
+        ],
+    }
+
+
+def _parallel_chart_with_path_param(path: str = "a.b.c") -> dict:
+    """Parallel chart with a deeper-than-one-level nested ``<param>``
+    declared on the ``left`` region's L1->L2 transition."""
+    return {
+        "initial": "regions",
+        "parallel": [
+            {
+                "id": "regions",
+                "state": [
+                    {
+                        "id": "left",
+                        "initial": "L1",
+                        "state": [
+                            {
+                                "id": "L1",
+                                "transition": [
+                                    {
+                                        "event": "tick",
+                                        "target": "L2",
+                                        "raise_value": [
+                                            {
+                                                "event": "evt",
+                                                "param": [
+                                                    {
+                                                        "name": path,
+                                                        "expr": "1",
+                                                    },
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            {"id": "L2"},
+                        ],
+                    },
+                    {
+                        "id": "right",
+                        "initial": "R1",
+                        "state": [
+                            {"id": "R1"},
+                            {"id": "R2"},
+                        ],
+                    },
+                ],
+            }
+        ],
+    }
+
+
+class TestWave3FuturePathNestedJsonParser:
+    """Deeper-than-one-level nested-JSON parser emit + walker plumbing.
+
+    Closes the wave-3-future-path carry-forward from §15 2026-05-24
+    (wave-3-future-remaining nested JSON parser, deeper nesting). The
+    wave-3-future-remaining nested parser (one level deep) stays byte-
+    identical; this slice adds ``sos_jsonl_parse_path_int`` /
+    ``sos_jsonl_parse_path_string`` alongside it for depth-≥2 paths.
+    """
+
+    def _pkg(self) -> str:
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        return files["tb/sv/demo/sos_jsonl_parser_pkg.svh"]
+
+    # ------------------------------------------------------------------
+    # Deliverable 1: parser pkg emits the two new functions.
+    # ------------------------------------------------------------------
+
+    def test_parser_pkg_emits_path_int_function(self):
+        """``sos_jsonl_parse_path_int`` is emitted with the contracted
+        signature."""
+        src = self._pkg()
+        assert (
+            "function automatic int sos_jsonl_parse_path_int("
+            in src
+        )
+        # Signature MUST be (line, path_dot_separated, value).
+        assert "input  string path_dot_separated" in src
+        assert "output int    value" in src
+
+    def test_parser_pkg_emits_path_string_function(self):
+        """``sos_jsonl_parse_path_string`` is emitted with the contracted
+        signature."""
+        src = self._pkg()
+        assert (
+            "function automatic int sos_jsonl_parse_path_string("
+            in src
+        )
+        assert "output string value" in src
+
+    # ------------------------------------------------------------------
+    # Byte-identity regression guards.
+    # ------------------------------------------------------------------
+
+    def test_byte_identity_when_chart_uses_only_depth_0_params(self):
+        """Regression guard: a chart with no nested ``<param>`` (only
+        depth-0 / top-level params) MUST emit a byte-identical checker-
+        base header to the wave-3-future-remaining (d879e7b) baseline.
+
+        We assert on the absence of any path / nested decl markers in
+        the emitted output — the chart-vocab guard is identical to the
+        existing wave-3-future ``_no_nested_param_keeps_emit_byte_
+        identical_with_wave3`` regression guard."""
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        checker_base = files["tb/sv/demo/sos_demo_checker_base.svh"]
+        checker = files["tb/sv/demo/sos_checker_demo.sv"]
+        for src in (checker_base, checker):
+            # No nested or path call sites — by-construction byte-
+            # identical to the wave-3-future-remaining baseline at
+            # d879e7b for depth-0-only charts.
+            assert "sos_jsonl_parse_nested_int" not in src
+            assert "sos_jsonl_parse_nested_string" not in src
+            assert "sos_jsonl_parse_path_int" not in src
+            assert "sos_jsonl_parse_path_string" not in src
+            assert "Wave-3-future-remaining" not in src
+
+    def test_byte_identity_when_chart_uses_only_depth_1_nested_params(self):
+        """Regression guard: a chart with only depth-1 nested ``<param>``
+        declarations (``"outer.inner"``) MUST keep the wave-3-future-
+        remaining nested-only emit path byte-identical. The new path-
+        parser call sites MUST NOT appear in the checker-base when no
+        depth-≥2 param is declared.
+
+        Specifically, ``sos_jsonl_parse_nested_int(`` is still emitted
+        at the call site verbatim, and ``sos_jsonl_parse_path_int(`` is
+        absent from the checker (it remains present in the parser pkg
+        as an unconditional helper, but no call site references it)."""
+        files = sv_tb.render_target(
+            _chart_with_nested_param(),
+            {"chart_name": "demo"},
+        )
+        checker_base = files["tb/sv/demo/sos_demo_checker_base.svh"]
+        # Wave-3-future-remaining nested call site preserved verbatim.
+        assert "sos_jsonl_parse_nested_int(" in checker_base
+        assert '"payload", "value"' in checker_base
+        # No path-parser call sites for a depth-1-only chart.
+        assert "sos_jsonl_parse_path_int(" not in checker_base
+        assert "sos_jsonl_parse_path_string(" not in checker_base
+
+    # ------------------------------------------------------------------
+    # Deliverable 2: walker plumbing emits the path-parser call.
+    # ------------------------------------------------------------------
+
+    def test_three_level_path_param_emits_path_int_call(self):
+        """``<param name="a.b.c"/>`` (depth 2) emits a call to
+        ``sos_jsonl_parse_path_int`` with the dot-separated path
+        literal as the second argument."""
+        files = sv_tb.render_target(
+            _chart_with_path_param("a.b.c"),
+            {"chart_name": "demo"},
+        )
+        checker_base = files["tb/sv/demo/sos_demo_checker_base.svh"]
+        assert "sos_jsonl_parse_path_int(" in checker_base
+        assert '"a.b.c"' in checker_base
+        # The local variable is named after the sanitised path.
+        assert "path_a_b_c" in checker_base
+
+    def test_four_level_path_param_emits_path_int_call(self):
+        """``<param name="a.b.c.d"/>`` (depth 3) emits the same shape."""
+        files = sv_tb.render_target(
+            _chart_with_path_param("a.b.c.d"),
+            {"chart_name": "demo"},
+        )
+        checker_base = files["tb/sv/demo/sos_demo_checker_base.svh"]
+        assert "sos_jsonl_parse_path_int(" in checker_base
+        assert '"a.b.c.d"' in checker_base
+        assert "path_a_b_c_d" in checker_base
+
+    # ------------------------------------------------------------------
+    # Runtime semantics — verified via SV-source inspection.
+    # ------------------------------------------------------------------
+
+    def test_path_int_handles_missing_key_at_intermediate_level(self):
+        """When an intermediate path segment isn't found, the parser
+        returns 0 — the inner-scan loop falls through to the outer
+        ``return 0;`` at the end of ``sos_jsonl_parse_path_int``."""
+        src = self._pkg()
+        body = src.split(
+            "function automatic int sos_jsonl_parse_path_int("
+        )[1]
+        body = body.split("endfunction")[0]
+        # Evidence: the per-segment match-scan terminates with a
+        # ``return 0;`` when no segment match is found at the current
+        # window.
+        assert "if (!match_seg) return 0;" in body
+
+    def test_path_int_handles_malformed_intermediate_scalar(self):
+        """When an intermediate segment's value is a scalar (not an
+        object), the parser returns 0 — the intermediate-branch brace
+        check has an explicit ``return 0;`` fallback."""
+        src = self._pkg()
+        body = src.split(
+            "function automatic int sos_jsonl_parse_path_int("
+        )[1]
+        body = body.split("endfunction")[0]
+        # The intermediate brace-required check returns 0 on scalar.
+        assert 'if (j >= win_hi || line.getc(j) != "{") return 0' in body
+
+    def test_path_string_handles_escaped_quotes_at_leaf(self):
+        """At the leaf-string level, ``\\"`` preceded by ``\\\\`` is
+        consumed as a literal rather than terminating the value. The
+        1024-character cap from the wave-3-future top-level extractor
+        is preserved (defensive against unterminated quotes)."""
+        src = self._pkg()
+        body = src.split(
+            "function automatic int sos_jsonl_parse_path_string("
+        )[1]
+        body = body.split("endfunction")[0]
+        assert "prev_ch" in body
+        assert "if (cap >= 1024)" in body
+
+    def test_path_int_emits_warning_on_empty_segment_at_runtime(self):
+        """Runtime defence (vs. build-time chart-vocab gate): a
+        malformed input-data path like ``"a..b"`` emits a one-line
+        ``$warning`` and returns 0 rather than spinning or raising.
+        The build-time gate normally catches these in chart source;
+        this is for runtime JSONL-side malformation."""
+        src = self._pkg()
+        # The $warning lives in both path_int + path_string bodies.
+        assert "$warning(" in src
+        # Tagged with the function name so the chart author can grep.
+        assert "sos_jsonl_parse_path_int: empty path segment" in src
+        assert "sos_jsonl_parse_path_string: empty path segment" in src
+
+    # ------------------------------------------------------------------
+    # Chart-vocab gate — build-time errors.
+    # ------------------------------------------------------------------
+
+    def test_chart_vocab_rejects_empty_segment_at_build_time(self):
+        """``<param name="a..b"/>`` (empty segment) raises
+        ``UnsupportedChartError`` at codegen time with a chart-author-
+        actionable message."""
+        chart = _chart_with_path_param("a..b")
+        with pytest.raises(sv_tb.UnsupportedChartError) as exc_info:
+            sv_tb.render_target(chart, {"chart_name": "demo"})
+        msg = str(exc_info.value)
+        assert "SOS-08-E wave-3-future-path" in msg
+        assert "empty path segment" in msg
+        assert 'name="a..b"' in msg
+
+    def test_chart_vocab_rejects_leading_dot(self):
+        """``<param name=".a.b"/>`` (leading dot → empty first segment)
+        raises ``UnsupportedChartError``."""
+        chart = _chart_with_path_param(".a.b")
+        with pytest.raises(sv_tb.UnsupportedChartError) as exc_info:
+            sv_tb.render_target(chart, {"chart_name": "demo"})
+        assert "empty path segment" in str(exc_info.value)
+
+    def test_chart_vocab_rejects_trailing_dot(self):
+        """``<param name="a.b."/>`` (trailing dot → empty last segment)
+        raises ``UnsupportedChartError``."""
+        chart = _chart_with_path_param("a.b.")
+        with pytest.raises(sv_tb.UnsupportedChartError) as exc_info:
+            sv_tb.render_target(chart, {"chart_name": "demo"})
+        assert "empty path segment" in str(exc_info.value)
+
+    def test_chart_vocab_rejects_non_identifier_in_segment(self):
+        """``<param name="a-b.c"/>`` (non-identifier segment) raises
+        ``UnsupportedChartError`` citing SV identifier rules."""
+        chart = _chart_with_path_param("a-b.c")
+        with pytest.raises(sv_tb.UnsupportedChartError) as exc_info:
+            sv_tb.render_target(chart, {"chart_name": "demo"})
+        msg = str(exc_info.value)
+        assert "SOS-08-E wave-3-future-path" in msg
+        assert "SV identifier rules" in msg
+
+    def test_chart_vocab_rejects_segment_starting_with_digit(self):
+        """``<param name="0a.b"/>`` (segment starting with a digit)
+        raises ``UnsupportedChartError`` — SV identifiers MUST start
+        with letter or underscore."""
+        chart = _chart_with_path_param("0a.b")
+        with pytest.raises(sv_tb.UnsupportedChartError) as exc_info:
+            sv_tb.render_target(chart, {"chart_name": "demo"})
+        assert "SV identifier rules" in str(exc_info.value)
+
+    # ------------------------------------------------------------------
+    # Parallel-chart mirror.
+    # ------------------------------------------------------------------
+
+    def test_parallel_checker_uses_path_parser_for_deep_params(self):
+        """Parallel-region mirror: a depth-≥2 ``<param>`` on any
+        region's transition emits a ``sos_jsonl_parse_path_*`` call
+        inside the parallel base checker's ``run()``."""
+        files = sv_tb.render_target(
+            _parallel_chart_with_path_param("a.b.c"),
+            {"chart_name": "p"},
+        )
+        checker_base = files["tb/sv/p/sos_p_checker_base.svh"]
+        assert "sos_jsonl_parse_path_int(" in checker_base
+        assert '"a.b.c"' in checker_base
+
+    # ------------------------------------------------------------------
+    # Round-trip: emit is invariant-clean for path-param charts.
+    # ------------------------------------------------------------------
+
+    def test_render_target_path_emit_invariant_clean(self):
+        """End-to-end: a chart declaring a depth-≥2 ``<param>`` round-
+        trips through ``render_target`` without raising
+        ``InvariantAuditError`` (i.e. the new path-parser helpers stay
+        within INV-S-HDL-E-1/-2/-3)."""
+        sv_tb.render_target(
+            _chart_with_path_param("a.b.c"),
+            {"chart_name": "demo"},
+        )
+        sv_tb.render_target(
+            _parallel_chart_with_path_param("a.b.c.d"),
+            {"chart_name": "p"},
+        )
