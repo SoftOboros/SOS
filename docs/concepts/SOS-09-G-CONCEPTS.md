@@ -1,0 +1,329 @@
+# SOS-09-G — MPU configuration emission
+
+**Status:** 🟡 **drafted 2026-05-25**, awaiting PCDN walkthrough (see §15).
+
+## 0. Authority policy
+
+This phase doc is the **MPU configuration emission** sub-phase under the SOS-09 umbrella (`SOS-09-CONCEPTS.md`, ratified 2026-05-23 with PCDN-SOS-09-001 amended 2026-05-25). The umbrella names seven sub-phases in §6 and freezes the cross-sub-phase decisions (channel-category enum, channel → membrane-primitive mapping, atomicity-class semantics, protection-zone enumeration, register-map artifact priority). This doc takes those decisions as load-bearing input and produces the codegen contract for the ARMv7-M MPU configuration tables driven by chart-declared protection zones.
+
+Per the parent CLAUDE.md "Spec-Before-Code Planning Discipline / Phase document shape":
+
+- **Normative** sections of this doc: §3 glossary, §4 source-of-truth map, §5 frozen decisions (target MPU spec; region descriptor shape; emission outputs; sub-region disable bitmap policy; MPU enable invariant; validation gate), §7 cross-sub-phase invariants (INV-S-MEM-G-1 through INV-S-MEM-G-4), §8 standards integration matrix additions, §9 acceptance gates.
+- **Informative** sections: §1 purpose, §2 problem statement, §11 non-goals, §16 change log.
+- All keywords MUST, MUST NOT, SHALL, SHOULD, SHOULD NOT, MAY are interpreted per RFC 2119 / RFC 8174 when capitalised.
+
+This doc cites SOS-07 §6 for the cross-phase invariants `INV-SOS-A` through `INV-SOS-H`, SOS-09 §7 for the cross-sub-phase invariants `INV-S-MEM-1` through `INV-S-MEM-6`, and SOS-00 §6 for the curated ARMv7-M primitive bindings. Neither set is re-derived.
+
+Per PCDN-SOS-09-006 (ratified), v1 scope is the ARMv7-M privileged/unprivileged axis only; TrustZone (Cortex-M33 / M55 / M85) is a future extension. Per PCDN-SOS-09-001 amended 2026-05-25, chart annotations are read from the iState `other_attributes` extension surface via `sos:`-prefixed JSON keys — specifically `sos:zone` here.
+
+## 1. Purpose
+
+SOS-09-G is the codegen path producing ARMv7-M MPU configuration tables from chart-declared protection zones. Output: a C array of MPU region descriptors and a Rust constant of the same, both consumed at startup by the SW-side runtime to install per-channel access control.
+
+Without this sub-phase, INV-S-MEM-3 (protection is end-to-end) is unenforceable: SOS-09-E emits the HW-side register-decode gate, but the SW-side MPU configuration that fences unprivileged code out of privileged-channel registers has no canonical emission path. The "PDF cannot lie because the PDF is generated" promise of the SOS-09 umbrella extends to the MPU table here: every entry in the emitted `sos_mpu_table` traces back to a chart channel's `sos:zone` annotation; every chart channel with `sos:zone="privileged"` has a fence on both sides.
+
+## 2. Problem statement
+
+Per SOS-09 §2, the canonical hardware/software co-design failure mode is the register-map PDF that lies. The MPU configuration table is the failure mode's sister artifact — a tangle of `#define`s in startup code (or, more commonly, a CubeMX-generated file the firmware team has hand-edited until it bears no relationship to the originating tool) that nobody has audited end-to-end against the register map it is supposed to fence.
+
+Three concrete pressures inside the SOS-09 emission set motivate this sub-phase:
+
+1. **End-to-end protection pressure.** INV-S-MEM-3 mandates that a chart-declared `privileged` zone be enforced on both sides. SOS-09-E emits the HW gate. Without SOS-09-G, the SW MPU configuration is either hand-rolled (drift), CubeMX-generated (out-of-band), or absent (the chart's protection annotation becomes documentation, not behaviour). The chart-as-source claim only holds if every annotation realises across every artifact.
+
+2. **Per-target MPU surface pressure.** ARMv7-M MPU is not uniform across Cortex-M variants: Cortex-M3 and Cortex-M4 expose 8 MPU regions; Cortex-M7 exposes 16. Cortex-M0+ (when an MPU is present) typically exposes 8. The codegen MUST detect the target and emit the correct table size; mis-sizing produces silent over-protection (when fewer regions than expected are programmed) or a synth-time array bound failure (when more are emitted than the chip has).
+
+3. **Region-shape exactness pressure.** ARMv7-M MPU regions are sized in powers of two (32 B minimum, 4 GB maximum). A chart-declared channel whose register footprint is 128 B at offset 0x100 cannot be fenced by a single 128 B region without padding the start offset — instead, the codegen MUST pick the smallest power-of-two enclosing region (here 256 B aligned to 0x100, or a 512 B region depending on alignment) AND set the 8-bit sub-region disable (SRD) field to mask off the bytes outside the channel footprint. Over-protection (emitting a 1 KB region when a 128 B channel is wanted) is forbidden per INV-S-MEM-G-2 because it leaks address-space layout information to the unprivileged side.
+
+## 3. Canonical glossary
+
+Terms normative within SOS-09-G+. Authority relationships per §8.
+
+| Term | Definition |
+|---|---|
+| **MPU region descriptor** | A four-tuple `{base_addr, size, attr, perm}` describing one ARMv7-M MPU region. Encoded on hardware as a paired write to `MPU_RBAR` (Region Base Address Register; carries `base_addr` + region number) and `MPU_RASR` (Region Attribute and Size Register; carries `size`, `attr`, `perm`, SRD bitmap, and enable bit). As defined in ARM DDI 0403E.e B3.5; used without modification. |
+| **base_addr** | The 32-byte-aligned starting address of an MPU region. For SOS-09-G emission, derived from SOS-09-B's chart-declared address-offset assignment for the channel (after padding to the region's power-of-two alignment). |
+| **size** | Power-of-2 region size encoded as the `SIZE` field of `MPU_RASR` (5-bit `log2(size_in_bytes) - 1`; e.g. `0b00100`=32 B, `0b00111`=256 B, `0b11111`=4 GB). Smallest size enclosing the channel's register footprint, padded up. |
+| **attr** | The memory attribute bits of `MPU_RASR` (`TEX[2:0]`, `S`, `C`, `B`). At v1, fixed to `Device-nGnRnE` (strongly-ordered, non-cacheable, non-shareable) — i.e. `TEX=0b000`, `S=0`, `C=0`, `B=0`. PCDN-SOS-09-G-003 covers v1 attribute selection. |
+| **perm** | The access-permission bits (`AP[2:0]`) of `MPU_RASR`. Derived from the chart-declared `sos:zone`: `privileged` → `AP=0b001` (RW priv, no unpriv access); `unprivileged` → `AP=0b011` (RW full). PCDN-SOS-09-006 freezes the two-zone enumeration at v1. |
+| **`sos:zone`** | A SOS-semantic JSON key inside the host element's `other_attributes` JSON, declaring the channel's protection zone. As defined in SOS-09 §5.4 and SOS-09-A §6 (per PCDN-SOS-09-001 amended 2026-05-25); used without modification. The key carries one of two values: `"privileged"` or `"unprivileged"`. |
+| **sub-region disable bitmap (SRD)** | The 8-bit `SRD` field of `MPU_RASR` that disables individual one-eighth slices of the region. For SOS-09-G emission, set bits MUST disable sub-regions outside the channel footprint; clear bits MUST keep enabled the sub-regions inside the channel footprint. SRD is only meaningful for region sizes ≥ 256 B. As defined in ARM DDI 0403E.e B3.5.10; used without modification. |
+| **BACKGROUND region** | The "default memory map" — when the MPU is enabled with the `PRIVDEFENA` bit of `MPU_CTRL` set, privileged-mode accesses to addresses not covered by any explicit region succeed using the architectural default attributes. Unprivileged accesses to such addresses always fault. As defined in ARM DDI 0403E.e B3.5.5; used without modification. PCDN-SOS-09-G-002 covers v1 background-region policy. |
+| **`sos_mpu_table`** | The emitted artifact — a C array of `sos_mpu_region_t` and a parallel Rust constant `SOS_MPU_TABLE: [SosMpuRegion; N]`. Both are consumed by the runtime's `sos_mpu_install()` function. The table is the canonical record of every chart-declared protection-zone realisation. |
+| **`sos_mpu_install()`** | The runtime hook emitted alongside the table; programs each region in `sos_mpu_table`, sets the `PRIVDEFENA` bit (per PCDN-SOS-09-G-002), and enables the MPU via `MPU_CTRL.ENABLE`. Idempotent per INV-S-MEM-G-3. |
+| **access-violation event** | The chart-declared status channel that SOS-09-E emits for cross-zone access attempts (per SOS-09 §6 SOS-09-E description, INV-S-MEM-3). When the MPU faults on an unprivileged access to a privileged region, the SW-side handler routes the fault into the same chart-declared event channel, closing the SOS-09-F membrane-vector loop for protection. |
+| **region budget** | The number of MPU regions on the target — 8 for Cortex-M3 / M4 / M0+, 16 for Cortex-M7. The codegen detects the target via the build configuration's `target_cpu` and sizes the emitted table accordingly. |
+
+## 4. Source-of-truth map
+
+For every concept this sub-phase touches, **exactly one** location is the canonical authority.
+
+| Concept | Authority |
+|---|---|
+| Protection-zone enum | `SOS-09-CONCEPTS.md` §5.4 (umbrella, **mirror** here) |
+| `sos:zone` chart annotation | `SOS-09-A-CONCEPTS.md` §6 (subordinate, **mirror** here) |
+| Channel base address / footprint | `SOS-09-B-CONCEPTS.md` (SVD emission, **compose** here — SOS-09-G consumes B's address-offset assignment as input to region sizing) |
+| Channel → membrane-primitive mapping | `SOS-09-CONCEPTS.md` §5.2 (cited not redefined; protection is orthogonal to category) |
+| MPU region descriptor encoding | **this doc** (§5.2); ARM DDI 0403E.e B3.5 owns the wire-level grammar (**derive**) |
+| Sub-region disable bitmap policy | **this doc** (§5.4) |
+| Emission outputs (C array + Rust constant) | **this doc** (§5.3) |
+| `sos_mpu_install()` shape | **this doc** (§5.5) |
+| Cross-sub-phase invariants INV-S-MEM-G-1 through 4 | **this doc** (§7) |
+| Cross-sub-phase invariants INV-S-MEM-1 through 6 | `SOS-09-CONCEPTS.md` §7 (cited, not redefined) |
+| Cross-phase invariants INV-SOS-A through H | `SOS-07-CONCEPTS.md` §6 (cited, not redefined) |
+| ARMv7-M MPU curated subset | `SOS-00-CONCEPTS.md` §6 (cited, not redefined) — the local distillation **mirror** of the ARM ARM that SOS reviewers consult; SOS-09-G consumes the same curated surface |
+| `cortex-m` crate `cortex_m::peripheral::MPU` API | external — `cortex-m` v0.7.x; SOS-09-G emits code that calls `MPU::set_region` (or equivalent) (**mirror** per §8) |
+| CMSIS-Core `MPU_RBAR` / `MPU_RASR` register encoding | external — CMSIS-Core 5.9.0+ (**mirror** per §8) |
+| Validation cocotb framework | `SOS-09-F-CONCEPTS.md` (sister sub-phase; SOS-09-G emits the MPU table that the SOS-09-F protection-vector exercises) |
+
+## 5. Frozen decisions
+
+### 5.1 Target MPU spec
+
+Per PCDN-SOS-09-006 (ratified at the umbrella): SOS-09-G v1 targets the **ARMv7-M MPU** (Cortex-M3 / M4 / M7 / M0+ when present). Specifically:
+
+- **Cortex-M3, Cortex-M4, Cortex-M0+**: **8 MPU regions** (CMSIS `MPU_REGION_NUMBER` 0–7).
+- **Cortex-M7**: **16 MPU regions** (CMSIS `MPU_REGION_NUMBER` 0–15).
+
+The codegen detects the target via the build configuration's `target_cpu` and emits the correct table size per-target. Targets with fewer regions than the chart declares produce a hard error per PCDN-SOS-09-G-001 (recommendation: hard error at v1; merging contiguous same-perm regions is a follow-on optimisation).
+
+TrustZone (Cortex-M33 / M55 / M85) is **out of scope** at v1 per PCDN-SOS-09-006 — the four-zone secure/non-secure × privileged/unprivileged model lands when a Cortex-M33+ target enters the SOS bench substrate.
+
+Frozen-enumeration registration policy: **Standards Action** (per parent CLAUDE.md; adding a target widens the codegen's reach and requires cross-phase consensus).
+
+### 5.2 Region descriptor shape
+
+Each chart-declared channel maps to one MPU region descriptor tuple `{base_addr, size, attr, perm}`. Encoded on hardware as a paired write to `MPU_RBAR` + `MPU_RASR` (per ARM DDI 0403E.e B3.5).
+
+- **`base_addr`**: derived from SOS-09-B's chart-declared address-offset assignment for the channel. MUST be aligned to the region `size` (architectural requirement; ARM ARM B3.5.7). If the channel's natural offset is not aligned, the codegen pads the region down to the next aligned boundary AND uses SRD per §5.4 to mask the unused sub-regions.
+- **`size`**: smallest power of two enclosing the channel's register footprint, padded up to satisfy alignment. Encoded as `log2(size_in_bytes) - 1` in the `SIZE` field of `MPU_RASR` (5 bits). Minimum 32 B (`SIZE=0b00100`), maximum 4 GB (`SIZE=0b11111`).
+- **`attr`**: **`Device-nGnRnE`** (strongly-ordered, non-cacheable, non-shareable) at v1 — register-mapped peripherals. Encoded as `TEX=0b000`, `S=0`, `C=0`, `B=0` in `MPU_RASR`. PCDN-SOS-09-G-003 covers attribute selection.
+- **`perm`**: derived from the chart-declared `sos:zone` per the following mapping (encoded as `AP[2:0]` in `MPU_RASR`, per ARM DDI 0403E.e B3.5.6 Table B3-15):
+  - `sos:zone="privileged"` → `AP=0b001` (RW priv, no unpriv access — "Privileged Access only").
+  - `sos:zone="unprivileged"` → `AP=0b011` (RW full — "Full Access").
+
+The XN (Execute Never) bit MUST be set to 1 for all SOS-09-G-emitted regions — register-mapped peripherals are not code. The TYPEEXT bit and the C/B/S sub-fields all default to the `Device-nGnRnE` shape above.
+
+Frozen-enumeration registration policy: **Standards Action**.
+
+### 5.3 Emission outputs
+
+For every chart-declared protection-zone realisation, SOS-09-G emits:
+
+- **C array** in `<chart>_mpu.h` + `<chart>_mpu.c`:
+  ```c
+  typedef struct {
+      uint32_t base_addr;
+      uint32_t size_log2;    /* SIZE field value: log2(size_in_bytes) - 1 */
+      uint32_t attr;         /* {TEX,S,C,B,XN} packed */
+      uint32_t perm;         /* AP[2:0] */
+      uint8_t  srd;          /* sub-region disable bitmap */
+      uint8_t  region_num;   /* MPU_REGION_NUMBER */
+      uint16_t _reserved;
+  } sos_mpu_region_t;
+
+  static const sos_mpu_region_t sos_mpu_table[] = { /* ... */ };
+  static const size_t sos_mpu_table_len = N;
+
+  void sos_mpu_install(void);
+  ```
+
+- **Rust constant** in `<chart>_mpu.rs`:
+  ```rust
+  pub struct SosMpuRegion {
+      pub base_addr: u32,
+      pub size_log2: u32,
+      pub attr: u32,
+      pub perm: u32,
+      pub srd: u8,
+      pub region_num: u8,
+  }
+
+  pub const SOS_MPU_TABLE: [SosMpuRegion; N] = [ /* ... */ ];
+
+  pub fn sos_mpu_install();
+  ```
+
+Both files include CMSIS / `cortex-m`-crate-compatible accessors that the runtime can pass to `MPU::set_region()` (Rust) or `ARM_MPU_SetRegion()` (CMSIS-Core C) directly. The accessor wrappers compose `base_addr | (region_num << 0) | (1 << 4)` (the `VALID` bit) for `MPU_RBAR` and the `MPU_RASR` packed encoding from `size_log2`, `attr`, `perm`, and `srd`.
+
+Frozen-enumeration registration policy: **Specification Required** (the output-file naming convention is a phase-local mechanic; widening the emission set — e.g. adding a SystemRDL-companion or a debugger-side annotation — is a phase-owner walkthrough update, not a §16 amendment).
+
+### 5.4 Sub-region disable bitmap policy
+
+ARMv7-M MPU regions of size ≥ 256 B carry an 8-bit `SRD` field that disables individual one-eighth slices. SOS-09-G's emitter MUST use SRD to keep region shapes exact-to-channel:
+
+- Set SRD bits for sub-regions **outside** the channel's register footprint.
+- Clear SRD bits for sub-regions **inside** the channel's register footprint.
+
+This keeps the emitted region shape exact-to-channel rather than over-protecting. Over-protection is forbidden per INV-S-MEM-G-2 because the unprivileged side, by attempting reads/writes to the over-protected bytes, can infer which sub-regions are masked vs which are channel-mapped — leaking address-space layout information.
+
+For region sizes < 256 B (the 32 B, 64 B, 128 B sizes), SRD is not architecturally meaningful (the field exists in `MPU_RASR` but has no effect for sub-256 B regions per ARM DDI 0403E.e B3.5.10). The emitter MUST emit SRD=0 for such regions and rely on the region size matching the channel footprint exactly (which forces base-address-alignment friction — the chart-author is responsible for SOS-09-B placement that respects 32 B / 64 B / 128 B natural alignment for sub-256 B channels).
+
+Frozen-enumeration registration policy: **Standards Action**.
+
+### 5.5 MPU enable invariant — `sos_mpu_install()` shape
+
+Emitted runtime hooks include a `sos_mpu_install()` function with the following behaviour:
+
+1. Disable MPU (`MPU_CTRL.ENABLE = 0`) before reconfiguration.
+2. For each row in `sos_mpu_table`: write `MPU_RBAR` with `base_addr | VALID=1 | REGION=region_num`; write `MPU_RASR` with the packed `{size_log2, attr, perm, srd, ENABLE=1}` encoding.
+3. Disable any unused region slots (`MPU_RBAR` write with `REGION=k` and `MPU_RASR.ENABLE=0`) so that prior boot state cannot leak into an undeclared region.
+4. Set `PRIVDEFENA=1` in `MPU_CTRL` (background region enabled for privileged accesses) per PCDN-SOS-09-G-002 recommendation. Set `HFNMIENA=0` (MPU disabled for HardFault / NMI / FAULTMASK handlers) per ARM ARM default.
+5. Set `MPU_CTRL.ENABLE = 1`.
+6. Issue `DSB` then `ISB` to ensure the MPU is in effect before the next instruction fetch.
+
+The hook is **idempotent**: calling `sos_mpu_install()` multiple times produces the same MPU register state (the second and subsequent calls overwrite identical values). INV-S-MEM-G-3 formalises this.
+
+Frozen-enumeration registration policy: **Specification Required** (the install sequence is normative; tweaks to the disable-other-slots step or the barrier ordering are phase-local mechanics).
+
+### 5.6 Validation gate
+
+Per PCDN-SOS-09-005 (ratified at the umbrella): the v1 co-simulation framework is **cocotb-with-Python-CPU-stub**. SOS-09-G's validation gate, riding the same framework via SOS-09-F's membrane-vector emission:
+
+- The cocotb test drives an unprivileged access from the SW-stub against a chart-declared `sos:zone="privileged"` region.
+- The MPU table emitted by SOS-09-G is loaded into the SW-stub's region-decode model.
+- The MPU fault path fires (the stub raises the chart-declared `MemManage` event); the chart-declared access-violation `<sos:status>` channel that SOS-09-E emits receives the fault notification.
+- The cocotb test asserts the access-violation channel state, naming the chart channel and the originating chart state per INV-SOS-H.
+
+This closes the SOS-09-F membrane vector loop for protection per umbrella §6. Acceptance gate (b) below.
+
+Frozen-enumeration registration policy: **Standards Action**.
+
+## 6. (Reserved — emission-walker contract; lives in implementation phase)
+
+The per-walker emission shape (which iState walker visits which annotation, how SOS-09-B's address-offset assignment is consumed, how the SOS-09-F protection vector is paired with the table emission) is the implementation phase's territory — out of scope for this concepts doc. The contract surface is normative in §5; the walker that satisfies it is informative until the implementation phase lands.
+
+## 7. Cross-sub-phase invariants — INV-S-MEM-G-1 through INV-S-MEM-G-4
+
+In addition to the cross-phase invariants INV-SOS-A through H (from SOS-07) and the SOS-09 cross-sub-phase invariants INV-S-MEM-1 through 6 (cited but not redefined), the following invariants are normative across SOS-09-G:
+
+- **INV-S-MEM-G-1 — Every privileged channel has an MPU region.** Every chart channel with `sos:zone="privileged"` MUST have an entry in `sos_mpu_table` whose `perm` denies unprivileged access (i.e. `AP=0b001`). Channels with `sos:zone="unprivileged"` MAY have an entry (for explicit `AP=0b011` declaration) or MAY rely on the background region (per PCDN-SOS-09-G-002); the chart-as-source claim only depends on the privileged side being fenced. Verified by SOS-09-F membrane vectors per acceptance gate (b).
+
+- **INV-S-MEM-G-2 — Regions are sized exactly to the chart-declared channel footprint.** SOS-09-G's emitter MUST size each region to the smallest power-of-two enclosing the channel's register footprint AND use the SRD field per §5.4 to mask sub-regions outside the footprint. Over-protection (emitting a region larger than the channel needs, with SRD bits clear over the unused sub-regions) is **forbidden**: it leaks address-space layout information to the unprivileged side, since the unprivileged side can probe which bytes outside the channel are also fenced and infer the surrounding address-space shape.
+
+- **INV-S-MEM-G-3 — `sos_mpu_install()` is idempotent.** Calling `sos_mpu_install()` multiple times produces the same MPU register state. Verified by acceptance gate (c) — the test scaffolding calls the hook twice and asserts register-state-equivalence.
+
+- **INV-S-MEM-G-4 — Protection violations route to the chart-declared access-violation event.** The cocotb co-sim demonstrates that an unprivileged access to a privileged region fires the chart-declared access-violation event channel (the same `<sos:status>` channel that SOS-09-E emits for HW-side cross-zone access). This closes the SOS-09-F membrane vector for protection per umbrella §6. Verified by acceptance gate (b).
+
+Frozen-enumeration registration policy: **Standards Action**.
+
+## 8. Standards integration matrix additions
+
+The following rows EXTEND the SOS-07 §7 and SOS-09 §8 matrices:
+
+| Concept | Upstream authority | Local relationship | Phase that declares it | Mutation rights |
+|---|---|---|---|---|
+| ARMv7-M MPU spec (ARM DDI 0403E.e B3.5) | ARM (ARMv7-M Architecture Reference Manual) | **derive** (SOS-09-G emits MPU configurations valid per the ARM ARM; ARM owns the spec) | SOS-09-G | none — ARM ARM is upstream |
+| CMSIS-Core `MPU_RBAR` / `MPU_RASR` register encoding | ARM (CMSIS 5.9.0+) | **mirror** (the wire-level encoding fields and bit positions are CMSIS-Core's; SOS-09-G emits the same values without divergence) | SOS-09-G | none — CMSIS encoding is upstream |
+| `cortex-m` crate `cortex_m::peripheral::MPU` API | open project (Rust embedded WG; cortex-m v0.7.x) | **mirror** (Rust runtime side; SOS-09-G's emitted Rust calls into the upstream `MPU::set_region` shape without modification) | SOS-09-G | none — `cortex-m` API is upstream |
+| SOS-09-A `sos:zone` annotation | this repo, SOS-09-A | **mirror** (consumed without modification; SOS-09-G reads the chart-declared zone from `other_attributes` JSON per PCDN-SOS-09-001 amended 2026-05-25) | SOS-09-G | none — SOS-09-A owns the annotation surface |
+| SOS-09-B address-offset assignment | this repo, SOS-09-B | **compose** (SOS-09-G uses B's chart-declared offsets as input to region sizing; B's emission is upstream within SOS-09) | SOS-09-G | none — SOS-09-B owns the offsets |
+| SOS-00 §6 ARMv7-M MPU curated subset | this repo, SOS-00 | **mirror** (the SOS-internal curated subset of the ARM ARM that SOS-09-G consumes; SOS-00 §6 IS the local authority per SOS-09 §8) | SOS-09-G | none — SOS-00 §6 is the curated upstream |
+
+Per INV-SOS-E, the row addition policy is **Specification Required** for adding new rows (phase-owner walkthrough), **Standards Action** for modifying an existing row's relationship value.
+
+## 9. Acceptance gates
+
+A conforming SOS-09-G v1 ratification satisfies:
+
+- **(a) Codegen output compiles.** The emitted C array + Rust constant emit pass `clang -Wall -Wextra -Wpedantic -std=c11` (C side) and `cargo check --target thumbv7em-none-eabihf` (Rust side) respectively. The Rust emission targets the `cortex-m` v0.7.x peripheral API; the C emission targets CMSIS-Core 5.9.0+.
+
+- **(b) Cocotb membrane vector for protection violation passes.** Per PCDN-SOS-09-005's cocotb-with-Python-CPU-stub framework: an unprivileged-access vector against a chart-declared `sos:zone="privileged"` region routes through the emitted MPU table, fires the chart-declared access-violation event, and renders the failure in chart vocabulary per INV-SOS-H (`"channel <name> in zone privileged rejected an unprivileged access from chart state <state>"`).
+
+- **(c) Idempotency demonstrated.** Test scaffolding calls `sos_mpu_install()` twice in sequence; asserts MPU register state (`MPU_RBAR`, `MPU_RASR`, `MPU_CTRL`) equivalence between the two post-call snapshots. Closes INV-S-MEM-G-3.
+
+- **(d) Bench validation deferred.** At least one bench-validation on a target ARMv7-M MPU (Cortex-M7 on the disco-analyzer board per SOS-00 §6's bench-substrate citation) is **deferred to a follow-on** with bench access. Gate (d) is the "implementation-tier" gate; the spec-tier acceptance is (a)–(c).
+
+(a)–(c) are the ratification gates; (d) is the implementation gate that flips from ⏸ to ✅ when bench access is available.
+
+A conforming SOS-09-G ratification *without* bench validation satisfies (a)–(c); this second-tier conformance level is the expected ratification state at the next acceptance review.
+
+## 10. Reconciliation decisions vs adjacent repo primitives
+
+### vs. SOS-09 umbrella §5.4 (protection-zone enum)
+
+SOS-09 §5.4 freezes `{ privileged, unprivileged }` at v1 per PCDN-SOS-09-006. SOS-09-G's `perm` derivation in §5.2 mirrors this enum: `privileged` → `AP=0b001`; `unprivileged` → `AP=0b011`. The two values are the AP encoding from ARM DDI 0403E.e B3.5.6 Table B3-15; SOS-09-G owns the mapping, but the underlying AP encoding is ARM's.
+
+### vs. SOS-09 umbrella §6 SOS-09-E (HDL register-file RTL)
+
+SOS-09-E emits the HW-side gate (register-decode logic that rejects cross-zone access at the bus interface). SOS-09-G emits the SW-side gate (MPU configuration that fences the unprivileged side from privileged-channel registers). INV-S-MEM-3 (protection is end-to-end) requires both to be present; SOS-09's codegen refuses to emit one without the other. Reconciliation: the two sub-phases share no code; they share the chart annotation (`sos:zone`) as the single source. INV-S-MEM-1 (single-source register definition) is satisfied.
+
+### vs. SOS-09 umbrella §6 SOS-09-F (membrane vectors)
+
+SOS-09-F authors the cocotb co-sim framework and the six membrane-vector shapes (initial-value-read, write-then-read, side-effect, clear-on-read, atomicity, protection). SOS-09-G's acceptance gate (b) consumes SOS-09-F's protection vector shape; the table emitted by SOS-09-G is the table the protection vector exercises. Reconciliation: SOS-09-F owns the vector framework; SOS-09-G is one consumer.
+
+### vs. SOS-00 §6 (ARMv7-M MPU curated subset)
+
+SOS-00 §6 owns the curated ARMv7-M MPU subset SOS reviewers consult (per INV-S1; the ARM ARM is not a regular crawl target). SOS-09-G consumes the same curated surface — the MPU register names, the AP encoding table, the SRD semantics — without re-deriving them. Reconciliation: SOS-00 is upstream; SOS-09-G is downstream within this repo. The `mirror` row in §8 records this.
+
+### vs. INV-SOS-A (chart-as-source) + INV-S-MEM-1 (single-source register definition)
+
+The MPU table is a build output: every entry traces back to a chart channel's `sos:zone`. INV-SOS-A (chart-as-source) and INV-S-MEM-1 (single-source register definition) are both **mirror** — SOS-09-G owns no new chart-source claim; it owns one new artifact emitted from the existing chart source.
+
+## 11. Non-goals
+
+This sub-phase does NOT:
+
+- Target ARMv8-M MPU (Cortex-M23 / M33 / M55 / M85). The ARMv8-M MPU has a different region-descriptor encoding (no power-of-2-size restriction; explicit base/limit addresses) and a different protection model (secure / non-secure TrustZone partitioning). v1 stays ARMv7-M-only; v2 (when a Cortex-M33+ target enters the SOS bench substrate) lands as its own sub-phase.
+- Target ARMv7-R MPU (Cortex-R). Different exception model, different cache integration. Out of scope.
+- Author cache attribute overrides. The `attr` field is fixed to `Device-nGnRnE` at v1 per PCDN-SOS-09-G-003. Cacheable / write-back / shareable variants are deferred.
+- Configure the MPU at runtime beyond the initial install. Dynamic region reprogramming (per-task MPU layouts, MPU-context-switch on PendSV) is a SOS-04 / SOS-05 runtime concern that may compose `sos_mpu_table` as one of several layouts, but the dynamic-layout machinery is not SOS-09-G's responsibility.
+- Emit MPU configurations for memory regions outside the chart-declared channel set. SRAM, flash, DTCM, ITCM regions are owned by SOS-04 / SOS-05 startup code (linker-script-driven). SOS-09-G owns the chart-channel side only.
+- Verify physical metastability in the formal model. Per INV-S-HDL-3 (from SOS-08 §7), `sos_synchronizer` flops are excluded from formal proof; SOS-09-G inherits this exclusion via the HW-side gate it pairs with.
+- Add a third protection zone at v1. The `{ privileged, unprivileged }` enum is frozen at v1 per PCDN-SOS-09-006. Future TrustZone-style extensions are gated by SOS-09 §5.4's Standards Action policy.
+
+## 12. (Reserved — implementation acceptance lives in §9.)
+
+§12 is intentionally empty in this concepts doc; the implementation-acceptance gates live in §9. (The phase document shape per parent CLAUDE.md names §12 acceptance — SOS-09-G consolidates this into §9 because the gates are already in concrete-acceptance form. §12's intended slot is preserved as informative-reserved.)
+
+## 13. Files cited
+
+| Path | Role |
+|---|---|
+| `docs/concepts/SOS-09-CONCEPTS.md` | Umbrella; this sub-phase's parent. |
+| `docs/concepts/SOS-09-A-CONCEPTS.md` | Chart annotation surface; SOS-09-G consumes the `sos:zone` annotation from there. |
+| `docs/concepts/SOS-09-B-CONCEPTS.md` | CMSIS-SVD emission; SOS-09-G consumes B's address-offset assignment. |
+| `docs/concepts/SOS-09-E-CONCEPTS.md` | HDL register-file RTL; sister sub-phase emitting the HW-side gate (protection end-to-end per INV-S-MEM-3). |
+| `docs/concepts/SOS-09-F-CONCEPTS.md` | Membrane vectors; SOS-09-G's acceptance gate (b) rides SOS-09-F's protection-vector emission. |
+| `docs/concepts/SOS-07-CONCEPTS.md` | Cross-phase invariants INV-SOS-A through H; cited not redefined. |
+| `docs/concepts/SOS-00-CONCEPTS.md` | M7 primitive contract; §6 owns the ARMv7-M MPU curated subset SOS-09-G mirrors. |
+| `tools/sos-codegen/tests/test_sos_09_g_concepts_doc.py` | Per-doc-assertion test module. |
+| Parent `CLAUDE.md` | Spec-Before-Code Planning Discipline; Phase document shape. |
+
+## 14. Unblocks
+
+This sub-phase's ratification (after PCDN walkthrough) unblocks:
+
+- **SOS-09 acceptance gate (b)** — chart channel with `sos:zone` annotation emits all six artifacts including the MPU table.
+- **SOS-09-F acceptance gate** — the protection membrane vector has a concrete MPU-table consumer to exercise.
+- **The first end-to-end chart-driven SoC bring-up demo** with protection — chart → CMSIS-SVD + Rust HAL + HDL register file + MPU table + membrane vectors → Yosys+nextpnr ECP5 bitstream + Cortex-M target, with the chart as the single source for both HW gate and SW MPU fence.
+- **INV-S-MEM-3 (protection is end-to-end)** becomes enforceable in the codegen — without SOS-09-G, SOS-09's codegen would silently emit the HW-side gate alone, leaving the SW side unfenced.
+
+## 15. Pending Concept Decision Notices (PCDNs)
+
+These are the open questions whose resolution moves this doc from 🟡 drafted to 🟢 ratified. The PCDN-SOS-09-G-* identifiers are stable per parent CLAUDE.md "Errata Open Question" naming.
+
+Frozen-enumeration registration policy for all four PCDNs below: **Standards Action** (each touches a load-bearing decision either on the cross-target axis or on the protection-end-to-end invariant; later relaxation requires a §16 amendment).
+
+- **PCDN-SOS-09-G-001 — Region budget overflow policy.** If a chart declares more privileged-distinct zones than the target MPU has regions (e.g. 9 zones on Cortex-M3's 8 regions, or 17 zones on Cortex-M7's 16), is the emit a hard error or does the codegen attempt to merge contiguous same-perm regions? **Recommendation**: hard error at v1 with an explicit "increase target MPU or reduce zone count" message; merging is a follow-on optimisation. Rationale: silent merging breaks INV-S-MEM-G-2 (regions are sized exactly to the chart-declared channel footprint) because merged regions span addresses outside any single channel's footprint; the chart-author should make the merge intent explicit by combining channels rather than relying on the codegen to do it.
+
+- **PCDN-SOS-09-G-002 — Background region policy.** Enable (`PRIVDEFENA=1` — kernel-mode access outside chart regions succeeds via the architectural default memory map) vs disable (`PRIVDEFENA=0` — strict; kernel must also map regions for every address it accesses, including SRAM / flash / peripherals not declared in the chart). **Recommendation**: enable at v1. Rationale: the chart-author controls peripherals declared in the chart; demanding the chart-author also declare SRAM / flash / ITCM / DTCM regions just to permit kernel access is friction without security benefit (kernel code is trusted by construction in the SOS model). Disabling the background region is a future opt-in for chart-authors building hardened deployments where the kernel itself is sandboxed.
+
+- **PCDN-SOS-09-G-003 — Memory attribute selection.** `Device-nGnRnE` (strongly-ordered) vs `Device-nGnRE` (no early write acknowledge but ordered) vs `Normal Non-cacheable`. **Recommendation**: `Device-nGnRnE` at v1 for safety. Rationale: register-mapped peripherals are the v1 use case (per SOS-09 §5.2's channel-category enum); strongly-ordered is the safest default — no merging, no reordering, no caching. Cache-attribute overrides (for queue channels backed by DPRAM where cacheable access would be a perf win) are deferred to a PCDN follow-on once the perf gap is measured.
+
+- **PCDN-SOS-09-G-004 — Per-target attribute differences.** Cortex-M7 has additional memory attributes vs Cortex-M3 / M4 (cacheability, shareability, TEX[2:0] sub-types per ARM DDI 0403E.e B3.5.6 Table B3-13). Chart-author exposed (per-target attribute set) vs codegen-fixed (the `Device-nGnRnE` default works on all ARMv7-M targets uniformly)? **Recommendation**: codegen-fixed at v1. Rationale: the `Device-nGnRnE` default works on all ARMv7-M targets without per-target chart-author intervention; the chart stays target-agnostic per INV-S15 (SOS-00 §10). Chart override is deferred — when a chart-author needs a non-default attribute (cacheable queue channel on M7), the override path lands as a `sos:mpu_attr` annotation in a future SOS-09-G amendment.
+
+## 16. Change log
+
+### 2026-05-25 — Initial draft (Ira)
+
+- Authored `SOS-09-G-CONCEPTS.md` as the MPU configuration emission sub-phase under the SOS-09 umbrella.
+- §3 canonical glossary: terms `MPU region descriptor`, `base_addr`, `size`, `attr`, `perm`, `sos:zone`, `sub-region disable bitmap (SRD)`, `BACKGROUND region`, `sos_mpu_table`, `sos_mpu_install()`, `access-violation event`, `region budget`.
+- §4 source-of-truth map: chart annotation surface (mirror from SOS-09-A); address-offset assignment (compose from SOS-09-B); MPU region descriptor encoding (derive from ARM ARM); emission outputs + install hook (this doc); validation cocotb framework (compose from SOS-09-F).
+- §5 frozen decisions: ARMv7-M MPU target (8 regions M3/M4/M0+, 16 regions M7); region descriptor shape `{base_addr, size, attr, perm}` with `Device-nGnRnE` attribute and `AP=0b001` / `AP=0b011` permission encoding for `privileged` / `unprivileged`; C array + Rust constant emission shape; SRD bitmap policy (mask outside-footprint sub-regions; over-protection forbidden per INV-S-MEM-G-2); `sos_mpu_install()` idempotent install hook with `PRIVDEFENA=1`; cocotb-with-Python-CPU-stub validation gate.
+- §7 cross-sub-phase invariants INV-S-MEM-G-1 through INV-S-MEM-G-4: every privileged channel has an MPU region with `AP=0b001`; regions are exact-to-footprint; `sos_mpu_install()` is idempotent; protection violations route to the chart-declared access-violation event.
+- §8 standards integration matrix additions: ARMv7-M MPU spec (ARM DDI 0403E.e) — derive; CMSIS-Core MPU register encoding — mirror; `cortex-m` crate MPU API — mirror; `sos:zone` annotation — mirror; SOS-09-B address offsets — compose; SOS-00 §6 curated subset — mirror.
+- §9 acceptance gates (a) codegen compiles under clang + cargo check; (b) cocotb protection vector passes; (c) idempotency demonstrated; (d) bench validation deferred.
+- §10 reconciliation vs SOS-09 umbrella §5.4 / §6 SOS-09-E / SOS-09-F / SOS-00 §6 / INV-SOS-A.
+- §15 four PCDNs raised: region budget overflow policy; background region policy; memory attribute selection; per-target attribute differences. All recommendations toward strict / safe defaults with explicit chart-override-or-future-amendment escape hatches.
+
+Status: 🟡 **drafted**, awaiting PCDN walkthrough.
