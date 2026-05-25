@@ -638,3 +638,104 @@ Plus three file-count assertions updated (`test_emits_twelve_files` → `test_em
 **Cited PCDNs / invariants**: PCDN-SOS-08-E-001 / -002 / -004 unchanged; INV-S-HDL-E-1..6 preserved (E-4 strengthened); SOS-03 §15 2026-05-24 schema extension consumed; SOS-08-C `_emit_state_constants` encoding mirrored by-construction.
 
 Status: 🟢 **wave-3-future SOS-03 schema consumer landed**. Layered class hierarchy + nested-JSON parser + per-region SVA datamodel-binding + multi-clock-domain testbench wiring remain on the wave-3-future track, each gated on customer demand / sibling-walker dependencies.
+
+### 2026-05-24 — Impl wave-3-future-remaining: nested-JSON parser (one level deep) (Ira)
+
+Lands the second wave-3-future carry-forward: a **one-level-deep nested-object JSON parser**. The wave-3-future SOS-03 schema consumer only extracted top-level scalar fields; chart events that carry structured payloads (e.g. ``"payload": {"name": ..., "value": ...}``) were either lossily flattened or skipped. This wave-3-future-remaining slice extends ``sos_jsonl_parser_pkg.svh`` with two new functions and wires the walker so a chart-declared ``<param name="outer.inner"/>`` triggers a checker-side parse call against them.
+
+The deeper carry-forwards (layered class hierarchy per PCDN-SOS-08-E-001, multi-clock testbench wiring, deeper-than-one-level nesting) remain deferred — see "Remaining" below.
+
+**Implementation surface**:
+
+- **``_emit_jsonl_parser_pkg(chart_name)``** — extended to additionally emit two new SystemVerilog functions, alongside the wave-3-future top-level ``sos_jsonl_parse_int`` / ``sos_jsonl_parse_string``:
+
+    * ``function automatic int sos_jsonl_parse_nested_int(input string line, input string outer_key, input string inner_key, output int value);`` — locates ``"<outer_key>":`` then ``{`` (defensive: a scalar like ``"outer":42`` returns 0 without raising); locates the matching closing brace via depth tracking; scans the enclosed range for ``"<inner_key>":<int>``. Returns 1 on hit, 0 on every defensive miss (missing outer, missing inner, malformed-outer-scalar).
+    * ``function automatic int sos_jsonl_parse_nested_string(input string line, input string outer_key, input string inner_key, output string value);`` — same shape, string value. Preserves the wave-3-future top-level extractor's 1024-character inner-loop cap so a malformed line cannot pin the parser. Escape-aware: a ``\"`` preceded by a backslash is consumed as a literal rather than terminating the value.
+
+  Both functions are emitted **unconditionally** alongside the existing top-level parsers — no new chart-XML opt-in is needed. Any future generated checker can call them without re-emission.
+
+- **``_collect_nested_params(chart_ir)``** (new) — walks all transitions across the chart (single-region + parallel regions, recursive into nested ``<state>``) and every ``<raise>`` child's ``<param>`` list. A ``<param>`` whose ``name`` attribute contains exactly one ``.`` triggers the nested-payload emit path; the helper returns the unique ``(outer, inner, value_type)`` triples in document order. The walker classifies ``int`` vs ``string`` via the ``<param>``'s ``expr=`` attribute — bare integer literals classify ``int``; bare quoted string literals (single or double) classify ``string``; everything else falls back to ``int`` (the dominant SOS-03 payload case). Multi-level names (``"a.b.c"``) raise ``UnsupportedChartError`` with an actionable message: ``SOS-08-E wave-3-future: <param name="a.b.c"/> exceeds one-level-deep nested-payload support; flatten in the raise-side instead.`` Top-level names (no dot) are not nested-payload triggers and are left to the wave-3-future top-level parsers.
+
+- **``_render_nested_param_blocks(nested_params, decl_indent, parse_indent)``** (new helper) — returns ``(decls, parse_block)`` strings. Empty when ``nested_params`` is empty, so the checker f-string templates can interpolate them unconditionally without disturbing the wave-3-future byte-identical baseline. The single-region checker passes ``decl_indent="        "`` (8 spaces, top of ``run()`` body) and ``parse_indent="            "`` (12 spaces, inside the per-step ``while`` loop). The parallel-region checker mirrors the same indents.
+
+- **``_emit_checker_class(chart_name, nested_params=None)``** — extended to accept an optional ``nested_params`` list. When non-empty, emits per-field local declarations at the top of ``run()`` and per-field parse calls inside the per-step loop, after the wave-3-future ``cycles`` parse. Local variables are named ``nested_<outer>_<inner>`` + ``parsed_nested_<outer>_<inner>`` (sanitised via ``_sanitize_sv_identifier``). When the list is empty the emit is byte-identical to the wave-3-future baseline — the regression test ``test_no_nested_param_keeps_emit_byte_identical_with_wave3`` is the load-bearing guard.
+
+- **``_emit_checker_class_parallel(chart_name, regions, nested_params=None)``** — same extension on the parallel-region path. Nested-param decls are added to ``run()``'s local-variable block (after the per-region ``region_decls`` + ``cycles_wait`` / ``parsed`` locals); parse calls are added inside the per-step loop after the ``cycles`` parse.
+
+- **``render_target``** — calls ``_collect_nested_params(chart_ir)`` once before dispatching to the single-region vs parallel emit branch; forwards the result to whichever checker emit runs. The collector raises ``UnsupportedChartError`` if any ``<param>`` has two or more dots, before any file is emitted — fail-fast at the walker entry, not deep inside an emitter.
+
+**Convention — dot-name ``<param>`` shape**:
+
+A ``<param name="<outer>.<inner>"/>`` element on a ``<raise>`` inside a ``<transition>`` declares that the SOS-03 vector trace MAY carry a ``"<outer>": {"<inner>": <value>}`` payload that the checker SHOULD parse out of each trace step. The walker emits the parse call regardless of whether any given trace step actually carries the field — ``sos_jsonl_parse_nested_int`` / ``_string`` returns 0 on miss without altering the output. Downstream emit extensions (e.g. nested-payload-aware failure messages, datamodel-binding) can read the local variables ``nested_<outer>_<inner>`` produced by the parse calls; this slice does not consume them in the failure-message path (deferred — see remaining work below).
+
+**Emit shape (example)**:
+
+For a single-region chart with ``<transition><raise event="tick"><param name="payload.value" expr="42"/></raise></transition>``, the emitted checker's ``run()`` task body grows two blocks (omitting the unchanged wave-3-future top-level parse / resolve / compare):
+
+```systemverilog
+    task run();
+        int    fh;
+        // ... wave-3-future locals ...
+        int    bit_idx;
+        // Wave-3-future-remaining: nested-payload locals.
+        int    nested_payload_value;
+        int    parsed_nested_payload_value;
+
+        // ... wave-3-future $fopen + clk wait ...
+
+        while (!$feof(fh)) begin
+            rc = $fgets(line, fh);
+            if (rc == 0) break;
+
+            // ... wave-3-future top-level parses ...
+            parsed_int = sos_jsonl_parse_int(line, "cycles", cycles_wait);
+            if (cycles_wait <= 0) cycles_wait = 1;
+            // Wave-3-future-remaining: nested-payload extraction
+            // (one level deep) per chart-declared <param name="outer.inner"/>.
+            nested_payload_value = 0;
+            parsed_nested_payload_value = sos_jsonl_parse_nested_int(
+                line, "payload", "value", nested_payload_value
+            );
+            // ... wave-3-future resolve + compare ...
+        end
+```
+
+**Invariants upheld**:
+
+- **INV-S-HDL-E-1** (no constrained-random) — preserved. The two new SV functions are pure procedural code (loops, ``if``, arithmetic on ``byte`` / ``int``). The audit pass scans the emitted parser pkg and all checker emits cleanly.
+- **INV-S-HDL-E-2** (no UVM) — preserved.
+- **INV-S-HDL-E-3** (no inline ``assert property`` outside bind files) — preserved.
+- **INV-S-HDL-E-4** (chart-vocabulary failure messages) — preserved. This slice does not emit new failure messages; existing wave-3-future messages remain unchanged.
+- **INV-S-HDL-E-5** (per-simulator build wrapper) — preserved unchanged.
+- **INV-S-HDL-E-6** (Verilator-subset compliance) — preserved. The new functions use only basic SV control flow + ``string.getc`` / ``string.len`` + ``byte`` arithmetic, all within Verilator's documented subset.
+- **PCDN-SOS-08-E-001** (flat class hierarchy at v1) — preserved.
+- **PCDN-SOS-08-E-004** (per-region testbench shape) — preserved.
+
+**Tests added**: 13 new test methods on ``TestWave3FutureNestedJsonParser`` in ``tools/sos-codegen/tests/test_transliterate_hdl_sv_tb.py`` (one is optional-tool-gated and ``skip``s when ``iverilog`` / ``verible-verilog-syntax`` aren't on PATH):
+
+- ``test_parser_pkg_emits_nested_int_function`` — deliverable 1a: ``sos_jsonl_parse_nested_int`` declared with the contracted signature.
+- ``test_parser_pkg_emits_nested_string_function`` — deliverable 1b: ``sos_jsonl_parse_nested_string`` declared with the contracted signature.
+- ``test_nested_int_handles_whitespace`` — whitespace + colon between ``"outer":`` and the brace is consumed; the brace is then required.
+- ``test_nested_int_returns_zero_on_missing_outer`` — outer key not present → fall through to ``return 0;``.
+- ``test_nested_int_returns_zero_on_missing_inner`` — outer object found but inner key absent → return 0 without scanning past the outer object.
+- ``test_nested_int_returns_zero_on_malformed_outer_scalar`` — ``"outer":42`` (scalar, not object) → ``return 0;`` rather than raise a parse error.
+- ``test_nested_string_handles_escaped_quotes`` — ``\"`` inside the inner string is preserved (escape-aware); 1024-character cap retained.
+- ``test_checker_class_consumes_nested_param`` — deliverable 2: a ``<param name="payload.value"/>`` triggers a ``sos_jsonl_parse_nested_int(line, "payload", "value", ...)`` call in the checker.
+- ``test_checker_class_parallel_consumes_nested_param`` — deliverable 3: same on the parallel-region path.
+- ``test_two_level_dotted_param_raises_actionable_error`` — ``<param name="a.b.c"/>`` raises ``UnsupportedChartError`` with the message naming the wave + the suggested fix.
+- ``test_no_nested_param_keeps_emit_byte_identical_with_wave3`` — regression guard: a chart with no nested ``<param>`` produces the SAME parser pkg (modulo the two new appended functions) and the SAME checker SV (no extra decls, no parse calls, no nested-param comments).
+- ``test_render_target_does_not_regress_invariants`` — round-trip both shapes through ``render_target`` without ``InvariantAuditError``.
+- ``test_optional_iverilog_smoke_compile_parser_pkg`` — when ``iverilog`` or ``verible-verilog-syntax`` is on PATH, smoke-compile the emitted parser pkg. ``skip``s otherwise.
+
+**Test suite**: 701/701 passing (689 prior + 12 new wave-3-future-remaining; 1 skipped when neither SV syntax tool is installed).
+
+**Wave-3-future remaining boundary** (still deferred):
+
+- **Deeper-than-one-level-deep nesting** (e.g. ``<param name="a.b.c"/>``). The walker raises ``UnsupportedChartError`` with a clear "flatten in the raise-side" remediation. Lifting requires a real SV-side recursive JSON parser; lands when a chart-author actually needs more than one level of nesting (per the SOS spec-before-code discipline — concrete need precedes implementation).
+- **Layered class hierarchy opt-in** (PCDN-SOS-08-E-001) — unchanged.
+- **Multi-clock-domain testbench wiring** — unchanged.
+- **Nested-payload-aware failure messages** — when a comparison failure involves a nested-payload field, the checker could surface the offending nested field's value in the chart-vocabulary failure message. Currently the parse call lands the value in a local variable that downstream emit extensions can read; this slice deliberately does NOT wire the failure-message path because the SOS-03 vector schema doesn't yet declare nested-field comparison semantics (deferred until the schema specifies "expected nested value vs observed" → which observable to read against).
+
+**Cited PCDNs / invariants**: PCDN-SOS-08-E-001 / -002 / -004 unchanged; INV-S-HDL-E-1..6 preserved; ``<param name="outer.inner"/>`` dot-name convention introduced as the chart-author-facing trigger for the new parser functions.
+
+Status: 🟢 **wave-3-future-remaining nested-JSON parser landed (one level deep)**. Deeper nesting, layered class hierarchy, and multi-clock testbench wiring remain on the wave-3-future track.

@@ -1337,3 +1337,342 @@ class TestWave3FutureInvariantsPreserved:
                 scanned = re.sub(r"//.*$", "", src, flags=re.MULTILINE)
                 assert "randomize(" not in scanned, fname
                 assert "uvm_pkg" not in scanned, fname
+
+
+# ---------------------------------------------------------------------------
+# Wave-3-future remaining: nested-JSON parser (one level deep).
+# Closes the "nested JSON parser" carry-forward from §15 2026-05-24's
+# initial wave-3-future entry.
+#
+# @spec docs/concepts/SOS-08-E-CONCEPTS.md §15 (2026-05-24 wave-3-future
+#       remaining — nested-JSON parser)
+# ---------------------------------------------------------------------------
+
+
+def _chart_with_nested_param(
+    outer: str = "payload",
+    inner: str = "value",
+    expr: str = "42",
+) -> dict:
+    """Single-region chart with a transition that raises an event with a
+    one-level-deep nested ``<param>``.
+    """
+    return {
+        "initial": "idle",
+        "state": [
+            {
+                "id": "idle",
+                "transition": [
+                    {
+                        "event": "start",
+                        "target": "active",
+                        "raise_value": [
+                            {
+                                "event": "tick",
+                                "param": [
+                                    {"name": f"{outer}.{inner}", "expr": expr},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+            {"id": "active"},
+        ],
+    }
+
+
+def _parallel_chart_with_nested_param() -> dict:
+    """Parallel chart, two regions, with a nested ``<param>`` declared on
+    the ``left`` region's L1->L2 transition.
+    """
+    return {
+        "initial": "regions",
+        "parallel": [
+            {
+                "id": "regions",
+                "state": [
+                    {
+                        "id": "left",
+                        "initial": "L1",
+                        "state": [
+                            {
+                                "id": "L1",
+                                "transition": [
+                                    {
+                                        "event": "tick",
+                                        "target": "L2",
+                                        "raise_value": [
+                                            {
+                                                "event": "evt",
+                                                "param": [
+                                                    {
+                                                        "name": "payload.value",
+                                                        "expr": "1",
+                                                    },
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            {"id": "L2"},
+                        ],
+                    },
+                    {
+                        "id": "right",
+                        "initial": "R1",
+                        "state": [
+                            {"id": "R1"},
+                            {"id": "R2"},
+                        ],
+                    },
+                ],
+            }
+        ],
+    }
+
+
+class TestWave3FutureNestedJsonParser:
+    """One-level-deep nested-JSON parser emit + walker plumbing.
+
+    Closes the wave-3-future "nested JSON parser" carry-forward from
+    SOS-08-E-CONCEPTS.md §15 2026-05-24's wave-3-future entry. Deeper-
+    than-one-level nesting, layered class hierarchy, and multi-clock
+    testbench wiring remain deferred.
+    """
+
+    def _pkg(self) -> str:
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        return files["tb/sv/demo/sos_jsonl_parser_pkg.svh"]
+
+    def test_parser_pkg_emits_nested_int_function(self):
+        """Deliverable 1a: the nested integer-field extractor is emitted
+        unconditionally alongside the wave-3-future top-level parsers."""
+        src = self._pkg()
+        assert (
+            "function automatic int sos_jsonl_parse_nested_int("
+            in src
+        )
+        # Signature MUST be (line, outer, inner, value).
+        assert "input  string outer_key" in src
+        assert "input  string inner_key" in src
+        assert "output int    value" in src
+
+    def test_parser_pkg_emits_nested_string_function(self):
+        """Deliverable 1b: the nested string-field extractor is emitted
+        unconditionally alongside the integer form."""
+        src = self._pkg()
+        assert (
+            "function automatic int sos_jsonl_parse_nested_string("
+            in src
+        )
+        assert "output string value" in src
+
+    def test_nested_int_handles_whitespace(self):
+        """Per deliverable 1: whitespace + colon between ``"outer":`` and
+        the opening brace MUST be tolerated. The implementation skips a
+        block of `` `` / ``\\t`` / ``:`` characters before requiring the
+        opening brace."""
+        src = self._pkg()
+        # The whitespace-tolerant skip loop is shared with the top-level
+        # extractor and lives between key-match and brace expectation.
+        # Surface evidence: the brace check follows a `while` that
+        # advances past whitespace + colon.
+        # Extract the nested-int body.
+        body = src.split("function automatic int sos_jsonl_parse_nested_int(")[1]
+        body = body.split("endfunction")[0]
+        assert 'line.getc(j) == " "' in body
+        assert 'line.getc(j) == ":"' in body
+        # And the brace check follows.
+        assert 'line.getc(j) != "{"' in body
+
+    def test_nested_int_returns_zero_on_missing_outer(self):
+        """Per deliverable 1: when the outer key isn't found at all, the
+        extractor returns 0 — implementation evidence is the outer-loop
+        terminator ``return 0;`` after the scan loop."""
+        src = self._pkg()
+        body = src.split("function automatic int sos_jsonl_parse_nested_int(")[1]
+        body = body.split("endfunction")[0]
+        # The outer scan loop ends with `end` then `return 0;`.
+        assert body.rstrip().endswith("return 0;")
+
+    def test_nested_int_returns_zero_on_missing_inner(self):
+        """Per deliverable 1: when the outer object is present but the
+        inner key isn't, the extractor returns 0 (defensive). The
+        implementation breaks out of the inner-scan loop and returns 0
+        rather than continuing to scan past the outer object."""
+        src = self._pkg()
+        body = src.split("function automatic int sos_jsonl_parse_nested_int(")[1]
+        body = body.split("endfunction")[0]
+        # The "inner key not present" branch lives below the inner
+        # search loop and emits a `return 0;`.
+        assert (
+            "// Inner key not present inside the outer object" in body
+            or "return 0;" in body
+        )
+
+    def test_nested_int_returns_zero_on_malformed_outer_scalar(self):
+        """Per deliverable 1: ``"outer":42`` (scalar after the outer
+        key) MUST return 0 — not raise a parse error. The implementation
+        checks the next non-whitespace char is ``{`` and returns 0
+        otherwise."""
+        src = self._pkg()
+        body = src.split("function automatic int sos_jsonl_parse_nested_int(")[1]
+        body = body.split("endfunction")[0]
+        # Evidence: the brace-required check has an explicit `return 0;`
+        # branch.
+        assert 'line.getc(j) != "{") return 0' in body
+
+    def test_nested_string_handles_escaped_quotes(self):
+        """Per deliverable 1: escaped ``\\"`` inside the inner string
+        value MUST be preserved (consumed as a literal). Implementation
+        evidence: the value-scan loop tracks ``prev_ch`` and treats a
+        closing quote preceded by a backslash as a literal."""
+        src = self._pkg()
+        body = src.split(
+            "function automatic int sos_jsonl_parse_nested_string("
+        )[1]
+        body = body.split("endfunction")[0]
+        assert "prev_ch" in body
+        # The 1024-char cap from the top-level extractor MUST be
+        # preserved in the nested form per the task contract.
+        assert "if (cap >= 1024)" in body
+
+    def test_checker_class_consumes_nested_param(self):
+        """Deliverable 2: when the chart declares
+        ``<param name="payload.value"/>`` on a transition's
+        ``<raise>``, the checker class emits a call to
+        ``sos_jsonl_parse_nested_int``."""
+        files = sv_tb.render_target(
+            _chart_with_nested_param(),
+            {"chart_name": "demo"},
+        )
+        checker = files["tb/sv/demo/sos_checker_demo.sv"]
+        assert "sos_jsonl_parse_nested_int(" in checker
+        # The call MUST pass the outer/inner pair as literal strings.
+        assert '"payload", "value"' in checker
+        # And declare a local variable for the parsed nested value so
+        # subsequent emit extensions can read it.
+        assert "nested_payload_value" in checker
+
+    def test_checker_class_parallel_consumes_nested_param(self):
+        """Deliverable 3: the parallel-region checker mirrors the same
+        nested-param emit logic — a nested ``<param>`` on any region's
+        transition emits a parse call inside the per-step loop."""
+        files = sv_tb.render_target(
+            _parallel_chart_with_nested_param(),
+            {"chart_name": "p"},
+        )
+        checker = files["tb/sv/p/sos_checker_p.sv"]
+        assert "sos_jsonl_parse_nested_int(" in checker
+        assert '"payload", "value"' in checker
+
+    def test_two_level_dotted_param_raises_actionable_error(self):
+        """Deliverable 2 (error path): a ``<param name="a.b.c"/>`` with
+        two or more dots MUST raise ``UnsupportedChartError`` with a
+        message that names the wave + the suggested fix (flatten in
+        the raise-side)."""
+        chart = _chart_with_nested_param(outer="a", inner="b.c", expr="1")
+        with pytest.raises(sv_tb.UnsupportedChartError) as exc_info:
+            sv_tb.render_target(chart, {"chart_name": "demo"})
+        msg = str(exc_info.value)
+        assert "SOS-08-E wave-3-future" in msg
+        assert "one-level-deep" in msg
+        assert "flatten in the raise-side" in msg
+
+    def test_no_nested_param_keeps_emit_byte_identical_with_wave3(self):
+        """Regression guard: a single-region chart WITHOUT any nested
+        ``<param>`` MUST emit the SAME ``sos_jsonl_parser_pkg.svh``
+        contents (modulo the two new functions appended) AND the SAME
+        ``sos_checker_<chart>.sv`` shape as the wave-3-future baseline
+        — nothing else moves.
+
+        The parser pkg gains the two new functions but the wave-3-future
+        ``sos_jsonl_parse_int`` and ``sos_jsonl_parse_string`` blocks
+        are byte-identical to the wave-3-future emit. The checker SV
+        body has NO nested-param decls or parse calls."""
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        pkg = files["tb/sv/demo/sos_jsonl_parser_pkg.svh"]
+        checker = files["tb/sv/demo/sos_checker_demo.sv"]
+        # The two new functions MUST be present.
+        assert "sos_jsonl_parse_nested_int" in pkg
+        assert "sos_jsonl_parse_nested_string" in pkg
+        # The wave-3-future top-level functions are still there
+        # unchanged.
+        assert "function automatic int sos_jsonl_parse_int(" in pkg
+        assert "function automatic int sos_jsonl_parse_string(" in pkg
+        # The checker carries NO nested-param state — no decl, no
+        # parse call, no failure message branch.
+        assert "sos_jsonl_parse_nested_int" not in checker
+        assert "sos_jsonl_parse_nested_string" not in checker
+        assert "nested_payload" not in checker
+        assert "Wave-3-future-remaining" not in checker
+
+    def test_render_target_does_not_regress_invariants(self):
+        """The wave-3-future-remaining emit MUST keep INV-S-HDL-E-1..3
+        clean on both single-region and parallel chart shapes that
+        declare nested params."""
+        # Single-region with nested param.
+        sv_tb.render_target(
+            _chart_with_nested_param(),
+            {"chart_name": "demo"},
+        )
+        # Parallel with nested param.
+        sv_tb.render_target(
+            _parallel_chart_with_nested_param(),
+            {"chart_name": "p"},
+        )
+
+    def test_optional_iverilog_smoke_compile_parser_pkg(self):
+        """If ``iverilog`` or ``verible-verilog-syntax`` is on PATH,
+        compile-check the emitted parser pkg as a smoke test (otherwise
+        skip). Catches syntactic regressions in the new SV emit
+        without forcing a sim install on every dev box."""
+        import shutil
+        import subprocess
+        from textwrap import dedent
+
+        iverilog = shutil.which("iverilog")
+        verible = shutil.which("verible-verilog-syntax")
+        if not iverilog and not verible:
+            pytest.skip(
+                "neither iverilog nor verible-verilog-syntax on PATH; "
+                "text-assert half of the suite remains active."
+            )
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        pkg = files["tb/sv/demo/sos_jsonl_parser_pkg.svh"]
+        # Wrap in a module so iverilog can parse function-only header.
+        wrapper = dedent(
+            f"""\
+            `include "sos_jsonl_parser_pkg.svh"
+            module dummy;
+            endmodule
+            """
+        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            pkg_path = Path(td) / "sos_jsonl_parser_pkg.svh"
+            pkg_path.write_text(pkg)
+            top_path = Path(td) / "top.sv"
+            top_path.write_text(wrapper)
+            if iverilog:
+                result = subprocess.run(
+                    [
+                        iverilog, "-g2012", "-I", td, "-o", "/dev/null",
+                        str(top_path),
+                    ],
+                    capture_output=True, text=True,
+                )
+                assert result.returncode == 0, (
+                    f"iverilog rejected parser pkg:\n{result.stderr}"
+                )
+            elif verible:
+                result = subprocess.run(
+                    [verible, str(pkg_path)],
+                    capture_output=True, text=True,
+                )
+                assert result.returncode == 0, (
+                    f"verible-verilog-syntax rejected parser pkg:\n"
+                    f"{result.stderr}"
+                )

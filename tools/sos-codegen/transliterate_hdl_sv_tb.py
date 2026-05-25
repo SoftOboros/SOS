@@ -275,6 +275,106 @@ def _collect_initial_state(chart_ir: dict[str, Any]) -> str | None:
     return states[0] if states else None
 
 
+def _classify_param_type(param: dict[str, Any]) -> str:
+    """Wave-3-future-remaining (2026-05-24 §15): infer ``int`` vs
+    ``string`` for a nested ``<param>``.
+
+    SCXML ``<param>`` declares ``expr=`` (datamodel expression) — there
+    is no native type attribute. The walker uses two coarse heuristics:
+
+      * If ``expr`` is a bare integer literal (``\\d+`` with optional
+        leading sign) the param is integer-typed.
+      * If ``expr`` is a single-quoted or double-quoted bare string
+        literal the param is string-typed.
+
+    Everything else falls back to integer (the dominant case for the
+    SOS-03 vector schema's payload integers — counts, sample indices,
+    etc.). A chart author who needs string-typed nested fields can
+    write ``expr="'foo'"`` or ``expr=\"\"\"bar\"\"\"`` to land in the
+    string branch.
+    """
+    expr = param.get("expr")
+    if not isinstance(expr, str):
+        return "int"
+    stripped = expr.strip()
+    if (stripped.startswith("'") and stripped.endswith("'") and len(stripped) >= 2):
+        return "string"
+    if (stripped.startswith('"') and stripped.endswith('"') and len(stripped) >= 2):
+        return "string"
+    return "int"
+
+
+def _collect_nested_params(
+    chart_ir: dict[str, Any],
+) -> list[tuple[str, str, str]]:
+    """Wave-3-future-remaining (2026-05-24 §15): collect every
+    one-level-deep nested ``<param>`` declaration in the chart.
+
+    Walks all transitions (single-region + parallel-region) and every
+    ``<raise>`` child's ``<param>`` list. A param's ``name`` attribute
+    of shape ``"outer.inner"`` triggers the nested-payload emit path
+    in the checker class (see ``_emit_checker_class``).
+
+    Returns the list of unique ``(outer, inner, value_type)`` triples
+    in document order; duplicates (same outer.inner appearing under
+    multiple events) are collapsed — the checker emits one parse call
+    per unique nested field, not one per raising event.
+
+    Raises ``UnsupportedChartError`` when a ``<param name="a.b.c"/>``
+    (two or more dots) is encountered — only one level deep is in
+    scope for this wave per §15.
+    """
+    seen: dict[tuple[str, str], str] = {}
+    out: list[tuple[str, str, str]] = []
+
+    def _visit_transitions(container: dict[str, Any]) -> None:
+        for tr in container.get("transition", []) or []:
+            for r in tr.get("raise_value", []) or []:
+                for p in r.get("param", []) or []:
+                    p_name = p.get("name")
+                    if not isinstance(p_name, str):
+                        continue
+                    if p_name.count(".") == 0:
+                        # Top-level param — wave-3-future top-level
+                        # parsers cover these; not a nested-payload
+                        # trigger.
+                        continue
+                    if p_name.count(".") >= 2:
+                        raise UnsupportedChartError(
+                            "SOS-08-E wave-3-future: <param "
+                            f"name=\"{p_name}\"/> exceeds one-level-"
+                            "deep nested-payload support; flatten in "
+                            "the raise-side instead."
+                        )
+                    outer, inner = p_name.split(".", 1)
+                    if not outer or not inner:
+                        # Malformed (leading/trailing dot) — skip.
+                        continue
+                    vtype = _classify_param_type(p)
+                    key = (outer, inner)
+                    if key in seen:
+                        continue
+                    seen[key] = vtype
+                    out.append((outer, inner, vtype))
+
+    def _visit_state(state: dict[str, Any]) -> None:
+        _visit_transitions(state)
+        for child in state.get("state") or []:
+            _visit_state(child)
+        for par in state.get("parallel") or []:
+            for region in par.get("state") or []:
+                _visit_state(region)
+
+    _visit_transitions(chart_ir)
+    for st in chart_ir.get("state") or []:
+        _visit_state(st)
+    for par in chart_ir.get("parallel") or []:
+        for region in par.get("state") or []:
+            _visit_state(region)
+
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Module + class name conventions
 # ---------------------------------------------------------------------------
@@ -683,6 +783,218 @@ function automatic int sos_jsonl_parse_string(
     return 0;
 endfunction
 
+// ---------------------------------------------------------------------------
+// sos_jsonl_parse_nested_int — one-level-deep nested-object integer
+// field extractor. Locates the outer-key followed by an opening
+// brace, then the inner-key followed by a bare integer. Returns 1
+// on hit, 0 on miss / malformed.
+//
+// SOS-08-E wave-3-future-remaining (2026-05-24 §15): enables checker
+// emit to consume SOS-03 vector traces that carry structured payloads
+// such as ``payload`` objects with named integer fields. Defensive on
+// malformed outer scalars — ``"outer":42`` (no opening brace) returns
+// 0 without raising.
+// ---------------------------------------------------------------------------
+function automatic int sos_jsonl_parse_nested_int(
+    input  string line,
+    input  string outer_key,
+    input  string inner_key,
+    output int    value
+);
+    int   slen;
+    int   olen;
+    int   ilen;
+    int   i;
+    int   j;
+    int   k;
+    int   depth;
+    int   obj_end;
+    int   sign;
+    int   acc;
+    int   match_outer;
+    int   match_inner;
+    byte  ch;
+    slen = line.len();
+    olen = outer_key.len();
+    ilen = inner_key.len();
+    // Scan for ``"<outer_key>"``.
+    for (i = 0; i + olen + 2 <= slen; i++) begin
+        if (line.getc(i) != "\\"") continue;
+        match_outer = 1;
+        for (j = 0; j < olen; j++) begin
+            if (line.getc(i + 1 + j) != outer_key.getc(j)) begin
+                match_outer = 0;
+                break;
+            end
+        end
+        if (!match_outer) continue;
+        if (line.getc(i + 1 + olen) != "\\"") continue;
+        // Skip whitespace + colon between key and value.
+        j = i + 2 + olen;
+        while (j < slen &&
+              (line.getc(j) == " " || line.getc(j) == ":" ||
+               line.getc(j) == 9)) j++;
+        // Defensive: outer value MUST be an object (open brace). A
+        // scalar like ``"outer":42`` is not a parse error — return 0.
+        if (j >= slen || line.getc(j) != "{{") return 0;
+        // Locate matching closing brace (depth-tracked; one-level deep
+        // — nested objects increment depth but we still scan within).
+        depth = 1;
+        obj_end = j + 1;
+        while (obj_end < slen && depth > 0) begin
+            ch = line.getc(obj_end);
+            if (ch == "{{") depth = depth + 1;
+            else if (ch == "}}") depth = depth - 1;
+            obj_end = obj_end + 1;
+        end
+        // ``obj_end`` now points one past the matching ``}}``.
+        // Scan ``[j+1, obj_end-1)`` for ``"<inner_key>"`` then a bare
+        // integer (with optional sign).
+        for (k = j + 1; k + ilen + 2 < obj_end; k++) begin
+            if (line.getc(k) != "\\"") continue;
+            match_inner = 1;
+            for (j = 0; j < ilen; j++) begin
+                if (line.getc(k + 1 + j) != inner_key.getc(j)) begin
+                    match_inner = 0;
+                    break;
+                end
+            end
+            if (!match_inner) continue;
+            if (line.getc(k + 1 + ilen) != "\\"") continue;
+            j = k + 2 + ilen;
+            while (j < obj_end &&
+                  (line.getc(j) == " " || line.getc(j) == ":" ||
+                   line.getc(j) == 9)) j++;
+            sign = 1;
+            if (j < obj_end && line.getc(j) == "-") begin
+                sign = -1;
+                j++;
+            end
+            acc = 0;
+            // Require at least one digit; bail out on scalar miss.
+            if (j >= obj_end || line.getc(j) < "0" ||
+                line.getc(j) > "9") return 0;
+            while (j < obj_end &&
+                  line.getc(j) >= "0" && line.getc(j) <= "9") begin
+                ch = line.getc(j);
+                acc = acc * 10 + (ch - 8'h30);
+                j++;
+            end
+            value = sign * acc;
+            return 1;
+        end
+        // Inner key not present inside the outer object — defensive
+        // miss (do NOT keep scanning the outer line for a stray
+        // re-occurrence of outer_key elsewhere).
+        return 0;
+    end
+    return 0;
+endfunction
+
+// ---------------------------------------------------------------------------
+// sos_jsonl_parse_nested_string — one-level-deep nested-object string
+// field extractor. Locates the outer-key followed by an opening
+// brace, then the inner-key followed by a quoted string. Returns 1
+// on hit, 0 on miss / malformed.
+//
+// Preserves the wave-3-future top-level extractor behaviour at the
+// 1024-character cap, including support for ``\\"`` escaped quotes
+// inside the string value (the escape is preserved verbatim — SOS-03
+// chart-state names are bare identifiers but downstream consumers may
+// carry richer payloads).
+// ---------------------------------------------------------------------------
+function automatic int sos_jsonl_parse_nested_string(
+    input  string line,
+    input  string outer_key,
+    input  string inner_key,
+    output string value
+);
+    int   slen;
+    int   olen;
+    int   ilen;
+    int   i;
+    int   j;
+    int   k;
+    int   m;
+    int   depth;
+    int   obj_end;
+    int   cap;
+    int   match_outer;
+    int   match_inner;
+    byte  ch;
+    byte  prev_ch;
+    slen = line.len();
+    olen = outer_key.len();
+    ilen = inner_key.len();
+    for (i = 0; i + olen + 2 <= slen; i++) begin
+        if (line.getc(i) != "\\"") continue;
+        match_outer = 1;
+        for (j = 0; j < olen; j++) begin
+            if (line.getc(i + 1 + j) != outer_key.getc(j)) begin
+                match_outer = 0;
+                break;
+            end
+        end
+        if (!match_outer) continue;
+        if (line.getc(i + 1 + olen) != "\\"") continue;
+        j = i + 2 + olen;
+        while (j < slen &&
+              (line.getc(j) == " " || line.getc(j) == ":" ||
+               line.getc(j) == 9)) j++;
+        if (j >= slen || line.getc(j) != "{{") return 0;
+        depth = 1;
+        obj_end = j + 1;
+        while (obj_end < slen && depth > 0) begin
+            ch = line.getc(obj_end);
+            if (ch == "{{") depth = depth + 1;
+            else if (ch == "}}") depth = depth - 1;
+            obj_end = obj_end + 1;
+        end
+        for (k = j + 1; k + ilen + 2 < obj_end; k++) begin
+            if (line.getc(k) != "\\"") continue;
+            match_inner = 1;
+            for (j = 0; j < ilen; j++) begin
+                if (line.getc(k + 1 + j) != inner_key.getc(j)) begin
+                    match_inner = 0;
+                    break;
+                end
+            end
+            if (!match_inner) continue;
+            if (line.getc(k + 1 + ilen) != "\\"") continue;
+            j = k + 2 + ilen;
+            while (j < obj_end &&
+                  (line.getc(j) == " " || line.getc(j) == ":" ||
+                   line.getc(j) == 9)) j++;
+            // Expect opening quote for the value.
+            if (j >= obj_end || line.getc(j) != "\\"") return 0;
+            j++; // skip opening quote
+            value = "";
+            cap = 0;
+            prev_ch = 0;
+            // Escape-aware scan: a backslash before a quote consumes
+            // the quote as a literal. Mirrors the wave-3-future
+            // top-level extractor's 1024-character cap so a malformed
+            // line cannot pin the inner loop.
+            while (j < obj_end) begin
+                ch = line.getc(j);
+                if (ch == "\\"" && prev_ch != "\\\\") begin
+                    return 1;
+                end
+                value = {{value, string'(ch)}};
+                prev_ch = ch;
+                j++;
+                cap++;
+                if (cap >= 1024) return 1;
+            end
+            // Hit obj_end before closing quote — malformed, but
+            // defensive: return what we have rather than spinning.
+            return 1;
+        end
+        return 0;
+    end
+    return 0;
+endfunction
+
 `endif // {guard}
 """
 
@@ -734,7 +1046,84 @@ def _emit_state_symbols(chart_name: str, state_ids: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _emit_checker_class(chart_name: str) -> str:
+def _render_nested_param_blocks(
+    nested_params: list[tuple[str, str, str]],
+    decl_indent: str,
+    parse_indent: str,
+) -> tuple[str, str]:
+    """Wave-3-future-remaining (2026-05-24 §15): emit the SV declaration
+    + parse blocks for one-level-deep nested ``<param>`` fields.
+
+    Returns ``(decls, parse_block)`` — both empty strings when
+    ``nested_params`` is empty, so callers' f-strings can interpolate
+    them unconditionally without disturbing the wave-3-future
+    byte-identical baseline.
+
+    ``decl_indent`` is the column prefix for the local-variable
+    declarations at the top of ``run()`` (typically 8 spaces).
+    ``parse_indent`` is the column prefix for the parse calls inside
+    the per-step loop (typically 12 spaces).
+    """
+    if not nested_params:
+        return "", ""
+    decl_lines: list[str] = []
+    parse_lines: list[str] = []
+    decl_lines.append("")
+    decl_lines.append(
+        f"{decl_indent}// Wave-3-future-remaining: nested-payload locals."
+    )
+    parse_lines.append("")
+    parse_lines.append(
+        f"{parse_indent}// Wave-3-future-remaining: nested-payload extraction"
+    )
+    parse_lines.append(
+        f"{parse_indent}// (one level deep) per chart-declared <param "
+        "name=\"outer.inner\"/>."
+    )
+    for outer, inner, vtype in nested_params:
+        var = _sanitize_sv_identifier(f"{outer}_{inner}")
+        parsed_var = f"parsed_nested_{var}"
+        if vtype == "string":
+            decl_lines.append(
+                f"{decl_indent}string nested_{var};"
+            )
+            decl_lines.append(
+                f"{decl_indent}int    {parsed_var};"
+            )
+            parse_lines.append(
+                f'{parse_indent}nested_{var} = "";'
+            )
+            parse_lines.append(
+                f"{parse_indent}{parsed_var} = sos_jsonl_parse_nested_string("
+            )
+            parse_lines.append(
+                f'{parse_indent}    line, "{outer}", "{inner}", nested_{var}'
+            )
+            parse_lines.append(f"{parse_indent});")
+        else:
+            decl_lines.append(
+                f"{decl_indent}int    nested_{var};"
+            )
+            decl_lines.append(
+                f"{decl_indent}int    {parsed_var};"
+            )
+            parse_lines.append(
+                f"{parse_indent}nested_{var} = 0;"
+            )
+            parse_lines.append(
+                f"{parse_indent}{parsed_var} = sos_jsonl_parse_nested_int("
+            )
+            parse_lines.append(
+                f'{parse_indent}    line, "{outer}", "{inner}", nested_{var}'
+            )
+            parse_lines.append(f"{parse_indent});")
+    return "\n".join(decl_lines), "\n".join(parse_lines)
+
+
+def _emit_checker_class(
+    chart_name: str,
+    nested_params: list[tuple[str, str, str]] | None = None,
+) -> str:
     """``sos_checker_<chart>.sv`` — response checker class.
 
     Observes the DUT's ``current_state`` through the virtual interface
@@ -749,11 +1138,25 @@ def _emit_checker_class(chart_name: str) -> str:
     field is retained for backwards compatibility with wave-1/2
     traces. Failure messages name the chart-state STRING when the
     string field was used — concretising INV-S-HDL-E-4 + INV-SOS-H.
+
+    SOS-08-E wave-3-future-remaining (2026-05-24 §15): when
+    ``nested_params`` is non-empty, the checker additionally calls
+    ``sos_jsonl_parse_nested_int`` / ``sos_jsonl_parse_nested_string``
+    per one-level-deep nested ``<param name="outer.inner"/>``
+    declaration. ``nested_params`` is a list of
+    ``(outer, inner, "int" | "string")`` triples (deduplicated; see
+    ``_collect_nested_params``). When the list is empty the emit is
+    byte-identical to the wave-3-future baseline.
     """
     cls = checker_class_name(chart_name)
     iface = virtual_if_name(chart_name)
     base = _normalise_chart_name(chart_name)
     symbol_fn = f"sos_{base}_state_id_of"
+    nested_decls, nested_parse = _render_nested_param_blocks(
+        nested_params or [],
+        decl_indent="        ",
+        parse_indent="            ",
+    )
     return _HEADER_PREFIX + f"""//
 // Response checker class for the {chart_name} chart testbench.
 //
@@ -799,7 +1202,7 @@ class {cls};
         int    cycles_wait;
         int    parsed_int;
         int    parsed_str;
-        int    bit_idx;
+        int    bit_idx;{nested_decls}
 
         fh = $fopen(trace_path, "r");
         if (fh == 0) begin
@@ -828,7 +1231,7 @@ class {cls};
                 line, "expected_state_str", expected_state_str
             );
             parsed_int = sos_jsonl_parse_int(line, "cycles", cycles_wait);
-            if (cycles_wait <= 0) cycles_wait = 1;
+            if (cycles_wait <= 0) cycles_wait = 1;{nested_parse}
 
             // Wave-3-future: string field takes precedence when present.
             // Resolution path: symbol table -> bit position -> one-hot
@@ -1362,6 +1765,7 @@ endinterface
 def _emit_checker_class_parallel(
     chart_name: str,
     regions: list[tuple[str, str | None, list[str]]],
+    nested_params: list[tuple[str, str, str]] | None = None,
 ) -> str:
     """``sos_checker_<chart>.sv`` — parallel-chart checker class.
 
@@ -1375,12 +1779,23 @@ def _emit_checker_class_parallel(
     Per INV-S-HDL-E-4 every failure renders in chart vocabulary +
     names the failing region. Per INV-S-HDL-E-3 no inline
     ``assert property``.
+
+    Wave-3-future-remaining (2026-05-24 §15): mirror of
+    ``_emit_checker_class``'s ``nested_params`` extension — one-level-
+    deep nested ``<param name="outer.inner"/>`` declarations on
+    parallel-chart transitions emit nested-payload parse calls inside
+    the per-step loop. Empty list → baseline byte-identical emit.
     """
     cls = checker_class_name(chart_name)
     iface = virtual_if_name(chart_name)
     base = _normalise_chart_name(chart_name)
     symbol_fn = f"sos_{base}_state_id_of"
     region_names = [r[0] for r in regions]
+    nested_decls, nested_parse = _render_nested_param_blocks(
+        nested_params or [],
+        decl_indent="        ",
+        parse_indent="            ",
+    )
 
     region_reads = []
     region_parse = []
@@ -1507,7 +1922,7 @@ class {cls};
         int    rc;
 {region_decls}
         int    cycles_wait;
-        int    parsed;
+        int    parsed;{nested_decls}
 
         fh = $fopen(trace_path, "r");
         if (fh == 0) begin
@@ -1527,7 +1942,7 @@ class {cls};
 {region_parse_block}
             cycles_wait = 1;
             parsed = sos_jsonl_parse_int(line, "cycles", cycles_wait);
-            if (cycles_wait <= 0) cycles_wait = 1;
+            if (cycles_wait <= 0) cycles_wait = 1;{nested_parse}
 
             repeat (cycles_wait) @(posedge vif.clk);
 
@@ -1978,6 +2393,14 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
     else:
         all_state_ids = _collect_state_ids(chart_ir)
 
+    # Wave-3-future-remaining (2026-05-24 §15): collect one-level-deep
+    # nested ``<param name="outer.inner"/>`` declarations across all
+    # transitions. ``_collect_nested_params`` raises
+    # ``UnsupportedChartError`` on any two-or-more-dot name (e.g.
+    # ``"a.b.c"``) so the checker emit never silently truncates the
+    # nesting depth.
+    nested_params = _collect_nested_params(chart_ir)
+
     if regions:
         # Parallel-chart emit (wave-3): per-region virtual interface +
         # per-region checker + chart-top-wrapper DUT instantiation.
@@ -1987,7 +2410,9 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
             f"tb/sv/{base}/sos_driver_{base}.sv":
                 _emit_driver_class(chart_name),
             f"tb/sv/{base}/sos_checker_{base}.sv":
-                _emit_checker_class_parallel(chart_name, regions),
+                _emit_checker_class_parallel(
+                    chart_name, regions, nested_params
+                ),
             f"tb/sv/{base}/tb_{base}.sv":
                 _emit_top_module_parallel(chart_name, regions),
             f"tb/sv/{base}/run_verilator.mk":
@@ -2006,7 +2431,7 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
             f"tb/sv/{base}/sos_driver_{base}.sv":
                 _emit_driver_class(chart_name),
             f"tb/sv/{base}/sos_checker_{base}.sv":
-                _emit_checker_class(chart_name),
+                _emit_checker_class(chart_name, nested_params),
             f"tb/sv/{base}/tb_{base}.sv":
                 _emit_top_module(chart_name, n_states),
             f"tb/sv/{base}/run_verilator.mk":
