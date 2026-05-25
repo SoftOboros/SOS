@@ -3555,3 +3555,217 @@ class TestPCDN008SharedSignalWiring:
         )
         # Exactly one banner comment ⇒ exactly one driver process.
         assert always_ff_count == 1
+
+
+class TestPCDN007PCDN008CleanupCoherence:
+    """SOS7CLN (2026-05-25) — coherence cleanup for PCDN-SOS-08-C-007
+    + C-008: same-region-write-only constraint on shared-signal
+    writer RHS expressions.  Cross-region datamodel reads in a
+    shared-signal writer raise ``UnsupportedChartError`` with the
+    canonical ``SOS-08-C wave-future-shared-xreg-rhs:`` prefix; the
+    SV walker's chart-top emit for legitimate owner-region-datamodel
+    RHS is preserved byte-identically.
+    """
+
+    @staticmethod
+    def _two_region_chart(
+        *,
+        owner_dm: list[dict] | None = None,
+        other_dm: list[dict] | None = None,
+        writer_expr: str = "42",
+    ):
+        """Two-region parallel chart with per-region datamodels and a
+        single `<sos:shared_signal>` owned by region ``owner``.
+
+        - ``owner_dm`` populates ``owner``'s ``<datamodel>``.
+        - ``other_dm`` populates ``other``'s ``<datamodel>``.
+        - ``writer_expr`` is the owner-region's onentry-assign RHS.
+        """
+        owner_dm = owner_dm or []
+        other_dm = other_dm or []
+        chart = {
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "owner",
+                            "initial": "O1",
+                            "datamodel": [{"data": list(owner_dm)}],
+                            "state": [
+                                {
+                                    "id": "O1",
+                                    "onentry": [{"assign": [
+                                        {
+                                            "location": "my_shared",
+                                            "expr": writer_expr,
+                                        },
+                                    ]}],
+                                    "transition": [{"target": "O2"}],
+                                },
+                                {"id": "O2"},
+                            ],
+                        },
+                        {
+                            "id": "other",
+                            "initial": "R1",
+                            "datamodel": [{"data": list(other_dm)}],
+                            "state": [
+                                {"id": "R1", "transition": [
+                                    {"target": "R2"},
+                                ]},
+                                {"id": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+            "sos:shared_signal": [
+                {"name": "my_shared", "width": "8", "owner_region": "owner"},
+            ],
+        }
+        return chart
+
+    def test_cross_region_datamodel_rhs_in_shared_signal_writer_raises(self):
+        """A writer expression referencing a datamodel ident declared
+        in another region MUST raise the canonical chart-vocab error
+        with the ``SOS-08-C wave-future-shared-xreg-rhs:`` prefix."""
+        chart = self._two_region_chart(
+            owner_dm=[],  # owner has no local datamodel
+            other_dm=[{"id": "other_counter", "expr": "0", "type": "i8"}],
+            writer_expr="other_counter",
+        )
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"SOS-08-C wave-future-shared-xreg-rhs:",
+        ):
+            transliterate_hdl_sv.render_target(chart, {"chart_name": "xr"})
+
+    def test_owner_region_datamodel_rhs_in_shared_signal_writer_lowers(self):
+        """A writer expression referencing a datamodel ident declared
+        in the OWNER region (or chart-level inherited datamodel)
+        lowers cleanly via the chart-top `<owner>_data_<ident>` wire."""
+        # Chart-level datamodel (inherited into every region in SV).
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "counter", "expr": "0", "type": "i8"},
+            ]}],
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "owner",
+                            "initial": "O1",
+                            "state": [
+                                {
+                                    "id": "O1",
+                                    "onentry": [{"assign": [
+                                        {
+                                            "location": "my_shared",
+                                            "expr": "counter",
+                                        },
+                                    ]}],
+                                    "transition": [{"target": "O2"}],
+                                },
+                                {"id": "O2"},
+                            ],
+                        },
+                        {
+                            "id": "other",
+                            "initial": "R1",
+                            "state": [
+                                {"id": "R1", "transition": [
+                                    {"target": "R2"},
+                                ]},
+                                {"id": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+            "sos:shared_signal": [
+                {"name": "my_shared", "width": "8", "owner_region": "owner"},
+            ],
+        }
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "ok"}
+        )
+        top = files["ok_top.sv"]
+        # Owner-region ident RHS lowers to the chart-top
+        # `owner_data_counter` wire.
+        assert "shared_my_shared_q <= owner_data_counter;" in top
+
+    def test_literal_rhs_in_shared_signal_writer_lowers(self):
+        """A literal RHS is admitted unconditionally and lowers to a
+        width-prefixed signed literal."""
+        chart = self._two_region_chart(writer_expr="7")
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "li"}
+        )
+        top = files["li_top.sv"]
+        assert "shared_my_shared_q <= 8'sd7;" in top
+
+    def test_shared_signal_writer_emit_unchanged_from_wave7(self):
+        """Regression guard: the SV walker's chart-top emit for the
+        canonical W7-C08 chart (chart-level `counter` datamodel +
+        owner-region ident RHS) is byte-identical to wave-7's emit.
+        The SOS7CLN coherence cleanup MUST NOT change the SV chart-
+        top for legitimate same-region cases.
+        """
+        # This chart is identical to TestPCDN008SharedSignalWiring's
+        # _chart_with_shared_signal(writer_expr="counter").
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "counter", "expr": "0", "type": "i8"},
+            ]}],
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "owner",
+                            "initial": "O1",
+                            "state": [
+                                {
+                                    "id": "O1",
+                                    "onentry": [{"assign": [
+                                        {
+                                            "location": "my_shared",
+                                            "expr": "counter",
+                                        },
+                                    ]}],
+                                    "transition": [{"target": "O2"}],
+                                },
+                                {"id": "O2"},
+                            ],
+                        },
+                        {
+                            "id": "reader",
+                            "initial": "R1",
+                            "state": [
+                                {"id": "R1", "transition": [
+                                    {"target": "R2"},
+                                ]},
+                                {"id": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+            "sos:shared_signal": [
+                {"name": "my_shared", "width": "8", "owner_region": "owner"},
+            ],
+        }
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "id"}
+        )
+        top = files["id_top.sv"]
+        # Both wave-7 markers MUST still be present.
+        assert "owner_data_counter" in top
+        assert "shared_my_shared_q <= owner_data_counter;" in top
+        # The xreg-rhs error message MUST NOT have been raised.
+        # (Reaching this point is the implicit assertion.)

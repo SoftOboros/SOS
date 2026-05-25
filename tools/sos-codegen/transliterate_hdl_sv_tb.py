@@ -561,103 +561,6 @@ def _chart_has_clock_domains_block_raw(chart_ir: Any) -> bool:
     )
 
 
-def _backfill_implicit_kind(chart_ir: Any) -> Any:
-    """SOS-08-D wave-7b (2026-05-25 §15) — Option B fixture-compat path.
-
-    The shared ``parse_clock_domains`` helper is strict about the wave-
-    7a element shape (``kind=`` attribute is REQUIRED on every
-    ``<sos:clock>``).  The E-walker's regression-guard fixtures
-    (TestWave3FutureMultiClockTestbenchWiring) predate the kind enum
-    and declare ``<sos:clock>`` elements with only ``name=``,
-    ``period_ns=``, ``duty_cycle=``.  Without backfill, those fixtures
-    would crash the helper at parse time and the wave-3 byte-identity
-    guards would break.
-
-    Per the wave-7b task spec we apply a soft reading at the E-walker
-    layer only: any ``<sos:clock>`` element missing ``kind=`` is
-    treated as ``kind="rising"`` (the implicit default per SOS-08-D §15
-    Q1 (a)).  The D walker (re-entered through ``_render_sva_bind``)
-    sees the ORIGINAL chart_ir without backfill, so its own
-    parseability fallback continues to handle the legacy shape as
-    "no declared block from sva_bind's perspective" — preserving the
-    file-disjoint contract until wave-7c does the unified clean-up.
-
-    Returns a shallow-cloned chart_ir with backfilled ``kind="rising"``
-    on every clock element that lacks ``kind=``.  When no backfill is
-    needed, returns ``chart_ir`` unchanged.
-    """
-    if not isinstance(chart_ir, dict):
-        return chart_ir
-    block = chart_ir.get("sos:clock_domains") or chart_ir.get("clock_domains")
-    if block is None:
-        return chart_ir
-
-    def _has_kind(clk: Any) -> bool:
-        if not isinstance(clk, dict):
-            return True  # leave non-dicts alone; helper will surface the error
-        return isinstance(clk.get("kind"), str) and bool(clk.get("kind").strip())
-
-    def _patch_clock_children(inner: Any) -> tuple[Any, bool]:
-        """Return ``(patched_inner, changed)``."""
-        if isinstance(inner, dict):
-            if _has_kind(inner):
-                return inner, False
-            patched = dict(inner)
-            patched["kind"] = KIND_RISING
-            return patched, True
-        if isinstance(inner, list):
-            changed_any = False
-            out_list: list[Any] = []
-            for clk in inner:
-                if isinstance(clk, dict) and not _has_kind(clk):
-                    patched = dict(clk)
-                    patched["kind"] = KIND_RISING
-                    out_list.append(patched)
-                    changed_any = True
-                else:
-                    out_list.append(clk)
-            return out_list, changed_any
-        return inner, False
-
-    def _patch_block(blk: Any) -> tuple[Any, bool]:
-        if isinstance(blk, dict):
-            inner_ns = blk.get("sos:clock")
-            inner_bare = blk.get("clock")
-            new_blk = dict(blk)
-            changed = False
-            if inner_ns is not None:
-                patched, ch = _patch_clock_children(inner_ns)
-                if ch:
-                    new_blk["sos:clock"] = patched
-                    changed = True
-            if inner_bare is not None:
-                patched, ch = _patch_clock_children(inner_bare)
-                if ch:
-                    new_blk["clock"] = patched
-                    changed = True
-            return new_blk, changed
-        if isinstance(blk, list):
-            changed_any = False
-            out_list: list[Any] = []
-            for entry in blk:
-                patched, ch = _patch_block(entry)
-                out_list.append(patched)
-                if ch:
-                    changed_any = True
-            return out_list, changed_any
-        return blk, False
-
-    new_block, changed = _patch_block(block)
-    if not changed:
-        return chart_ir
-    new_chart = dict(chart_ir)
-    if chart_ir.get("sos:clock_domains") is not None:
-        new_chart["sos:clock_domains"] = new_block
-    else:
-        new_chart["clock_domains"] = new_block
-    return new_chart
-
-
 def _collect_clock_decls_via_helper(
     chart_ir: dict[str, Any],
 ) -> dict[str, ClockDecl]:
@@ -665,35 +568,38 @@ def _collect_clock_decls_via_helper(
     ``<sos:clock_domains>`` block through the shared
     ``_clock_domains.parse_clock_domains`` helper.
 
+    SOS7CLN (2026-05-25) coherence cleanup: the prior Option B
+    ``_backfill_implicit_kind`` soft reading has been removed; every
+    chart-XML fixture in this repository now declares
+    ``kind="rising"`` explicitly per PCDN-SOS-08-D-008 §15 (the
+    attribute is REQUIRED on every ``<sos:clock>`` element).  The E
+    walker is now as strict as the D walker — both rely on the shared
+    helper's MUST-have-``kind`` parser surface.
+
     Behaviour:
 
       * No block present → returns the implicit-default-clock map
         ``{"clk": ClockDecl(name="clk", source="chart_root",
-        kind="rising", ...)}`` from the helper. The companion
-        ``_chart_has_clock_domains_block_raw`` predicate distinguishes
-        this case from a one-clock explicit declaration.
-      * Block present, ``kind=`` missing on a ``<sos:clock>`` element →
-        backfilled to ``kind="rising"`` per Option B (E-walker-only
-        soft reading).
+        kind="rising", ...)}`` from the helper.
       * Block present and parses cleanly → the parsed map verbatim.
       * Reserved-kind enum value (``both``, ``quadrature_pair``, ...) →
         re-raises ``UnsupportedClockKindError`` for the caller to
         propagate.  Per the task spec we do NOT catch — the verbatim
         chart-vocab error preserves cross-walker error consistency
         with the D walker.
-      * Intrinsic shape errors (``ClockDomainsParseError``) → re-raised
-        as ``UnsupportedChartError`` so the error surface matches every
-        other chart-vocab failure in this module (INV-S-HDL-E-4 / §5.5
-        chart-vocabulary wording).
+      * Intrinsic shape errors (``ClockDomainsParseError`` — including
+        a missing ``kind=`` attribute) → re-raised as
+        ``UnsupportedChartError`` so the error surface matches every
+        other chart-vocab failure in this module (INV-S-HDL-E-4 /
+        §5.5 chart-vocabulary wording).
 
     Additionally validates SV-identifier shape on every declared name
     via ``_validate_sv_clock_name`` so an invalid clock identifier
     still lands as ``UnsupportedChartError`` (regression-guard test
     ``test_invalid_sv_identifier_in_clock_name_raises``).
     """
-    backfilled = _backfill_implicit_kind(chart_ir)
     try:
-        clock_map = parse_clock_domains(backfilled)
+        clock_map = parse_clock_domains(chart_ir)
     except UnsupportedClockKindError:
         # Per deliverable 5: propagate verbatim; do not catch.
         raise

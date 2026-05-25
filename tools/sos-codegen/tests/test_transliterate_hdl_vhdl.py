@@ -2224,11 +2224,15 @@ class TestPCDN008SharedSignalWiringVhdl:
 
     def test_owner_region_assign_uses_ecma_subset_lowering(self):
         """The owner-region's assign RHS lowers via the wave-3-f-future-
-        assign ECMA subset.  VHDL chart-top has no datamodel ports, so
-        ident-bearing RHS expressions defer to a literal-zero fallback
-        with a comment (see module-level note in
-        `transliterate_hdl_vhdl.py`); literal/binop-literal RHS lowers
-        normally.
+        assign ECMA subset.
+
+        SOS7CLN (2026-05-25) coherence cleanup: the prior literal-zero
+        degradation for ident-bearing RHS is REMOVED.  Owner-region
+        ident RHS now lowers via the chart-top wrapper's
+        ``data_<ident>`` port (the read-set augmentation in
+        ``_inject_owner_idents_into_reads_vhdl`` adds the ident to
+        owner.reads so the wrapper routes the port).  Literal /
+        binop-on-literals RHS continues to lower normally.
         """
         # Literal RHS.
         files = render_target(
@@ -2241,18 +2245,24 @@ class TestPCDN008SharedSignalWiringVhdl:
             "std_logic_vector(to_signed(7, 8));"
         ) in top
 
-        # Datamodel-ident RHS — deferred to literal-zero fallback with
-        # an explanatory comment.
+        # Datamodel-ident RHS — owner-region datamodel ident lowers via
+        # the chart-top wrapper's `data_<ident>` port.
         files = render_target(
             self._chart_with_shared_signal(writer_expr="counter"),
             {"chart_name": "id"},
         )
         top = files["id_top.vhd"]
-        assert "deferred" in top
-        assert (
-            "shared_my_shared_q <= "
-            "std_logic_vector(to_signed(0, 8));"
-        ) in top
+        # The chart-top wrapper exposes `data_counter` as a port (in
+        # direction since owner reads it but doesn't write it via its
+        # own assigns).
+        assert "data_counter" in top
+        # The shared-signal writer process references the routed
+        # `data_counter` rather than the prior literal-zero fallback.
+        assert "shared_my_shared_q <= data_counter;" in top
+        # The SOS7CLN breadcrumb comment names the lowering path.
+        assert "SOS7CLN" in top
+        # Literal-zero degradation MUST NOT appear for ident RHS.
+        assert "deferred to a future PCDN" not in top
 
         # Binop-on-literals RHS lowers normally.
         files = render_target(
@@ -2291,3 +2301,211 @@ class TestPCDN008SharedSignalWiringVhdl:
         ) == 1
         # The concurrent alias reads (does not drive) the _q register.
         assert "shared_my_shared <= shared_my_shared_q;" in top
+
+
+class TestPCDN007PCDN008CleanupCoherenceVhdl:
+    """SOS7CLN (2026-05-25) — VHDL mirror of
+    `TestPCDN007PCDN008CleanupCoherence`.  Same-region-write-only
+    constraint on shared-signal writer RHS expressions; the VHDL
+    walker additionally REMOVES the prior literal-zero degradation
+    for ident RHS — owner-region datamodel ident lowers via the
+    chart-top wrapper's ``data_<ident>`` port.
+    """
+
+    @staticmethod
+    def _two_region_chart(
+        *,
+        owner_dm: list[dict] | None = None,
+        other_dm: list[dict] | None = None,
+        writer_expr: str = "42",
+    ):
+        """Two-region parallel chart with per-region datamodels."""
+        owner_dm = owner_dm or []
+        other_dm = other_dm or []
+        return {
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "owner",
+                            "initial": "O1",
+                            "datamodel": [{"data": list(owner_dm)}],
+                            "state": [
+                                {
+                                    "id": "O1",
+                                    "onentry": [{"assign": [
+                                        {
+                                            "location": "my_shared",
+                                            "expr": writer_expr,
+                                        },
+                                    ]}],
+                                    "transition": [{"target": "O2"}],
+                                },
+                                {"id": "O2"},
+                            ],
+                        },
+                        {
+                            "id": "other",
+                            "initial": "R1",
+                            "datamodel": [{"data": list(other_dm)}],
+                            "state": [
+                                {"id": "R1", "transition": [
+                                    {"target": "R2"},
+                                ]},
+                                {"id": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+            "sos:shared_signal": [
+                {"name": "my_shared", "width": "8", "owner_region": "owner"},
+            ],
+        }
+
+    def test_cross_region_datamodel_rhs_in_shared_signal_writer_raises(self):
+        """A writer expression referencing a datamodel ident declared
+        in another region MUST raise ``UnsupportedChartError`` with
+        the canonical ``SOS-08-C wave-future-shared-xreg-rhs:``
+        prefix.  VHDL surfaces an additional ``(VHDL)`` suffix to flag
+        the dialect for downstream consumers chaining on the prefix.
+        """
+        chart = self._two_region_chart(
+            owner_dm=[],
+            other_dm=[{"id": "other_counter", "expr": "0", "type": "i8"}],
+            writer_expr="other_counter",
+        )
+        with pytest.raises(
+            UnsupportedChartError,
+            match=r"SOS-08-C wave-future-shared-xreg-rhs:",
+        ):
+            render_target(chart, {"chart_name": "xr"})
+
+    def test_owner_region_datamodel_rhs_in_shared_signal_writer_lowers(self):
+        """An owner-region (chart-level) datamodel ident in a shared-
+        signal writer RHS lowers via the chart-top wrapper's
+        ``data_<ident>`` port.  The prior literal-zero degradation is
+        REMOVED.
+        """
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "counter", "expr": "0", "type": "i8"},
+            ]}],
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "owner",
+                            "initial": "O1",
+                            "state": [
+                                {
+                                    "id": "O1",
+                                    "onentry": [{"assign": [
+                                        {
+                                            "location": "my_shared",
+                                            "expr": "counter",
+                                        },
+                                    ]}],
+                                    "transition": [{"target": "O2"}],
+                                },
+                                {"id": "O2"},
+                            ],
+                        },
+                        {
+                            "id": "other",
+                            "initial": "R1",
+                            "state": [
+                                {"id": "R1", "transition": [
+                                    {"target": "R2"},
+                                ]},
+                                {"id": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+            "sos:shared_signal": [
+                {"name": "my_shared", "width": "8", "owner_region": "owner"},
+            ],
+        }
+        files = render_target(chart, {"chart_name": "ok"})
+        top = files["ok_top.vhd"]
+        # The chart-top exposes `data_counter` as a port.
+        assert "data_counter" in top
+        # The writer process references the routed signal directly.
+        assert "shared_my_shared_q <= data_counter;" in top
+
+    def test_literal_rhs_in_shared_signal_writer_lowers(self):
+        """A literal RHS is admitted and lowers to a numeric_std
+        signed cast."""
+        chart = self._two_region_chart(writer_expr="7")
+        files = render_target(chart, {"chart_name": "li"})
+        top = files["li_top.vhd"]
+        assert (
+            "shared_my_shared_q <= "
+            "std_logic_vector(to_signed(7, 8));"
+        ) in top
+
+    def test_shared_signal_writer_now_emits_owner_region_ident(self):
+        """The prior literal-zero degradation for ident RHS is REMOVED.
+
+        Replacement assertion for the wave-7 VHDL deviation: ident
+        RHS now lowers to a real signal reference, NOT
+        ``std_logic_vector(to_signed(0, ...))``.
+        """
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "counter", "expr": "0", "type": "i8"},
+            ]}],
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {
+                            "id": "owner",
+                            "initial": "O1",
+                            "state": [
+                                {
+                                    "id": "O1",
+                                    "onentry": [{"assign": [
+                                        {
+                                            "location": "my_shared",
+                                            "expr": "counter",
+                                        },
+                                    ]}],
+                                    "transition": [{"target": "O2"}],
+                                },
+                                {"id": "O2"},
+                            ],
+                        },
+                        {
+                            "id": "other",
+                            "initial": "R1",
+                            "state": [
+                                {"id": "R1", "transition": [
+                                    {"target": "R2"},
+                                ]},
+                                {"id": "R2"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+            "sos:shared_signal": [
+                {"name": "my_shared", "width": "8", "owner_region": "owner"},
+            ],
+        }
+        files = render_target(chart, {"chart_name": "rep"})
+        top = files["rep_top.vhd"]
+        # SOS7CLN breadcrumb names the new lowering path.
+        assert "SOS7CLN" in top
+        # The actual writer line targets the routed signal, NOT a
+        # literal-zero degradation.
+        assert "shared_my_shared_q <= data_counter;" in top
+        # The prior degradation comment MUST NOT appear.
+        assert "deferred to a future PCDN" not in top

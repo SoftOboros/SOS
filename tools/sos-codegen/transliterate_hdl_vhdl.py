@@ -2717,16 +2717,18 @@ def _augment_chart_top_with_per_param_sub_buses_vhdl(
 # per shared signal, located at the owner_region's clock; readers do
 # not write the register).
 #
-# VHDL-specific note: the chart-top wrapper in VHDL does NOT expose
-# per-region datamodel signals as wrapper-level ports (the SV chart-
-# top does).  As a result, the owner-driver process at chart-top scope
-# can ONLY safely reference literals + `<sos:shared_signal_ref>`-style
-# self-references.  Datamodel-ident RHS expressions are detected and
-# lowered to literal zero with a deferred-feature comment — wiring
-# owner datamodel through the wrapper boundary requires extending the
-# `hdl_common` chart-top helper, which is out-of-scope per the file-
-# scope discipline.  Idents in shared-signal RHS land in a follow-up
-# PCDN.
+# SOS7CLN (2026-05-25) coherence cleanup: the prior literal-zero
+# degradation for ident-bearing RHS expressions is REMOVED.  Both
+# walkers now enforce the same chart-vocab constraint on shared-
+# signal writer RHS expressions: the RHS MUST be either a literal /
+# binop-on-literals OR an ident that references the **owner-region's
+# own datamodel**.  Cross-region datamodel reads inside a shared-
+# signal writer raise ``UnsupportedChartError`` with the canonical
+# ``SOS-08-C wave-future-shared-xreg-rhs:`` prefix.  Under this
+# constraint, owner-region ident RHS lowers correctly via the chart-
+# top wrapper's ``data_<ident>`` port (routed from the owner region's
+# datamodel output, mirroring the SV chart-top's per-region datamodel
+# exposure).
 # ---------------------------------------------------------------------------
 
 
@@ -2953,27 +2955,33 @@ def _shared_signal_render_vhdl_rhs(
     owner_datamodel_ids: list[str],
     width: int,
 ) -> tuple[str, bool]:
-    """Lower a chart-XML ``<assign expr=...>`` text to VHDL RHS text.
+    """Lower a chart-XML ``<assign expr=...>`` text to VHDL RHS text
+    for use in the chart-top owner-driver process.
+
+    SOS7CLN (2026-05-25) coherence cleanup: the prior literal-zero
+    degradation for ident RHS is REMOVED.  Owner-region ident RHS
+    lowers via the chart-top wrapper's ``data_<ident>`` port (routed
+    from the owner region's datamodel output, mirroring the SV
+    chart-top's per-region datamodel exposure — see
+    `_inject_owner_idents_into_reads_vhdl` for the read-set
+    augmentation that drives the chart-top routing).  Cross-region
+    datamodel reads are now rejected at chart-vocab time by the
+    shared-signal RHS validator
+    (`_validate_shared_signal_rhs_same_region_vhdl`); a writer expr
+    that reaches this lowering function is guaranteed to reference
+    only owner-region datamodel or literals.
 
     Returns ``(rhs_text, idents_seen)`` — the boolean flags whether
-    the expression carried any datamodel identifier references.  VHDL
-    chart-top has no access to owner datamodel signals (see module-
-    level note above), so ident references degrade to literal zero
-    with a deferred-feature comment.  Literal-only RHS lowers normally.
+    the expression carried any datamodel identifier references (so
+    the augmenter can emit an informative breadcrumb comment).
     """
     expr_text = (expr_text or "").strip()
     if not expr_text:
         return (f"std_logic_vector(to_signed(0, {width}))", False)
     tree = _parse_assign_expr(expr_text, owner_datamodel_ids)
     has_ident = _expr_has_ident(tree)
-    if has_ident:
-        # Deferred: chart-top has no datamodel ports in VHDL output.
-        return (
-            f"std_logic_vector(to_signed(0, {width}))",
-            True,
-        )
     rhs = _render_shared_signal_node_vhdl(tree, width)
-    return (rhs, False)
+    return (rhs, has_ident)
 
 
 def _expr_has_ident(node: AssignExpr) -> bool:
@@ -2984,12 +2992,40 @@ def _expr_has_ident(node: AssignExpr) -> bool:
     return False
 
 
+def _idents_in_expr(node: AssignExpr) -> list[str]:
+    """SOS7CLN — collect every ident name referenced in ``node``."""
+    if node.kind == "ident":
+        return [node.ident]
+    if node.kind == "binop":
+        return _idents_in_expr(node.left) + _idents_in_expr(node.right)
+    return []
+
+
 def _render_shared_signal_node_vhdl(
     node: AssignExpr, width: int,
 ) -> str:
-    """VHDL renderer for shared-signal RHS — literal-only path."""
+    """VHDL renderer for shared-signal RHS.
+
+    SOS7CLN (2026-05-25): the prior literal-only renderer is
+    extended with an ident arm.  Owner-region datamodel idents
+    resolve to the chart-top wrapper's ``data_<ident>`` signal
+    (which the wrapper routes from the owner-region module's
+    ``data_<ident>`` output port via the read-set augmentation in
+    `_inject_owner_idents_into_reads_vhdl`).  The chart-top signal
+    is declared ``std_logic_vector`` already; ``unsigned()`` /
+    ``signed()`` casts wrap it inside binop arms as needed for
+    numeric arithmetic.
+    """
     if node.kind == "literal" or node.kind == "neg_literal":
         return f"std_logic_vector(to_signed({node.value}, {width}))"
+    if node.kind == "ident":
+        # Chart-top wrapper exposes the owner region's datamodel
+        # signal as ``data_<ident>`` (single-owner case — VHDL
+        # `_wrapper_port_name` does not prefix when there's exactly
+        # one region exposing the signal).  The wave-3-f datamodel
+        # output port is std_logic_vector(width-1 downto 0) by
+        # construction.
+        return f"data_{node.ident}"
     if node.kind == "binop":
         left = _render_shared_signal_node_vhdl(node.left, width)
         right = _render_shared_signal_node_vhdl(node.right, width)
@@ -2998,6 +3034,128 @@ def _render_shared_signal_node_vhdl(
         f"unrenderable AssignExpr kind '{node.kind}' in shared-signal "
         f"RHS lowering"
     )
+
+
+def _validate_shared_signal_rhs_same_region_vhdl(
+    signals: list[_SharedSignalHdlVhdl],
+    regions: list[HdlRegion],
+    chart_shared_datamodel: list[HdlDatamodelSignal],
+) -> None:
+    """SOS7CLN (2026-05-25) — same-region-write-only constraint on
+    shared-signal writer RHS.
+
+    A ``<sos:shared_signal>`` writer expression MAY reference:
+      * literal values (int / boolean / neg_literal),
+      * binops on literals or owner-region datamodel idents,
+      * owner-region datamodel idents (i.e. idents declared in the
+        owner region's local ``<datamodel>`` OR in the chart-level
+        shared datamodel that the owner region writes/reads — the
+        latter is the v1 default-clock case where chart-level data
+        lands at chart-top scope owned by the writing region).
+
+    Cross-region datamodel reads in a shared-signal writer RHS
+    raise ``UnsupportedChartError`` with the canonical
+    ``SOS-08-C wave-future-shared-xreg-rhs:`` prefix.  This makes
+    the SV walker's structurally-permissive per-region datamodel
+    port routing (which would accept cross-region idents without
+    complaint) explicit and refused — both walkers now enforce the
+    same chart-vocab constraint.
+    """
+    if not signals:
+        return
+    region_by_name = {r.name: r for r in regions}
+    # Build a name → region map for per-region datamodel signals.
+    other_region_dm: dict[str, str] = {}
+    for r in regions:
+        for d in r.datamodel:
+            # If the same name appears in multiple regions, the
+            # first-seen wins; downstream walkers already reject
+            # name collisions at parse time, so we trust uniqueness.
+            other_region_dm.setdefault(d.name, r.name)
+    # Chart-level shared datamodel is owner-agnostic and ALWAYS
+    # available to the owner region; admit those idents.
+    chart_dm_names = {d.name for d in chart_shared_datamodel}
+    # Permissive ident set for the parser — every datamodel ident in
+    # the chart, regardless of owning region.  The same-region check
+    # runs AFTER the parse so cross-region reads surface as the
+    # canonical chart-vocab error rather than as the parser's generic
+    # "unknown identifier".
+    all_dm_idents = list(set(other_region_dm.keys()) | chart_dm_names)
+    for sig in signals:
+        owner = region_by_name.get(sig.owner_region)
+        if owner is None:
+            continue
+        owner_dm_names = {d.name for d in owner.datamodel} | chart_dm_names
+        for writer in sig.writers:
+            expr_text = (writer.expr or "").strip()
+            if not expr_text:
+                continue
+            try:
+                tree = _parse_assign_expr(expr_text, all_dm_idents)
+            except AssignExprError:
+                # An unparseable expression surfaces later in the
+                # render path with the canonical error prefix; the
+                # same-region constraint only governs idents.
+                continue
+            for ident in _idents_in_expr(tree):
+                if ident in owner_dm_names:
+                    continue
+                other_region = other_region_dm.get(ident)
+                if other_region is not None and other_region != sig.owner_region:
+                    raise UnsupportedChartError(
+                        f"SOS-08-C wave-future-shared-xreg-rhs: "
+                        f"<sos:shared_signal name='{sig.name}' "
+                        f"owner_region='{sig.owner_region}'/> writer RHS "
+                        f"references datamodel ident '{ident}' declared "
+                        f"in region '{other_region}'; shared-signal "
+                        f"writer RHS MUST be literal-or-owner-region-"
+                        f"datamodel only at v1. (VHDL)"
+                    )
+
+
+def _inject_owner_idents_into_reads_vhdl(
+    signals: list[_SharedSignalHdlVhdl],
+    regions: list[HdlRegion],
+    chart_shared_datamodel: list[HdlDatamodelSignal],
+) -> None:
+    """SOS7CLN (2026-05-25) — augment owner regions' ``reads`` sets
+    with any chart-level datamodel ident referenced in their shared-
+    signal writer RHS.
+
+    The chart-top wrapper helper exposes per-region datamodel
+    signals iff the region reads or writes them (see
+    `_emit_chart_top_wrapper`'s `signals` list build at lines
+    ~1976-1981).  A shared-signal writer that references an owner-
+    region datamodel ident is functionally a read of that signal at
+    chart-top scope; without this augmentation the chart-top
+    wrapper would not route the signal and the VHDL emit would
+    reference an undeclared identifier.  Run BEFORE
+    `_emit_chart_top_wrapper` to ensure the routing lands.
+    """
+    if not signals:
+        return
+    region_by_name = {r.name: r for r in regions}
+    chart_dm_names = {d.name for d in chart_shared_datamodel}
+    for sig in signals:
+        owner = region_by_name.get(sig.owner_region)
+        if owner is None:
+            continue
+        owner_dm_names = {d.name for d in owner.datamodel} | chart_dm_names
+        for writer in sig.writers:
+            expr_text = (writer.expr or "").strip()
+            if not expr_text:
+                continue
+            try:
+                tree = _parse_assign_expr(expr_text, list(owner_dm_names))
+            except AssignExprError:
+                continue
+            for ident in _idents_in_expr(tree):
+                if ident in chart_dm_names:
+                    # Chart-level datamodel touched by owner via
+                    # shared-signal writer → record as a read so the
+                    # chart-top wrapper exposes ``data_<ident>``.
+                    if ident not in owner.reads:
+                        owner.reads.append(ident)
 
 
 def _augment_chart_top_with_shared_signals_vhdl(
@@ -3027,10 +3185,14 @@ def _augment_chart_top_with_shared_signals_vhdl(
     # Chart-level datamodel ids are the parse-time validation surface
     # for the wave-3-f-future-assign ECMA subset on the RHS.  The owner
     # region's `HdlRegion.datamodel` is empty in VHDL (datamodel signals
-    # live on `HdlChart.shared_datamodel`), so we use the chart-level
-    # list as the ident-validation set.  Ident-bearing RHS still degrades
-    # to literal zero in the lowered VHDL (chart-top has no datamodel
-    # ports) but the parser passes cleanly.
+    # live on `HdlChart.shared_datamodel`); we union the chart-level list
+    # with the owner's local list so the parser accepts owner-region
+    # datamodel idents.  SOS7CLN (2026-05-25): cross-region datamodel
+    # idents are rejected upstream by
+    # `_validate_shared_signal_rhs_same_region_vhdl`, and the chart-top
+    # wrapper's read-set has been augmented by
+    # `_inject_owner_idents_into_reads_vhdl` so chart-level idents land
+    # at chart-top scope as the routed `data_<ident>` signal.
     chart_dm_ids = (
         [d.name for d in shared_datamodel] if shared_datamodel else []
     )
@@ -3114,8 +3276,9 @@ def _augment_chart_top_with_shared_signals_vhdl(
                 if has_ident:
                     body_lines.append(
                         f"                    -- expr={writer.expr!r}; "
-                        f"datamodel-ident RHS deferred to a future PCDN "
-                        f"(chart-top has no owner datamodel ports yet)."
+                        f"owner-region datamodel ident lowered via "
+                        f"chart-top `data_<ident>` port (SOS7CLN, "
+                        f"PCDN-SOS-08-C-008 §15 2026-05-25)."
                     )
                 body_lines.append(
                     f"                    -- edge={writer.edge!r}, "
@@ -3406,6 +3569,28 @@ def render_target(chart_ir: Any, config: Any) -> dict[str, str]:
         )
         return {f"{_entity_name(chart_name)}.vhd": body}
 
+    # SOS7CLN (2026-05-25) coherence cleanup: collect shared signals
+    # + augment owner regions' ``reads`` sets BEFORE region rendering
+    # so the owner region's entity exposes ``data_<ident>`` as an
+    # output port AND the chart-top wrapper routes it.  Same-region
+    # constraint validation also lands here so a cross-region read
+    # surfaces before any region body is emitted.
+    shared_signals = _collect_shared_signals_hdl_vhdl(chart_ir)
+    if shared_signals:
+        _attach_shared_signal_writers_vhdl(shared_signals, chart.regions)
+        _attach_shared_signal_readers_vhdl(
+            shared_signals, chart_ir, chart.regions,
+        )
+        _validate_shared_signal_clock_domains_vhdl(
+            shared_signals, chart.regions, chart_ir,
+        )
+        _validate_shared_signal_rhs_same_region_vhdl(
+            shared_signals, chart.regions, chart.shared_datamodel,
+        )
+        _inject_owner_idents_into_reads_vhdl(
+            shared_signals, chart.regions, chart.shared_datamodel,
+        )
+
     # Multi-region path: one region file per region + chart-top wrapper.
     out: dict[str, str] = {}
     region_xreg_events: dict[str, list[str]] = {}
@@ -3453,18 +3638,12 @@ def render_target(chart_ir: Any, config: Any) -> dict[str, str]:
         wrapper_body, chart_payload_params, region_xreg_events,
     )
     # PCDN-SOS-08-C-008 (2026-05-25 §15): VHDL mirror of the SV
-    # walker's shared-signal augmenter.  Same chart-XML, same v1
-    # same-clock-domain rejection, same one-driver SVA invariant
-    # preservation by construction.
-    shared_signals = _collect_shared_signals_hdl_vhdl(chart_ir)
+    # walker's shared-signal augmenter.  Shared signals were
+    # collected + validated BEFORE region rendering above; here we
+    # post-process the wrapper body to add the chart-top driver
+    # process / declarations.  The one-driver SVA invariant is
+    # preserved by construction.
     if shared_signals:
-        _attach_shared_signal_writers_vhdl(shared_signals, chart.regions)
-        _attach_shared_signal_readers_vhdl(
-            shared_signals, chart_ir, chart.regions,
-        )
-        _validate_shared_signal_clock_domains_vhdl(
-            shared_signals, chart.regions, chart_ir,
-        )
         wrapper_body = _augment_chart_top_with_shared_signals_vhdl(
             wrapper_body, shared_signals, chart.regions,
             shared_datamodel=chart.shared_datamodel,

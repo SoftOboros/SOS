@@ -3440,6 +3440,139 @@ def _validate_shared_signal_clock_domains(
                 )
 
 
+def _idents_in_assign_expr(node: AssignExpr) -> list[str]:
+    """SOS7CLN (2026-05-25) — flat list of every ident name in the
+    parsed assign expression tree.  Used by the same-region-write-only
+    validator on shared-signal writer RHS expressions.
+    """
+    if node.kind == "ident":
+        return [node.ident]
+    if node.kind == "binop":
+        return _idents_in_assign_expr(node.left) + _idents_in_assign_expr(node.right)
+    return []
+
+
+def _collect_per_region_datamodel_from_chart_ir(
+    chart_ir: dict[str, Any],
+) -> dict[str, str]:
+    """SOS7CLN (2026-05-25) — return ``{ident_name: region_id}`` for
+    every per-region datamodel ident declared under a
+    ``<parallel><state>...<datamodel>`` element in the raw chart-IR.
+
+    The SV walker's `HdlRegion.datamodel` carries chart-level
+    inherited datamodel (every region sees every chart-level entry),
+    so it cannot be used to distinguish "this ident belongs to region
+    X" from "this ident is chart-level shared".  We walk the chart-IR
+    directly to discover per-region datamodel blocks.
+    """
+    out: dict[str, str] = {}
+    parallels = chart_ir.get("parallel", []) or []
+    if isinstance(parallels, dict):
+        parallels = [parallels]
+    for par in parallels:
+        if not isinstance(par, dict):
+            continue
+        par_children = par.get("state", []) or []
+        if isinstance(par_children, dict):
+            par_children = [par_children]
+        for child in par_children:
+            if not isinstance(child, dict):
+                continue
+            region_id = child.get("id")
+            if not isinstance(region_id, str):
+                continue
+            dm = child.get("datamodel", []) or []
+            if isinstance(dm, dict):
+                dm = [dm]
+            for entry in dm:
+                if not isinstance(entry, dict):
+                    continue
+                for d in entry.get("data", []) or []:
+                    if not isinstance(d, dict):
+                        continue
+                    nm = d.get("id")
+                    if isinstance(nm, str) and nm and nm not in out:
+                        out[nm] = region_id
+    return out
+
+
+def _validate_shared_signal_rhs_same_region(
+    signals: list[_SharedSignalHdl],
+    regions: list[HdlRegion],
+    chart_ir: dict[str, Any],
+) -> None:
+    """SOS7CLN (2026-05-25) — same-region-write-only constraint on
+    shared-signal writer RHS expressions (SV walker).
+
+    A ``<sos:shared_signal>`` writer expression MAY reference:
+      * literal values (int / boolean / neg_literal),
+      * binops on literals or owner-region datamodel idents,
+      * owner-region datamodel idents.
+
+    Cross-region datamodel reads in a shared-signal writer RHS raise
+    ``UnsupportedChartError`` with the canonical
+    ``SOS-08-C wave-future-shared-xreg-rhs:`` prefix.  This makes
+    SV's structurally-permissive per-region datamodel port routing
+    (which would accept cross-region idents without complaint)
+    explicit and refused — both walkers now enforce the same chart-
+    vocab constraint.
+
+    Note: in the SV walker, every region's ``datamodel`` field is
+    populated with the chart-level datamodel via the inheritance at
+    `_build_regions` (line ~731).  To distinguish chart-level shared
+    datamodel from per-region datamodel, the validator walks the
+    raw chart-IR (via `_collect_per_region_datamodel_from_chart_ir`)
+    rather than relying on `region.datamodel`.
+    """
+    if not signals:
+        return
+    region_by_name = {r.name: r for r in regions}
+    # Per-region datamodel ident → region-id map, sourced from the
+    # raw chart-IR.
+    per_region_dm = _collect_per_region_datamodel_from_chart_ir(chart_ir)
+    # Chart-level datamodel idents are admitted unconditionally —
+    # they exist on every region's `region.datamodel` by inheritance.
+    chart_inherited = (
+        {d.name for d in regions[0].datamodel} if regions else set()
+    )
+    # Permissive ident set for the parser — every datamodel ident in
+    # the chart, regardless of owning region.  The same-region check
+    # runs AFTER the parse so cross-region reads surface as the
+    # canonical chart-vocab error rather than as the parser's generic
+    # "unknown identifier".
+    all_dm_idents = list(set(per_region_dm.keys()) | chart_inherited)
+    for sig in signals:
+        owner = region_by_name.get(sig.owner_region)
+        if owner is None:
+            continue
+        for writer in sig.writers:
+            expr_text = (writer.expr or "").strip()
+            if not expr_text:
+                continue
+            try:
+                tree = _parse_assign_expr(expr_text, all_dm_idents)
+            except AssignExprError:
+                # Unparseable → caught downstream with the canonical
+                # error prefix; the same-region constraint governs
+                # idents only.
+                continue
+            for ident in _idents_in_assign_expr(tree):
+                if ident in chart_inherited:
+                    # Chart-level inherited datamodel — admit.
+                    continue
+                other = per_region_dm.get(ident)
+                if other is not None and other != sig.owner_region:
+                    raise UnsupportedChartError(
+                        f"SOS-08-C wave-future-shared-xreg-rhs: "
+                        f"<sos:shared_signal name='{sig.name}' "
+                        f"owner_region='{sig.owner_region}'/> writer RHS "
+                        f"references datamodel ident '{ident}' declared "
+                        f"in region '{other}'; shared-signal writer RHS "
+                        f"MUST be literal-or-owner-region-datamodel only "
+                        f"at v1."
+                    )
+
+
 def _shared_signal_render_sv_expr(
     expr_text: str,
     owner_datamodel_ids: list[str],
@@ -3818,6 +3951,15 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
         # post-process the wrapper body with the signal declarations +
         # owner-driver process.  Same augmenter pattern as C-007 above;
         # keeps `hdl_common.py` untouched.
+        #
+        # SOS7CLN (2026-05-25) coherence cleanup: same-region-write-only
+        # constraint on shared-signal writer RHS is now formal — see
+        # `_validate_shared_signal_rhs_same_region`.  Cross-region
+        # datamodel reads in a shared-signal writer raise the canonical
+        # `SOS-08-C wave-future-shared-xreg-rhs:` chart-vocab error.
+        # Legitimate owner-region-datamodel RHS continues to lower via
+        # the chart-top wrapper's `<owner>_data_<ident>` wire emit
+        # (unchanged from wave-7).
         shared_signals = _collect_shared_signals_hdl(chart_ir)
         if shared_signals:
             _attach_shared_signal_writers(shared_signals, regions)
@@ -3825,6 +3967,9 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
                 shared_signals, chart_ir, regions
             )
             _validate_shared_signal_clock_domains(
+                shared_signals, regions, chart_ir,
+            )
+            _validate_shared_signal_rhs_same_region(
                 shared_signals, regions, chart_ir,
             )
             wrapper_body = _augment_chart_top_with_shared_signals_sv(

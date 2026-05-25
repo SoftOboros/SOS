@@ -105,6 +105,7 @@ from typing import Any
 # map — pre-wave-7a charts emit byte-identical under this contract.
 from _clock_domains import (  # type: ignore
     ClockDecl,
+    ClockDomainsParseError,
     KIND_FALLING,
     KIND_RISING,
     UnsupportedClockKindError,
@@ -2130,20 +2131,26 @@ def _summarise_compound_expr(expr: "_CompoundExpr") -> str:
 def _chart_has_clock_domains_block(chart_ir: dict[str, Any] | None) -> bool:
     """SOS-08-D wave-7a (2026-05-25 §15) — distinguish "chart declared
     a wave-7a-shape ``<sos:clock_domains>`` block" from "implicit
-    default applied / sister walker's pre-7a block".
+    default applied".
 
     The helper's ``parse_clock_domains`` always returns at least one
     entry (the implicit default), so its non-empty return is not a
     reliable signal that the chart-author opted into the new model.
-    This predicate keys directly on the raw chart-IR shape AND probes
-    parseability: when the chart omits the block entirely, or carries
-    a block that fails the wave-7a parser (e.g. the sister
-    `transliterate_hdl_sv_tb` walker's pre-7a fixture shape that
-    omits ``kind=``), the walker takes the wave-4 code paths verbatim
-    (preserving byte-identity for the existing
-    `TestWave4FutureMultiClockCrossRegionSampling` regression guards
-    AND for the sister walker's pre-7a fixtures that re-enter
-    ``render_target`` with the same chart_ir).
+    This predicate keys directly on the raw chart-IR shape: a chart
+    declaring a ``<sos:clock_domains>`` element opts into the wave-7a
+    code paths, regardless of how many ``<sos:clock>`` children the
+    block carries.
+
+    SOS7CLN (2026-05-25) coherence cleanup: the prior parseability
+    probe (try/except around ``parse_clock_domains`` that swallowed
+    intrinsic shape errors as "no declared block") has been removed.
+    Every chart-XML fixture across the repository now declares
+    ``kind="rising"`` (or another wave-7a-conforming value) on every
+    ``<sos:clock>``, so the sister `transliterate_hdl_sv_tb` walker
+    no longer hands the D walker a block this parser would reject.
+    Genuinely-malformed blocks now propagate the helper's error to
+    callers, where it lands as ``UnsupportedChartError``
+    (INV-S-HDL-D-5) — consistent with the E walker's strictness.
     """
     if not isinstance(chart_ir, dict):
         return False
@@ -2151,13 +2158,6 @@ def _chart_has_clock_domains_block(chart_ir: dict[str, Any] | None) -> bool:
         chart_ir.get("sos:clock_domains") is None
         and chart_ir.get("clock_domains") is None
     ):
-        return False
-    # Probe parseability: the block is present in the raw IR, but if
-    # it doesn't conform to the wave-7a shape we fall back to wave-4
-    # byte-identical behaviour rather than crashing the walker.
-    try:
-        parse_clock_domains(chart_ir)
-    except Exception:
         return False
     return True
 
@@ -2172,36 +2172,25 @@ def _collect_chart_clock_decls(
     Delegates to ``_clock_domains.parse_clock_domains``.  Returns the
     implicit default-clock map when no block is declared (so callers
     can always look up ``"clk"``).  Re-raises
-    ``UnsupportedClockKindError`` as ``UnsupportedChartError`` so the
-    error surface matches every other chart-vocab failure in this
-    module (INV-S-HDL-D-5).
+    ``UnsupportedClockKindError`` and ``ClockDomainsParseError`` as
+    ``UnsupportedChartError`` so the error surface matches every
+    other chart-vocab failure in this module (INV-S-HDL-D-5).
 
-    Tolerance for cross-walker re-entrancy: ``transliterate_hdl_sv_tb``
-    (the E-side testbench walker) re-enters ``render_target`` with the
-    same chart_ir; its v-pre-wave-7a fixtures may declare
-    ``<sos:clock_domains>`` blocks in the older `name=` + `period_ns=`
-    shape without a ``kind=`` attribute. To preserve the
-    file-disjoint scope contract — sva_bind doesn't co-evolve with
-    sv_tb until wave-7b — we treat any
-    ``ClockDomainsParseError`` (intrinsic shape error inside
-    `<sos:clock_domains>`) as "no declared block from sva_bind's
-    perspective": fall back to the implicit-default map AND clear
-    ``chart_has_clock_block`` so downstream emit paths take the
-    wave-4 byte-identical code paths.
+    SOS7CLN (2026-05-25) coherence cleanup: the prior wave-7b
+    "fallback to implicit-default on intrinsic shape error" path has
+    been removed. The E walker (`transliterate_hdl_sv_tb`) now
+    declares ``kind=`` explicitly on every fixture and consumes the
+    same helper, so a chart that reaches this walker with a
+    malformed ``<sos:clock_domains>`` block is a genuine chart-vocab
+    error and SHOULD surface to the operator rather than silently
+    fall back to wave-4 behaviour.
     """
     try:
         return parse_clock_domains(chart_ir)
     except UnsupportedClockKindError as exc:
         raise UnsupportedChartError(str(exc)) from exc
-    except Exception:
-        # ClockDomainsParseError (or any future shape-error) — sva_bind
-        # falls back to implicit-default behaviour so a sister walker
-        # using the same chart_ir doesn't crash this one.  See
-        # _chart_has_clock_domains_block which is independently aware
-        # of the block's presence for emit-side gating.
-        from _clock_domains import implicit_default_clock as _idc  # type: ignore
-        default = _idc()
-        return {default.name: default}
+    except ClockDomainsParseError as exc:
+        raise UnsupportedChartError(str(exc)) from exc
 
 
 def _collect_chart_clock_domains(

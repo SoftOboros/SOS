@@ -3034,3 +3034,128 @@ class TestPCDN008WalkerIntegration:
             match=r"SOS-08-D wave-future-clkkind:",
         ):
             transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+
+class TestPCDN008CleanupDFallbackRemoved:
+    """SOS7CLN (2026-05-25) — verify the wave-7a D-walker pre-7a
+    parseability-probe fallback has been removed from
+    `transliterate_sva_bind`.
+
+    With the E walker now consuming the shared `_clock_domains`
+    helper AND all fixtures declaring ``kind=`` explicitly, the
+    sister-walker re-entrancy hazard the fallback worked around no
+    longer exists.  Keeping the dead branch would silently mask
+    future regressions.
+    """
+
+    def test_pre_7a_parseability_probe_removed(self):
+        """The parseability-probe ``try/except`` inside
+        ``_chart_has_clock_domains_block`` and the wave-7b
+        "fallback to implicit-default" path inside
+        ``_collect_chart_clock_decls`` MUST be gone.  The body MUST
+        no longer wrap ``parse_clock_domains`` in a try/except that
+        swallows intrinsic shape errors.
+        """
+        import ast
+        import inspect
+        # Locate `_chart_has_clock_domains_block`; parse its body
+        # (excluding the docstring) and assert the function no
+        # longer CALLS `parse_clock_domains` (the load-bearing
+        # marker of the parseability-probe path).
+        fn = getattr(transliterate_sva_bind, "_chart_has_clock_domains_block")
+        src = inspect.getsource(fn)
+        module = ast.parse(src)
+        func_def = module.body[0]
+        assert isinstance(func_def, ast.FunctionDef)
+        # Drop the docstring from analysis.
+        stmts = func_def.body
+        if (
+            stmts
+            and isinstance(stmts[0], ast.Expr)
+            and isinstance(stmts[0].value, ast.Constant)
+            and isinstance(stmts[0].value.value, str)
+        ):
+            stmts = stmts[1:]
+        # Walk the remaining statements; assert no Call to
+        # `parse_clock_domains` (or attribute access via Name).
+        calls_found: list[str] = []
+        for stmt in stmts:
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Call):
+                    target = node.func
+                    if isinstance(target, ast.Name) and target.id == "parse_clock_domains":
+                        calls_found.append(target.id)
+                    elif (
+                        isinstance(target, ast.Attribute)
+                        and target.attr == "parse_clock_domains"
+                    ):
+                        calls_found.append(target.attr)
+        assert not calls_found, (
+            "SOS7CLN: the parseability-probe `try/except` around "
+            "`parse_clock_domains` MUST be removed from "
+            "`_chart_has_clock_domains_block` — the predicate is now "
+            "a pure raw-IR shape check."
+        )
+        # Verify `_collect_chart_clock_decls` no longer carries the
+        # blanket-except fallback that silently substituted the
+        # implicit-default clock map.  The presence marker of the
+        # removed path is a bare `except Exception:` clause OR a
+        # reference to `implicit_default_clock` inside the function
+        # body (the old fallback imported it and returned its map).
+        fn2 = getattr(transliterate_sva_bind, "_collect_chart_clock_decls")
+        src2 = inspect.getsource(fn2)
+        module2 = ast.parse(src2)
+        func_def2 = module2.body[0]
+        assert isinstance(func_def2, ast.FunctionDef)
+        blanket_excepts = [
+            h for stmt in func_def2.body
+            for node in ast.walk(stmt)
+            if isinstance(node, ast.Try)
+            for h in node.handlers
+            if h.type is None
+            or (isinstance(h.type, ast.Name) and h.type.id == "Exception")
+        ]
+        assert not blanket_excepts, (
+            "SOS7CLN: `_collect_chart_clock_decls` MUST NOT carry a "
+            "blanket `except Exception:` fallback; "
+            "`ClockDomainsParseError` now propagates as "
+            "`UnsupportedChartError`."
+        )
+        # The new shape: a `ClockDomainsParseError` handler that
+        # raises `UnsupportedChartError`.
+        assert "ClockDomainsParseError" in src2 and "raise UnsupportedChartError" in src2, (
+            "SOS7CLN: `_collect_chart_clock_decls` MUST re-raise "
+            "`ClockDomainsParseError` as `UnsupportedChartError` so "
+            "malformed `<sos:clock_domains>` blocks surface to the "
+            "operator instead of silently falling back."
+        )
+
+    def test_malformed_clock_block_raises_via_d_walker(self):
+        """End-to-end gate: a chart declaring a `<sos:clock_domains>`
+        block with a `<sos:clock>` missing the REQUIRED `kind=`
+        attribute MUST surface as ``UnsupportedChartError`` through
+        the D walker (rather than silently falling back to the
+        implicit-default behaviour).
+        """
+        chart = {
+            "initial": "p",
+            "parallel": [
+                {
+                    "id": "p",
+                    "state": [
+                        {"id": "fast_r", "initial": "F1", "state": [
+                            {"id": "F1"},
+                        ]},
+                        {"id": "slow_r", "initial": "S1", "state": [
+                            {"id": "S1"},
+                        ]},
+                    ],
+                },
+            ],
+            # Wave-7a REQUIRES `kind=`; omitting it MUST raise.
+            "sos:clock_domains": {
+                "sos:clock": [{"name": "clk_a", "period_ns": 10}],
+            },
+        }
+        with pytest.raises(transliterate_sva_bind.UnsupportedChartError):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
