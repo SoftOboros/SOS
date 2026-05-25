@@ -1761,3 +1761,194 @@ class TestWave3fEventPayloadCapture:
         sv = self._files()["cap_fsm.sv"]
         assert "`default_nettype none" in sv
         assert "`default_nettype wire" in sv
+
+
+# ---------------------------------------------------------------------------
+# Wave-3-f-future-A (2026-05-24 §15) — `<onexit>` captures.
+# Wave-3-f-future-B remains carry-forward (multi-`<param>` events); the
+# walker rejects the syntactic form with an actionable error here so
+# chart authors get a citation rather than silently-mismatched ports.
+# ---------------------------------------------------------------------------
+
+
+class TestWave3fFutureOnexitCapture:
+    """Wave-3-f-future-A: lowering `<onexit><assign expr="event.<EV>.value"/>`
+    fires on the exit-edge from the carrying state (gating inverted
+    from the entry shape)."""
+
+    def _chart_with_onexit_capture(self):
+        return {
+            "datamodel": [{"data": [
+                {"id": "last_seen", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"event": "tick", "target": "observed"},
+                ]},
+                {
+                    "id": "observed",
+                    "onexit": [{"assign": [
+                        {"location": "last_seen", "expr": "event.tick.value"},
+                    ]}],
+                    "transition": [
+                        {"event": "tick", "target": "idle"},
+                    ],
+                },
+            ],
+            "initial": "idle",
+        }
+
+    def _files(self):
+        return transliterate_hdl_sv.render_target(
+            self._chart_with_onexit_capture(), {"chart_name": "ex"}
+        )
+
+    def test_exit_edge_gating_emitted(self):
+        """Exit-edge gating uses ``state_q == ST_OBSERVED && state_next !=
+        ST_OBSERVED``, the mirror of the entry shape."""
+        sv = self._files()["ex_fsm.sv"]
+        assert (
+            "state_q == ST_OBSERVED && state_next != ST_OBSERVED && "
+            "event_tick_recv_valid"
+        ) in sv
+
+    def test_exit_capture_assigns_recv_data(self):
+        sv = self._files()["ex_fsm.sv"]
+        assert "data_last_seen_q <= event_tick_recv_data" in sv
+
+    def test_exit_capture_default_holds_value(self):
+        """Outside the exit-edge the datamodel register holds previous
+        value (the else branch)."""
+        sv = self._files()["ex_fsm.sv"]
+        assert "data_last_seen_q <= data_last_seen_q" in sv
+
+    def test_entry_gating_not_emitted_for_exit_capture(self):
+        """An `<onexit>` capture MUST NOT also produce the entry-edge
+        gating expression — the edge tag selects exactly one shape."""
+        sv = self._files()["ex_fsm.sv"]
+        # The entry-edge condition for `observed` would be
+        # `state_q != ST_OBSERVED && state_next == ST_OBSERVED`; verify
+        # it does NOT appear for the `data_last_seen_q` write.
+        assert (
+            "state_q != ST_OBSERVED && state_next == ST_OBSERVED && "
+            "event_tick_recv_valid"
+        ) not in sv
+
+    def test_onexit_and_onentry_can_coexist_in_chain(self):
+        """A chart that captures the same datamodel on entry AND exit
+        from different states produces an if/elsif chain with both
+        gating shapes."""
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "buf", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "s0", "transition": [
+                    {"event": "a", "target": "s1"},
+                ]},
+                {
+                    "id": "s1",
+                    "onentry": [{"assign": [
+                        {"location": "buf", "expr": "event.a.value"},
+                    ]}],
+                    "onexit": [{"assign": [
+                        {"location": "buf", "expr": "event.a.value"},
+                    ]}],
+                    "transition": [
+                        {"event": "a", "target": "s0"},
+                    ],
+                },
+            ],
+            "initial": "s0",
+        }
+        sv = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "mix"}
+        )["mix_fsm.sv"]
+        # Entry-edge for s1.
+        assert "state_q != ST_S1 && state_next == ST_S1" in sv
+        # Exit-edge for s1.
+        assert "state_q == ST_S1 && state_next != ST_S1" in sv
+        # Two captures in the same chain → if + end-else-if structure.
+        assert "end else if" in sv
+
+
+class TestWave3fFutureBMultiParamRejection:
+    """Wave-3-f-future-B (multi-`<param>` events) remains carry-forward.
+    The walker MUST recognise the syntactic form `event.<EV>.<custom>`
+    when `<custom> != "value"` and reject with a chart-vocabulary error
+    citing the wave-3-f-future-B boundary — silent fall-through to
+    wave-1/2 no-op would obscure the chart-author's intent."""
+
+    def _chart_with_custom_param(self, suffix: str = "payload"):
+        return {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"event": "tick", "target": "observed"},
+                ]},
+                {
+                    "id": "observed",
+                    "onentry": [{"assign": [
+                        {"location": "x", "expr": f"event.tick.{suffix}"},
+                    ]}],
+                    "transition": [{"target": "idle"}],
+                },
+            ],
+            "initial": "idle",
+        }
+
+    def test_custom_suffix_raises(self):
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"wave-3-f-future-B",
+        ):
+            transliterate_hdl_sv.render_target(
+                self._chart_with_custom_param("payload"),
+                {"chart_name": "x"},
+            )
+
+    def test_custom_suffix_error_names_offending_suffix(self):
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"event\.tick\.payload",
+        ):
+            transliterate_hdl_sv.render_target(
+                self._chart_with_custom_param("payload"),
+                {"chart_name": "x"},
+            )
+
+    def test_custom_suffix_error_suggests_rename(self):
+        """Error message includes guidance on the workaround (rename
+        the `<param>` to `value` for the wave-3-e single-bus path)."""
+        try:
+            transliterate_hdl_sv.render_target(
+                self._chart_with_custom_param("payload"),
+                {"chart_name": "x"},
+            )
+        except transliterate_hdl_sv.UnsupportedChartError as exc:
+            assert "rename" in str(exc).lower() or "value" in str(exc)
+        else:
+            pytest.fail("expected UnsupportedChartError")
+
+    def test_value_suffix_still_accepted(self):
+        """Backwards-compat: `event.<EV>.value` (wave-3-f baseline)
+        keeps working unchanged — the regex extension MUST NOT regress
+        the canonical single-`<param>` shape."""
+        chart = self._chart_with_custom_param("value")
+        # The exit-without-event-trigger transition in `observed` is
+        # untriggered (target back to idle). Add a tick trigger so the
+        # consume-event validation passes.
+        chart["state"][1]["transition"] = [
+            {"event": "tick", "target": "idle"},
+        ]
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "v"}
+        )
+        sv = files["v_fsm.sv"]
+        # Standard wave-3-f emit shape present.
+        assert (
+            "state_q != ST_OBSERVED && state_next == ST_OBSERVED && "
+            "event_tick_recv_valid"
+        ) in sv

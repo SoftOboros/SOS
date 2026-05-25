@@ -336,20 +336,33 @@ class HdlEventPayloadCapture:
     consume side.
 
     Represents an `<onentry><assign location="<X>" expr="event.<EV>.value"/>
-    </onentry>` lowering: when the region enters state ``state_id`` via
-    a transition that consumed event ``event_name``, capture the
-    event's payload (``event_<EV>_recv_data``) into the chart-side
-    datamodel signal ``location``.
+    </onentry>` (or, since wave-3-f-future-A, an `<onexit>` mirror)
+    lowering: when the region enters / exits state ``state_id`` via a
+    transition that consumed event ``event_name``, capture the event's
+    payload (``event_<EV>_recv_data``) into the chart-side datamodel
+    signal ``location``.
+
+    SOS-08-C wave-3-f-future-A (2026-05-24 §15) extends the dataclass
+    with an ``edge`` field naming whether the capture fires on entry
+    (the wave-3-f original shape) or exit (`<onexit>`). For
+    ``edge="exit"`` the gating expression in the emit is
+    ``state_q == ST_S && state_next != ST_S && event_<EV>_recv_valid``
+    (the mirror of the entry gating). The default ``"entry"`` preserves
+    wave-3-f emit byte-identity for charts that haven't migrated.
 
     At v1, ``expr="event.<EV>.value"`` is the only supported event-
     object form (single ``<param name="value">`` per the wave-3-e
-    payload convention). Multi-param composition + alternate field
-    names (``event.<EV>.<custom>``) are wave-3-f-future.
+    payload convention). Alternate suffixes (``event.<EV>.<custom>``)
+    surface as ``UnsupportedChartError`` citing wave-3-f-future-B
+    (multi-`<param>` event payload composition), which requires
+    upstream changes to the wave-3-e port shape (per-param
+    ``_recv_data_<custom>`` buses).
     """
 
-    state_id: str          # the target state whose <onentry> carried the assign
+    state_id: str          # the source state whose <onentry>/<onexit> carried the assign
     location: str          # chart datamodel signal name (RHS of `data_<X>_q`)
     event_name: str        # consumed event whose `_recv_data` supplies the value
+    edge: str = "entry"    # "entry" (default, wave-3-f) or "exit" (wave-3-f-future-A)
 
 
 @dataclass
@@ -1172,23 +1185,30 @@ def _collect_region_raise_events(region: HdlRegion) -> list[str]:
 # shape; whitespace tolerated around tokens, no other suffixes (e.g.
 # `event.<EV>.<param_name>` for multi-param events) accepted at v1.
 _EVENT_PAYLOAD_RE = re.compile(
-    r"^\s*event\.([A-Za-z_][A-Za-z0-9_\-]*)\.value\s*$"
+    # SOS-08-C wave-3-f-future-A (2026-05-24 §15): extend the regex to
+    # capture the suffix after `event.<EV>.` — `value` is the canonical
+    # single-`<param>` form; any other suffix is recognised
+    # syntactically but rejected with a wave-3-f-future-B citation
+    # because the wave-3-e port shape is single-bus (multi-`<param>`
+    # requires per-param `_recv_data_<custom>` buses, an upstream
+    # amendment).
+    r"^\s*event\.([A-Za-z_][A-Za-z0-9_\-]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*$"
 )
 
 
 def _collect_region_event_payload_captures(
     region: HdlRegion,
 ) -> list[HdlEventPayloadCapture]:
-    """Walk a region's states and extract `<onentry><assign location="..."
-    expr="event.<EV>.value"/></onentry>` records per SOS-08-C wave-3-f.
+    """Walk a region's states and extract event-payload-capture records
+    per SOS-08-C wave-3-f (`<onentry>`) + wave-3-f-future-A (`<onexit>`).
 
     Returns the list of ``HdlEventPayloadCapture`` records found. The
     walker is forgiving on non-matching expressions (those keep the
     pre-wave-3-f no-op semantics — they're collected into
-    `onentry_assigns` but the SV emit ignores them, as wave-1/wave-2/
-    wave-3-{a..e} did).
+    ``onentry_assigns`` / ``onexit_assigns`` but the SV emit ignores
+    them, as wave-1/wave-2/wave-3-{a..e} did).
 
-    Per wave-3-f v1 validation (warnings, not errors):
+    Per wave-3-f / wave-3-f-future-A v1 validation:
       - The state's incoming transitions MAY include one triggered by
         ``event="<EV>"``; if no such transition exists in the region,
         the capture would never fire (silent dead code). The walker
@@ -1199,34 +1219,69 @@ def _collect_region_event_payload_captures(
         not, the capture has no ``_recv_data`` port to read from and
         the walker raises ``UnsupportedChartError`` (a hard error —
         the chart references an event the region doesn't consume).
+      - The suffix after ``event.<EV>.`` MUST be ``value`` (single-
+        `<param>` per wave-3-e). Custom suffixes raise
+        ``UnsupportedChartError`` citing wave-3-f-future-B (multi-
+        `<param>` event payload composition needs upstream wave-3-e
+        port-shape changes).
     """
     captures: list[HdlEventPayloadCapture] = []
     consume_events = set(_collect_region_consume_events(region))
+
+    def _process(assign: HdlAssign, state: HdlState, edge: str) -> None:
+        m = _EVENT_PAYLOAD_RE.match(assign.expr)
+        if not m:
+            return
+        event_name = m.group(1)
+        suffix = m.group(2)
+        # Wave-3-f-future-B boundary: only the canonical ``.value``
+        # suffix maps to the wave-3-e single-`<param>` payload bus.
+        # Anything else needs per-param ``_recv_data_<custom>`` ports.
+        if suffix != "value":
+            raise UnsupportedChartError(
+                f"SOS-08-C wave-3-f-future-B: <on{edge}><assign "
+                f"location='{assign.location}' expr='event.{event_name}."
+                f"{suffix}'/> uses a non-`value` suffix; the wave-3-e "
+                f"payload-bearing event port shape carries a single "
+                f"unnamed bus (``event_{event_name}_recv_data``). "
+                f"Multi-`<param>` event payload composition (per-param "
+                f"sub-buses keyed on `<param name=\"{suffix}\">`) is "
+                f"deferred to a future wave-3-f-future-B amendment + "
+                f"upstream wave-3-e port-shape extension. Until then, "
+                f"either rename your `<param>` to `value`, or compose "
+                f"the payload into a single integer / packed struct on "
+                f"the raise side."
+            )
+        if event_name not in consume_events:
+            raise UnsupportedChartError(
+                f"SOS-08-C wave-3-f: <on{edge}><assign location="
+                f"'{assign.location}' expr='event.{event_name}.value'/> "
+                f"references event `{event_name}` which is NOT a "
+                f"consume event of region `{region.name}`. The "
+                f"region's consume events are: "
+                f"{sorted(consume_events) or '<none>'}. Either add "
+                f"a transition with event=\"{event_name}\" to a "
+                f"state in this region, or relocate the assign to "
+                f"the region that consumes the event."
+            )
+        captures.append(
+            HdlEventPayloadCapture(
+                state_id=state.state_id,
+                location=assign.location,
+                event_name=event_name,
+                edge=edge,
+            )
+        )
+
     for state in region.states:
         for assign in state.onentry_assigns:
-            m = _EVENT_PAYLOAD_RE.match(assign.expr)
-            if not m:
-                continue
-            event_name = m.group(1)
-            if event_name not in consume_events:
-                raise UnsupportedChartError(
-                    f"SOS-08-C wave-3-f: <onentry><assign location="
-                    f"'{assign.location}' expr='event.{event_name}.value'/> "
-                    f"references event `{event_name}` which is NOT a "
-                    f"consume event of region `{region.name}`. The "
-                    f"region's consume events are: "
-                    f"{sorted(consume_events) or '<none>'}. Either add "
-                    f"a transition with event=\"{event_name}\" to a "
-                    f"state in this region, or relocate the assign to "
-                    f"the region that consumes the event."
-                )
-            captures.append(
-                HdlEventPayloadCapture(
-                    state_id=state.state_id,
-                    location=assign.location,
-                    event_name=event_name,
-                )
-            )
+            _process(assign, state, "entry")
+        # SOS-08-C wave-3-f-future-A (2026-05-24 §15): mirror walk over
+        # ``onexit_assigns``. Exit-edge captures fire when the region
+        # leaves the state; semantics are symmetric to entry captures
+        # with the gating expression inverted (state_q==S && next!=S).
+        for assign in state.onexit_assigns:
+            _process(assign, state, "exit")
     return captures
 
 
@@ -1481,18 +1536,30 @@ def _emit_register_process(
                 f"            {sig.sv_name}_q <= {sig.sv_name}_q;"
             )
             continue
-        # Wave-3-f: build an if/else if chain mapping each capture's
-        # entry-edge condition to the corresponding event-recv_data
-        # source. The final ``else`` clause is the hold-value default.
+        # Wave-3-f / wave-3-f-future-A: build an if/else if chain
+        # mapping each capture's entry-edge OR exit-edge condition to
+        # the corresponding event-recv_data source. The final ``else``
+        # clause holds the register's current value.
+        #
+        # Edge gating:
+        #   entry: state_q != ST_S && state_next == ST_S && recv_valid
+        #   exit:  state_q == ST_S && state_next != ST_S && recv_valid
         chain_lines: list[str] = []
         for idx, cap in enumerate(cap_list):
             ev_ident = _safe_event_ident(cap.event_name)
             state_const = _state_constant_name(cap.state_id)
-            cond = (
-                f"state_q != {state_const} && "
-                f"state_next == {state_const} && "
-                f"event_{ev_ident}_recv_valid"
-            )
+            if cap.edge == "exit":
+                cond = (
+                    f"state_q == {state_const} && "
+                    f"state_next != {state_const} && "
+                    f"event_{ev_ident}_recv_valid"
+                )
+            else:
+                cond = (
+                    f"state_q != {state_const} && "
+                    f"state_next == {state_const} && "
+                    f"event_{ev_ident}_recv_valid"
+                )
             keyword = "            if" if idx == 0 else "            end else if"
             chain_lines.append(
                 f"{keyword} ({cond}) begin"

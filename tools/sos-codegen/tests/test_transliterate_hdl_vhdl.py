@@ -807,3 +807,123 @@ class TestWave3fEventPayloadCaptureVhdl:
         assert "event_" not in vhd
         # x_q reset present.
         assert "x_q <= to_signed(0, x_q'length);" in vhd
+
+
+# ---------------------------------------------------------------------------
+# Wave-3-f-future-A (2026-05-24 §15) — VHDL `<onexit>` capture mirror.
+# ---------------------------------------------------------------------------
+
+
+class TestWave3fFutureOnexitCaptureVhdl:
+    """VHDL mirror of `TestWave3fFutureOnexitCapture` (SV side)."""
+
+    def _chart_with_onexit_capture(self):
+        return {
+            "datamodel": [{"data": [
+                {"id": "last_seen", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"event": "tick", "target": "observed"},
+                ]},
+                {
+                    "id": "observed",
+                    "onexit": [{"assign": [
+                        {"location": "last_seen", "expr": "event.tick.value"},
+                    ]}],
+                    "transition": [
+                        {"event": "tick", "target": "idle"},
+                    ],
+                },
+            ],
+            "initial": "idle",
+        }
+
+    def _vhd(self):
+        files = render_target(
+            self._chart_with_onexit_capture(), {"chart_name": "ex"}
+        )
+        return files["ex_fsm.vhd"]
+
+    def test_exit_edge_gating_emitted_vhdl(self):
+        vhd = self._vhd()
+        # VHDL syntax: `state_q = X and state_next /= X and recv_valid='1'`.
+        assert (
+            "state_q = ST_OBSERVED and "
+            "state_next /= ST_OBSERVED and "
+            "event_tick_recv_valid = '1'"
+        ) in vhd
+
+    def test_exit_capture_assigns_recv_data_with_signed_cast(self):
+        vhd = self._vhd()
+        assert "last_seen_q <= signed(event_tick_recv_data)" in vhd
+
+    def test_exit_capture_holds_value_in_else(self):
+        vhd = self._vhd()
+        assert "last_seen_q <= last_seen_q" in vhd
+
+    def test_entry_shape_not_emitted_for_exit_capture(self):
+        vhd = self._vhd()
+        assert (
+            "state_q /= ST_OBSERVED and "
+            "state_next = ST_OBSERVED and "
+            "event_tick_recv_valid = '1'"
+        ) not in vhd
+
+
+class TestWave3fFutureBMultiParamRejectionVhdl:
+    """Wave-3-f-future-B VHDL mirror: custom suffix rejected with
+    actionable chart-vocabulary error."""
+
+    def _chart_with_custom_param(self, suffix: str = "payload"):
+        return {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"event": "tick", "target": "observed"},
+                ]},
+                {
+                    "id": "observed",
+                    "onentry": [{"assign": [
+                        {"location": "x", "expr": f"event.tick.{suffix}"},
+                    ]}],
+                    "transition": [{"target": "idle"}],
+                },
+            ],
+            "initial": "idle",
+        }
+
+    def test_custom_suffix_raises_vhdl(self):
+        with pytest.raises(
+            UnsupportedChartError,
+            match=r"wave-3-f-future-B",
+        ):
+            render_target(
+                self._chart_with_custom_param("payload"),
+                {"chart_name": "x"},
+            )
+
+    def test_custom_suffix_error_names_offending_suffix_vhdl(self):
+        with pytest.raises(
+            UnsupportedChartError,
+            match=r"event\.tick\.payload",
+        ):
+            render_target(
+                self._chart_with_custom_param("payload"),
+                {"chart_name": "x"},
+            )
+
+    def test_value_suffix_still_accepted_vhdl(self):
+        chart = self._chart_with_custom_param("value")
+        chart["state"][1]["transition"] = [
+            {"event": "tick", "target": "idle"},
+        ]
+        files = render_target(chart, {"chart_name": "v"})
+        vhd = files["v_fsm.vhd"]
+        assert (
+            "state_q /= ST_OBSERVED and "
+            "state_next = ST_OBSERVED and "
+            "event_tick_recv_valid = '1'"
+        ) in vhd

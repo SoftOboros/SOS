@@ -973,3 +973,92 @@ The VHDL emit casts `_recv_data` (a `std_logic_vector`) to `signed` because the 
 **Cited PCDNs / amendments**: §15 wave-3-f (this entry) ratifies the `event.<EV>.value` event-object form; wave-3-e §15 payload-bearing event ports (consumed); INV-S-HDL-C-2/-C-4 extended.
 
 Status: 🟢 **wave-3-f complete**. The SCXML event-routing arc + datamodel-binding-on-consume-side is now end-to-end functional: events raised by one region pulse through the channel with backpressure + payload data + CDC awareness, are consumed by other regions, and the payload value is captured into a chart-side datamodel signal on the entry-edge into the consuming state. Multi-`<param>` composition, `<onexit>` captures, general ECMAScript-subset `<assign>` lowering, and cross-region event-value capture remain future amendments.
+
+### 2026-05-24 — Impl wave-3-f-future-A: `<onexit>` captures + wave-3-f-future-B multi-`<param>` rejection (Ira)
+
+Lands two of the four wave-3-f-future carry-forward items:
+
+- **Wave-3-f-future-A** (closed) — `<onexit>` event-payload captures. Mirror of the wave-3-f `<onentry>` shape with the gating expression inverted. The chart-author authoring contract extends cleanly: `<onexit><assign location="<X>" expr="event.<EV>.value"/></onexit>` lowers to a registered assignment gated by `state_q == ST_S && state_next != ST_S && event_<EV>_recv_valid`. Both SV and VHDL walkers participate; tests pin the cross-walker mirror.
+- **Wave-3-f-future-B** (rejection-only) — multi-`<param>` events. The walker recognises the syntactic form `event.<EV>.<custom>` (where `<custom> != "value"`) and rejects with an actionable `UnsupportedChartError` citing the wave-3-f-future-B boundary + suggesting the workaround (rename the chart-side `<param>` to `value`, or compose the payload into a single integer/packed-struct on the raise side). The full multi-`<param>` walker support stays carry-forward, gated on upstream wave-3-e port-shape changes (per-param `_recv_data_<custom>` sub-buses).
+
+**Why the split**: wave-3-f-future-A is a clean ~30-LOC extension touching only the wave-3-f capture/emit machinery; wave-3-f-future-B is a multi-file refactor of the wave-3-e payload-bearing event-port emission shape. Landing A now closes the `<onexit>` carry-forward without coupling its risk to the larger upstream amendment. The rejection in wave-3-f-future-B converts silent fall-through (chart compiles, capture is no-op, debugging is opaque) into an actionable chart-vocabulary error that names the offending suffix + the workaround — chart authors writing `event.<EV>.<custom>` now learn immediately that they have hit a wave boundary, not days later when their datamodel signal stays at its reset value.
+
+**Implementation surface**:
+
+- **`HdlEventPayloadCapture` dataclass (both walkers)** — gains `edge: str = "entry"` field. Default preserves wave-3-f emit byte-identity for charts using `<onentry>` only.
+- **`_EVENT_PAYLOAD_RE` regex (both walkers)** — was `^\s*event\.(\w+)\.value\s*$`; now `^\s*event\.(\w+)\.(\w+)\s*$` (captures both the event name AND the suffix). The suffix is then dispatched: `value` → accept, anything else → raise wave-3-f-future-B `UnsupportedChartError`.
+- **`_collect_region_event_payload_captures` (both walkers)** — refactored to walk BOTH `onentry_assigns` (edge="entry") AND `onexit_assigns` (edge="exit") via a shared inner `_process(assign, state, edge)` helper. The custom-suffix rejection lives inside the helper so it applies symmetrically to entry + exit lowerings.
+- **`_emit_register_process` (both walkers)** — extended to emit the exit-edge gating expression when `cap.edge == "exit"`. SV: `state_q == ST_S && state_next != ST_S && event_<EV>_recv_valid`. VHDL: `state_q = ST_S and state_next /= ST_S and event_<EV>_recv_valid = '1'`. Backwards-compatible by default; charts without `<onexit>` captures emit byte-identically to wave-3-f.
+
+**Sample emit (SV, single-region chart with `<onexit>` capture)**:
+
+```sv
+if (state_q == ST_OBSERVED && state_next != ST_OBSERVED && event_tick_recv_valid) begin
+    data_last_seen_q <= event_tick_recv_data;
+end else begin
+    data_last_seen_q <= data_last_seen_q;
+end
+```
+
+**Sample emit (VHDL mirror, same chart)**:
+
+```vhdl
+if state_q = ST_OBSERVED and state_next /= ST_OBSERVED and event_tick_recv_valid = '1' then
+    last_seen_q <= signed(event_tick_recv_data);
+else
+    last_seen_q <= last_seen_q;
+end if;
+```
+
+**Mixed entry + exit captures composing into one chain**: a chart that captures the same datamodel signal on entry AND exit from different states produces a single if/elsif chain with both gating shapes, last-write-wins per SCXML §3.13 onentry/onexit execution order:
+
+```sv
+if (state_q != ST_S1 && state_next == ST_S1 && event_a_recv_valid) begin
+    data_buf_q <= event_a_recv_data;
+end else if (state_q == ST_S1 && state_next != ST_S1 && event_a_recv_valid) begin
+    data_buf_q <= event_a_recv_data;
+end else begin
+    data_buf_q <= data_buf_q;
+end
+```
+
+**Wave-3-f-future-B rejection example** (chart with `event.tick.payload`):
+
+```
+UnsupportedChartError: SOS-08-C wave-3-f-future-B: <onentry><assign
+location='x' expr='event.tick.payload'/> uses a non-`value` suffix; the
+wave-3-e payload-bearing event port shape carries a single unnamed bus
+(``event_tick_recv_data``). Multi-`<param>` event payload composition
+(per-param sub-buses keyed on `<param name="payload">`) is deferred to a
+future wave-3-f-future-B amendment + upstream wave-3-e port-shape
+extension. Until then, either rename your `<param>` to `value`, or
+compose the payload into a single integer / packed struct on the raise
+side.
+```
+
+**Invariants upheld**:
+
+- **INV-S-HDL-C-1** (chart-as-source): preserved — both edges' lowering is deterministic from the chart text.
+- **INV-S-HDL-C-2** (datamodel signals reach RTL register form): preserved + extended in spirit — datamodel registers now have a defined write source on BOTH entry-edge AND exit-edge events.
+- **INV-S-HDL-C-3** (cross-domain CDC isolation): unchanged — exit-edge captures read the same `_recv_data` channel-side bus as entry-edge captures.
+- **INV-S-HDL-C-4** (datamodel-write observability): retained — exit-edge captures are the same kind of write site INV-S-HDL-C-4 expected the debug-strobe pass to expose; the additional write site simply doubles the surface area, not the kind.
+- **INV-S-HDL-C-5** (one-hot encoding deterministic across dialects): unchanged.
+
+**Wave-3-f-future remaining boundary** (still deferred):
+
+- **Wave-3-f-future-B (multi-`<param>` events)** — the full implementation. Requires upstream wave-3-e port-shape extension to per-param `_recv_data_<custom>` sub-buses + chart-top wrapper payload partitioning. The rejection-only landing in this entry surfaces the boundary cleanly; the full path lands when a customer chart demands it.
+- **General ECMAScript-subset `<assign>` lowering** — `<assign location="x" expr="42"/>` (numeric-literal) or `<assign location="x" expr="other_signal"/>` (datamodel-to-datamodel). Wave-3-f-future-A keeps these silently ignored (preserving wave-1/wave-2 no-op behavior); a future amendment with a small expression DSL closes this gap.
+- **Cross-region event-value capture** — when a region's `<onentry>`/`<onexit>` references an event consumed by a DIFFERENT region, the walker continues to raise `UnsupportedChartError`. Composing captures across regions requires the chart-top wrapper to expose the channel's `_recv_data` to additional consumers.
+
+**Test count**: net +16 across two walkers:
+
+- `TestWave3fFutureOnexitCapture` (5 — SV): exit-edge gating present; assigns `_recv_data`; default holds value; entry shape NOT emitted for exit capture; entry+exit can coexist in one if/elsif chain.
+- `TestWave3fFutureBMultiParamRejection` (4 — SV): custom suffix raises; error names offending suffix; error suggests rename; `value` suffix still accepted.
+- `TestWave3fFutureOnexitCaptureVhdl` (4 — VHDL): exit-edge gating; signed cast on `_recv_data`; holds value in else; entry shape NOT emitted for exit capture.
+- `TestWave3fFutureBMultiParamRejectionVhdl` (3 — VHDL): custom suffix raises; error names offending suffix; `value` suffix still accepted.
+
+**Test suite**: 689/689 passing (673 prior + 16 new wave-3-f-future).
+
+**Cited invariants / amendments**: §15 wave-3-f (entry shape — extended here to also cover exit edge); INV-S-HDL-C-1..5 (preserved); SCXML §3.13 onentry/onexit execution order (cited for last-write-wins semantics in mixed entry+exit chains).
+
+Status: 🟢 **wave-3-f-future-A complete + wave-3-f-future-B boundary made actionable**. `<onexit>` event-payload captures lower identically across SV + VHDL walkers; multi-`<param>` events surface immediately as chart-vocabulary errors with a workaround citation. Wave-3-f-future-B full implementation, general `<assign>` ECMAScript-subset lowering, and cross-region event-value capture remain on the wave-3-f-future track.

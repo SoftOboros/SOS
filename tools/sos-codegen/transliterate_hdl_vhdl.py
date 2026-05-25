@@ -242,11 +242,16 @@ class HdlEventPayloadCapture:
     normative reference. VHDL emit mirrors the SV semantics: on the
     entry-edge into ``state_id`` with ``event_<EV>_recv_valid``
     asserted, capture ``event_<EV>_recv_data`` into ``data_<X>_q``.
+
+    SOS-08-C wave-3-f-future-A (2026-05-24 §15) adds the ``edge``
+    field for `<onexit>` captures (gating expression inverted from the
+    entry shape). Default ``"entry"`` preserves wave-3-f byte-identity.
     """
 
     state_id: str
     location: str
     event_name: str
+    edge: str = "entry"
 
 
 @dataclass
@@ -985,9 +990,12 @@ def _collect_region_consume_events(region: HdlRegion) -> list[str]:
 
 
 # SOS-08-C wave-3-f (2026-05-24 §15): event-object binding regex.
-# Mirror of SV walker's _EVENT_PAYLOAD_RE — matches `event.<EV>.value`.
+# Wave-3-f-future-A: extended to capture the suffix after `event.<EV>.`
+# so `event.<EV>.<custom>` surfaces with an actionable wave-3-f-future-B
+# citation (multi-`<param>` event payload composition needs upstream
+# wave-3-e port-shape changes).
 _EVENT_PAYLOAD_RE = re.compile(
-    r"^\s*event\.([A-Za-z_][A-Za-z0-9_\-]*)\.value\s*$"
+    r"^\s*event\.([A-Za-z_][A-Za-z0-9_\-]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*$"
 )
 
 
@@ -996,34 +1004,56 @@ def _collect_region_event_payload_captures(
 ) -> list[HdlEventPayloadCapture]:
     """SOS-08-C wave-3-f (2026-05-24 §15) — VHDL-side mirror of the SV
     walker's ``_collect_region_event_payload_captures``. Walks each
-    state's ``onentry_assigns`` and extracts records matching
-    ``expr="event.<EV>.value"``. Validates the event is consumed by
-    the region (hard error) per the SV walker's contract.
+    state's ``onentry_assigns`` AND (wave-3-f-future-A) ``onexit_assigns``
+    and extracts records matching ``expr="event.<EV>.value"``. Validates
+    the event is consumed by the region (hard error) per the SV walker's
+    contract; rejects custom suffixes with a wave-3-f-future-B citation.
     """
     captures: list[HdlEventPayloadCapture] = []
     consume_events = set(_collect_region_consume_events(region))
+
+    def _process(assign: HdlAssign, state: HdlState, edge: str) -> None:
+        m = _EVENT_PAYLOAD_RE.match(assign.expr)
+        if not m:
+            return
+        event_name = m.group(1)
+        suffix = m.group(2)
+        if suffix != "value":
+            raise UnsupportedChartError(
+                f"SOS-08-C wave-3-f-future-B (VHDL): <on{edge}><assign "
+                f"location='{assign.location}' expr='event.{event_name}."
+                f"{suffix}'/> uses a non-`value` suffix; the wave-3-e "
+                f"payload-bearing event port shape carries a single "
+                f"unnamed bus (``event_{event_name}_recv_data``). "
+                f"Multi-`<param>` event payload composition is deferred "
+                f"to a future wave-3-f-future-B amendment + upstream "
+                f"wave-3-e port-shape extension."
+            )
+        if event_name not in consume_events:
+            raise UnsupportedChartError(
+                f"SOS-08-C wave-3-f (VHDL): <on{edge}><assign "
+                f"location='{assign.location}' "
+                f"expr='event.{event_name}.value'/> references event "
+                f"`{event_name}` which is NOT a consume event of "
+                f"region `{region.name}`. Consume events: "
+                f"{sorted(consume_events) or '<none>'}."
+            )
+        captures.append(
+            HdlEventPayloadCapture(
+                state_id=state.state_id,
+                location=assign.location,
+                event_name=event_name,
+                edge=edge,
+            )
+        )
+
     for state in region.states:
         for assign in state.onentry_assigns:
-            m = _EVENT_PAYLOAD_RE.match(assign.expr)
-            if not m:
-                continue
-            event_name = m.group(1)
-            if event_name not in consume_events:
-                raise UnsupportedChartError(
-                    f"SOS-08-C wave-3-f (VHDL): <onentry><assign "
-                    f"location='{assign.location}' "
-                    f"expr='event.{event_name}.value'/> references event "
-                    f"`{event_name}` which is NOT a consume event of "
-                    f"region `{region.name}`. Consume events: "
-                    f"{sorted(consume_events) or '<none>'}."
-                )
-            captures.append(
-                HdlEventPayloadCapture(
-                    state_id=state.state_id,
-                    location=assign.location,
-                    event_name=event_name,
-                )
-            )
+            _process(assign, state, "entry")
+        # SOS-08-C wave-3-f-future-A (2026-05-24 §15): mirror walk over
+        # `<onexit>` captures; gating inverted in the register emit.
+        for assign in state.onexit_assigns:
+            _process(assign, state, "exit")
     return captures
 
 
@@ -1450,11 +1480,20 @@ def _emit_register_process(
         for idx, cap in enumerate(cap_list):
             ev_ident = _safe_event_ident_vhdl(cap.event_name)
             state_const = _state_constant_name(cap.state_id)
-            cond = (
-                f"state_q /= {state_const} and "
-                f"state_next = {state_const} and "
-                f"event_{ev_ident}_recv_valid = '1'"
-            )
+            # SOS-08-C wave-3-f-future-A (2026-05-24 §15): edge gating
+            # inverts for `<onexit>` captures.
+            if cap.edge == "exit":
+                cond = (
+                    f"state_q = {state_const} and "
+                    f"state_next /= {state_const} and "
+                    f"event_{ev_ident}_recv_valid = '1'"
+                )
+            else:
+                cond = (
+                    f"state_q /= {state_const} and "
+                    f"state_next = {state_const} and "
+                    f"event_{ev_ident}_recv_valid = '1'"
+                )
             keyword = (
                 "                if" if idx == 0 else "                elsif"
             )
