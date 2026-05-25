@@ -752,3 +752,59 @@ The Surfer reference flow is identical structurally; the host-side wiring of `Op
 **Cited PCDNs / invariants**: PCDN-G-001 (envelope extensibility at v1.0 — `vector_source` is an additive optional field under the wave-3b precedent); PCDN-G-003 / -005 / -006 (unchanged); INV-S-HDL-G-1 through G-6 (preserved, with G-2 and G-6 extended in spirit per above); INV-SOS-H (chart vocabulary survives into the editor-side link target).
 
 Status: 🟢 **wave-3c-future (f.1) data layer complete**. §6 (f) splits cleanly: f.1 closed by this entry; f.2 GUI invocation layer remains gated on upstream viewer-API stability with the wave-3c-future emit forward-compatible with that future stabilisation. Both viewers' §6 (f) status: ⏸ → 🟡 (partial — data layer landed; host-side invocation pending).
+
+### 2026-05-24 — Impl wave-3c-future-f2: §6 (f.2) host-wiring spec (Ira)
+
+Lands the second wave-3c-future carry-forward — the **spec for the GUI invocation layer** that the wave-3c-future (f.1) entry above deferred on upstream-API grounds. (f.2)'s actual host integration is and remains an integrator-side responsibility (gated on GTKWave's keyaction-from-plugin API + Surfer's plugin-host link-back API), so the deliverable for this entry is **the operational runbook + conformance contract** the integrator builds against — NOT the host code itself.
+
+**Closure scope**:
+
+- **§6 (f.2) GUI invocation contract** — specified at [`docs/ops/SOS-08-G-host-wiring.md`](../ops/SOS-08-G-host-wiring.md). The doc names the host-side MUST / SHOULD requirements for both viewer paths (GTKWave `EDITOR`-env-var contract + Tcl proc behaviour; Surfer `OpenVectorSource` command handler shape, idempotency, non-blocking exec, status-bar surfacing). Covers the line-hint convention (`line = vector_index + 2`), failure-mode matrix (editor unavailable, vector_source path missing, vector_index out of range), and security guidance (workspace-root path validation, argv-not-shell-string exec). Cites the canonical viewer-side sources: `tools/sos-codegen/viewers/gtkwave/sos_overlay.tcl` (the shipped `sos_open_vector_at` proc) and `tools/sos-codegen/viewers/surfer/sos-surfer-plugin/src/lib.rs` (the `OpenVectorSource` enum variant + `render_commands_with_vector_source` emit). **CLOSED by this entry** at the spec level.
+- **§6 (f.2) host implementation** — REMAINS open. GTKWave: user-configured `EDITOR` + `~/.gtkwaverc` keybinding is achievable today (host-wiring doc §2.5); auto-binding waits on the keyaction-from-plugin API. Surfer: full handler implementation waits on plugin-host link-back API stabilisation. Once upstream stabilises, the integration drops into the host-wiring contract verbatim — the spec carry-forward does not need to wait for the implementation carry-forward.
+
+Re-reading §6 (f) under the wave-3c-future (f.1) + (f.2) split:
+
+| Status axis | (f.1) data layer | (f.2) GUI invocation |
+|---|---|---|
+| Spec | ✅ closed (wave-3c-future §15 entry above) | ✅ closed (this entry; `docs/ops/SOS-08-G-host-wiring.md`) |
+| Impl — GTKWave | ✅ emit landed; `sos_open_vector_at` proc shipped | 🟡 user-configurable today; auto-binding upstream-gated |
+| Impl — Surfer | ✅ emit landed; `OpenVectorSource` variant shipped | ⏸ host-side handler upstream-gated |
+
+**§6 conformance matrix update** (extending the wave-3c entry's matrix with the (f.2) row split):
+
+| Gate | GTKWave | Surfer | Notes |
+|------|---------|--------|-------|
+| (f.1) data layer (emit) | ✅ | ✅ | Closed by wave-3c-future entry (8d95152) |
+| (f.2) GUI invocation (host) | 🟡 doc'd / impl deferred upstream | 🟡 doc'd / impl deferred upstream | `docs/ops/SOS-08-G-host-wiring.md` is the integrator-facing contract; host impl waits on upstream-API stability |
+
+**What (f.2) closes**:
+
+- The integrator-facing **contract** for translating emitted drill-down artifacts into editor invocations.
+- The **line-hint convention** (`vector_index + 2`) is named in the spec (was previously a comment-only fact in the Tcl proc) — so a Surfer host implementer working from the spec arrives at the same line offset as the GTKWave Tcl path by construction, not by reading the .tcl source.
+- The **failure-mode discipline** (non-blocking exec, status-bar surfacing, no wave-file mutation) is now a normative MUST list rather than implicit-by-example.
+- The **security discipline** (workspace-root path validation, argv-not-shell-string exec) is named as a SHOULD with explicit rationale; a host that skips it is partially conforming with a documented gap.
+
+**What stays open**:
+
+- **GTKWave keyaction-from-plugin auto-binding** — requires upstream API exposure; users currently bind manually via `~/.gtkwaverc`.
+- **Surfer plugin-host link-back routing** — requires upstream plugin-host link-back API. The host-wiring §3.3 reference handler sketch is forward-compatible with whatever shape Surfer's SDK lands.
+- **Per-overlay scoping for `::sos_vector_source` under multiple loaded overlays** — host-wiring §5 documents the last-write-wins surprise as a known limitation; a future amendment MAY introduce per-overlay scoping if user feedback warrants.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-G-1 through G-6** — preserved, no code/emit changes. This entry is a doc-only landing.
+- **INV-SOS-A** (chart-as-source) — preserved; the host-wiring doc lives in `docs/ops/` (an operational runbook), not in a code path that mutates charts.
+- **INV-SOS-C** (MCP as sole modification surface) — preserved; host-wiring is read-only WRT the wave file (host-wiring §5 hard-invariants).
+- **INV-SOS-H** (vector-to-chart traceability) — strengthened: the host-wiring contract MUST surface `chart_state` in status-bar feedback (host-wiring §3.2(e)), so the chart-vocabulary tooltip survives all the way from the JSONL overlay into the user's editor-launch confirmation.
+
+**Files cited** (additions to §13):
+
+- [`docs/ops/SOS-08-G-host-wiring.md`](../ops/SOS-08-G-host-wiring.md) — integrator-facing runbook; canonical spec for §6 (f.2) host-side contract.
+
+**Test count**: net +1 Python test module — `tools/sos-codegen/tests/test_sos_08_g_wave_3c_future_f2_docs.py` — asserts the host-wiring doc exists with the required section headings, cites `EDITOR` env var (GTKWave path) + `OpenVectorSource` (Surfer path) + `vector_index + 2` (line-hint convention), and cites both viewer-side sources. Also asserts this §15 `2026-05-24` entry is present in `SOS-08-G-CONCEPTS.md`.
+
+**Test suite**: Python: 689 + N passing (689 prior wave-3c-future baseline + the new f.2 doc-assertion tests). Rust: 9/9 (unchanged — this is a doc-only landing).
+
+**Cited PCDNs / invariants**: PCDN-G-001 (`_meta` envelope at v1.0 — unchanged); INV-S-HDL-G-1 through G-6 (preserved); INV-SOS-A, INV-SOS-C, INV-SOS-H (cited; H strengthened in spirit).
+
+Status: 🟢 **wave-3c-future (f.2) host-wiring spec complete**. §6 (f) data-layer half (f.1) + spec half (f.2) both closed; only the (f.2) host-side implementation remains upstream-gated, and the integrator now has an unambiguous contract to build against the moment those APIs stabilise.
