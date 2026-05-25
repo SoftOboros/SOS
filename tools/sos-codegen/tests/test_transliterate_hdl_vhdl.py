@@ -749,13 +749,17 @@ class TestWave3fEventPayloadCaptureVhdl:
         assert "last_value_q <= last_value_q" in vhd
 
     def test_capture_target_is_consume_event_check(self):
+        """SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): rebadged
+        from "NOT a consume event" to "not raised anywhere in the
+        chart" — the cross-region rule replaces the per-region
+        consume-event check with a chart-wide raiser check."""
         chart = self._chart_with_capture()
         chart["state"][1]["onentry"][0]["assign"][0]["expr"] = (
             "event.nonsense.value"
         )
         with pytest.raises(
             UnsupportedChartError,
-            match="NOT a consume event",
+            match="not raised anywhere in the chart",
         ):
             render_target(chart, {"chart_name": "cap"})
 
@@ -1134,3 +1138,434 @@ class TestWave3fFutureAssignLoweringVhdl:
             match=r"wave-3-f-future-assign.*string literal",
         ):
             render_target(chart, {"chart_name": "a"})
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-C wave-3-f-future-xreg (2026-05-24 §15) — VHDL mirror of the SV
+# walker's cross-region event-value capture tests.  Test list MUST match
+# the SV class one-for-one per the §15 wave-3-f-future-xreg conformance
+# matrix (cross-walker parity).
+# ---------------------------------------------------------------------------
+
+
+class TestWave3fFutureCrossRegionEventCaptureVhdl:
+    """VHDL mirror of the SV ``TestWave3fFutureCrossRegionEventCapture``
+    class — every test asserts the VHDL emit shape (signed casts,
+    VHDL ``or`` operator, ``report ... severity warning`` instead of
+    SV ``$warning``)."""
+
+    @staticmethod
+    def _chart_cross_region(
+        *,
+        capture_edge: str = "onentry",
+        capture_state: str = "R2",
+        capture_location: str = "last",
+        raised_event: str = "tick",
+        capture_event: str | None = None,
+    ):
+        capture_event = capture_event or raised_event
+        capture_state_obj: dict = {"id": capture_state}
+        capture_state_obj[capture_edge] = [{"assign": [
+            {"location": capture_location,
+             "expr": f"event.{capture_event}.value"},
+        ]}]
+        if capture_state == "R1":
+            r1 = capture_state_obj
+            r1["transition"] = [{"target": "R2"}]
+            r2 = {"id": "R2"}
+        else:
+            r1 = _state("R1", transitions=[{"target": "R2"}])
+            r2 = capture_state_obj
+            r2["transition"] = [{"target": "R1"}]
+        return {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[
+                            {"target": "L2", "raise_value": [
+                                {"event": raised_event, "param": [
+                                    {"name": "value", "expr": "1"},
+                                ]},
+                            ]},
+                        ]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1",
+                     "datamodel": [
+                         {"data": [{"id": capture_location, "expr": "0",
+                                    "type": "i32"}]},
+                     ],
+                     "state": [r1, r2]},
+                ],
+            }],
+        }
+
+    @staticmethod
+    def _chart_intra_only():
+        return {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1",
+                     "datamodel": [
+                         {"data": [{"id": "lcap", "expr": "0",
+                                    "type": "i32"}]},
+                     ],
+                     "state": [
+                         _state("L1", transitions=[
+                             {"target": "L2", "raise_value": [
+                                 {"event": "lev", "param": [
+                                     {"name": "value", "expr": "1"},
+                                 ]},
+                             ]},
+                         ]),
+                         {"id": "L2",
+                          "onentry": [{"assign": [
+                              {"location": "lcap",
+                               "expr": "event.lev.value"},
+                          ]}],
+                          "transition": [
+                              {"event": "lev", "target": "L1"},
+                          ]},
+                     ]},
+                    {"id": "right", "initial": "R1",
+                     "datamodel": [
+                         {"data": [{"id": "rcap", "expr": "0",
+                                    "type": "i32"}]},
+                     ],
+                     "state": [
+                         _state("R1", transitions=[
+                             {"target": "R2", "raise_value": [
+                                 {"event": "rev", "param": [
+                                     {"name": "value", "expr": "2"},
+                                 ]},
+                             ]},
+                         ]),
+                         {"id": "R2",
+                          "onentry": [{"assign": [
+                              {"location": "rcap",
+                               "expr": "event.rev.value"},
+                          ]}],
+                          "transition": [
+                              {"event": "rev", "target": "R1"},
+                          ]},
+                     ]},
+                ],
+            }],
+        }
+
+    @staticmethod
+    def _chart_multi_raiser():
+        """Three-region chart: ``a`` and ``b`` both raise ``shared``;
+        ``c`` captures via a cross-region <onentry>."""
+        return {
+            "initial": "p",
+            "parallel": [{"id": "p", "state": [
+                {"id": "a", "initial": "A1", "state": [
+                    _state("A1", transitions=[
+                        {"target": "A2", "raise_value": [
+                            {"event": "shared", "param": [
+                                {"name": "value", "expr": "10"},
+                            ]},
+                        ]},
+                    ]),
+                    _state("A2"),
+                ]},
+                {"id": "b", "initial": "B1", "state": [
+                    _state("B1", transitions=[
+                        {"target": "B2", "raise_value": [
+                            {"event": "shared", "param": [
+                                {"name": "value", "expr": "20"},
+                            ]},
+                        ]},
+                    ]),
+                    _state("B2"),
+                ]},
+                {"id": "c", "initial": "C1",
+                 "datamodel": [
+                     {"data": [{"id": "buf", "expr": "0",
+                                "type": "i32"}]},
+                 ],
+                 "state": [
+                     _state("C1", transitions=[{"target": "C2"}]),
+                     {"id": "C2",
+                      "onentry": [{"assign": [
+                          {"location": "buf",
+                           "expr": "event.shared.value"},
+                      ]}],
+                      "transition": [{"target": "C1"}]},
+                 ]},
+            ]}],
+        }
+
+    # ----- Byte-identity regression guard -----
+
+    def test_byte_identity_when_chart_has_only_intra_region_captures(self):
+        files = render_target(
+            self._chart_intra_only(), {"chart_name": "intra"}
+        )
+        top = files["intra_top.vhd"]
+        assert "chart_event_" not in top
+        assert "wave-3-f-future-xreg" not in top
+        # Intra-region capture still emitted in consumer region.
+        left_fsm = files["intra_region_left_fsm.vhd"]
+        assert "lcap_q <= signed(event_lev_recv_data)" in left_fsm
+
+    # ----- Cross-region capture wires from chart-top bus -----
+
+    def test_cross_region_capture_wires_from_chart_top_bus(self):
+        files = render_target(
+            self._chart_cross_region(), {"chart_name": "x"}
+        )
+        right_fsm = files["x_region_right_fsm.vhd"]
+        # Region B has the recv_valid/recv_data input ports.
+        assert "event_tick_recv_valid : in std_logic" in right_fsm
+        assert (
+            "event_tick_recv_data : in std_logic_vector(7 downto 0)"
+            in right_fsm
+        )
+        # Capture branch with signed-cast.
+        assert (
+            "state_q /= ST_R2 and state_next = ST_R2 and "
+            "event_tick_recv_valid = '1'"
+        ) in right_fsm
+        assert "last_q <= signed(event_tick_recv_data)" in right_fsm
+        # Chart-top broadcast bus signals declared.
+        top = files["x_top.vhd"]
+        assert "chart_event_tick_raise_valid" in top
+        assert "chart_event_tick_raise_data" in top
+
+    # ----- Bus signal naming -----
+
+    def test_chart_top_bus_signal_naming(self):
+        files = render_target(
+            self._chart_cross_region(), {"chart_name": "n"}
+        )
+        top = files["n_top.vhd"]
+        # VHDL signal declaration.
+        assert (
+            "signal chart_event_tick_raise_valid : std_logic;"
+            in top
+        )
+        assert (
+            "signal chart_event_tick_raise_data : "
+            "std_logic_vector(7 downto 0);"
+            in top
+        )
+        # Concurrent assignment aliasing.
+        assert (
+            "chart_event_tick_raise_valid <= ev_tick_send_valid"
+            in top
+        )
+        assert (
+            "chart_event_tick_raise_data <= ev_tick_send_data"
+            in top
+        )
+
+    # ----- Multi-raiser OR aggregation -----
+
+    def test_multi_raiser_or_aggregation(self):
+        files = render_target(
+            self._chart_multi_raiser(), {"chart_name": "agg"}
+        )
+        top = files["agg_top.vhd"]
+        # Existing aggregated valid uses VHDL `or` operator.
+        assert (
+            "ev_shared_send_valid <= "
+            "w_ev_a_shared_pulse or w_ev_b_shared_pulse"
+            in top
+        )
+        assert (
+            "chart_event_shared_raise_valid <= ev_shared_send_valid"
+            in top
+        )
+
+    # ----- Multi-raiser priority mux (lower-doc-order wins) -----
+
+    def test_multi_raiser_priority_mux_lower_region_wins(self):
+        files = render_target(
+            self._chart_multi_raiser(), {"chart_name": "pri"}
+        )
+        top = files["pri_top.vhd"]
+        # `raisers: a, b` comment documents the priority order.
+        assert "raisers: a, b" in top
+        assert "priority to first" in top
+
+    # ----- Same-cycle conflict report -----
+
+    def test_same_cycle_conflict_emits_runtime_warning(self):
+        files = render_target(
+            self._chart_multi_raiser(), {"chart_name": "warn"}
+        )
+        top = files["warn_top.vhd"]
+        # VHDL `report ... severity warning` instead of SV $warning.
+        assert "severity warning" in top
+        assert (
+            "same-cycle multi-raiser conflict on chart event `shared`"
+            in top
+        )
+        # Surrounded by synthesis pragma so synthesisers ignore it.
+        assert "pragma synthesis_off" in top
+        assert "pragma synthesis_on" in top
+
+    # ----- Chart-vocab error: unraised event -----
+
+    def test_unraised_event_capture_raises_chart_vocab_error(self):
+        chart = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1", "state": [
+                        _state("L1", transitions=[{"target": "L2"}]),
+                        _state("L2"),
+                    ]},
+                    {"id": "right", "initial": "R1",
+                     "datamodel": [
+                         {"data": [{"id": "buf", "expr": "0",
+                                    "type": "i32"}]},
+                     ],
+                     "state": [
+                         _state("R1", transitions=[{"target": "R2"}]),
+                         {"id": "R2",
+                          "onentry": [{"assign": [
+                              {"location": "buf",
+                               "expr": "event.ghost.value"},
+                          ]}],
+                          "transition": [{"target": "R1"}]},
+                     ]},
+                ],
+            }],
+        }
+        with pytest.raises(
+            UnsupportedChartError,
+            match=(
+                r"SOS-08-C wave-3-f-future-xreg.*"
+                r"'ghost'.*not raised anywhere in the chart"
+            ),
+        ):
+            render_target(chart, {"chart_name": "u"})
+
+    # ----- Entry edge -----
+
+    def test_onentry_cross_region_capture_on_entry_edge_only(self):
+        files = render_target(
+            self._chart_cross_region(
+                capture_edge="onentry", capture_state="R2",
+                capture_location="last",
+            ),
+            {"chart_name": "enen"},
+        )
+        right_fsm = files["enen_region_right_fsm.vhd"]
+        assert (
+            "state_q /= ST_R2 and state_next = ST_R2 and "
+            "event_tick_recv_valid = '1'"
+        ) in right_fsm
+        # No exit-edge form.
+        assert (
+            "state_q = ST_R2 and state_next /= ST_R2 and "
+            "event_tick_recv_valid = '1'"
+        ) not in right_fsm
+
+    # ----- Exit edge -----
+
+    def test_onexit_cross_region_capture_on_exit_edge_only(self):
+        files = render_target(
+            self._chart_cross_region(
+                capture_edge="onexit", capture_state="R1",
+                capture_location="last",
+            ),
+            {"chart_name": "exit"},
+        )
+        right_fsm = files["exit_region_right_fsm.vhd"]
+        assert (
+            "state_q = ST_R1 and state_next /= ST_R1 and "
+            "event_tick_recv_valid = '1'"
+        ) in right_fsm
+
+    # ----- Intra-region capture coexists with xreg -----
+
+    def test_intra_region_capture_continues_to_work_for_same_event_in_chart_with_xreg(
+        self,
+    ):
+        chart = {
+            "initial": "p",
+            "parallel": [{
+                "id": "p",
+                "state": [
+                    {"id": "left", "initial": "L1",
+                     "datamodel": [
+                         {"data": [{"id": "lcap", "expr": "0",
+                                    "type": "i32"}]},
+                     ],
+                     "state": [
+                         _state("L1", transitions=[
+                             {"target": "L2", "raise_value": [
+                                 {"event": "tick", "param": [
+                                     {"name": "value", "expr": "7"},
+                                 ]},
+                             ]},
+                         ]),
+                         {"id": "L2",
+                          "onentry": [{"assign": [
+                              {"location": "lcap",
+                               "expr": "event.tick.value"},
+                          ]}],
+                          "transition": [
+                              {"event": "tick", "target": "L1"},
+                          ]},
+                     ]},
+                    {"id": "right", "initial": "R1",
+                     "datamodel": [
+                         {"data": [{"id": "rcap", "expr": "0",
+                                    "type": "i32"}]},
+                     ],
+                     "state": [
+                         _state("R1", transitions=[{"target": "R2"}]),
+                         {"id": "R2",
+                          "onentry": [{"assign": [
+                              {"location": "rcap",
+                               "expr": "event.tick.value"},
+                          ]}],
+                          "transition": [{"target": "R1"}]},
+                     ]},
+                ],
+            }],
+        }
+        files = render_target(chart, {"chart_name": "mix"})
+        left_fsm = files["mix_region_left_fsm.vhd"]
+        right_fsm = files["mix_region_right_fsm.vhd"]
+        # Intra-region (left) shape.
+        assert (
+            "state_q /= ST_L2 and state_next = ST_L2 and "
+            "event_tick_recv_valid = '1'"
+        ) in left_fsm
+        assert "lcap_q <= signed(event_tick_recv_data)" in left_fsm
+        # Cross-region (right) shape.
+        assert (
+            "state_q /= ST_R2 and state_next = ST_R2 and "
+            "event_tick_recv_valid = '1'"
+        ) in right_fsm
+        assert "rcap_q <= signed(event_tick_recv_data)" in right_fsm
+        # Chart-top broadcast bus present.
+        top = files["mix_top.vhd"]
+        assert "chart_event_tick_raise_valid" in top
+
+    # ----- Chart-event raiser map -----
+
+    def test_chart_event_raiser_map_built_correctly(self):
+        from _chart_events import build_chart_event_raiser_map
+        import transliterate_hdl_vhdl
+
+        chart = (
+            TestWave3fFutureCrossRegionEventCaptureVhdl
+            ._chart_multi_raiser()
+        )
+        parsed = transliterate_hdl_vhdl._normalise_chart(chart, "rmap")
+        raiser_map = build_chart_event_raiser_map(parsed.regions)
+        assert "shared" in raiser_map
+        assert raiser_map["shared"] == ["a", "b"]
+        assert "ghost" not in raiser_map

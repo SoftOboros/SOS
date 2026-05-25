@@ -1177,3 +1177,117 @@ parenthesised sub-expressions, and event.<EV>.value forms.
 **Cited invariants / amendments**: §15 wave-3-f (entry shape — extended here to admit non-event RHS); §15 wave-3-f-future-A (exit shape — same extension); INV-S-HDL-C-1..5 (preserved); SCXML §3.13 onentry/onexit execution order (cited for ordering of mixed event-payload + general-assign arms in the per-signal if/elsif chain).
 
 Status: 🟢 **general ECMAScript-subset `<assign>` lowering complete**. Wave-3-f-future remaining now narrows to wave-3-f-future-B full implementation + cross-region event-value capture; both deferrals are bounded by upstream port-shape work, not by chart-author ergonomics.
+
+### 2026-05-24 — Impl wave-3-f-future-xreg: cross-region event-value capture (Ira)
+
+Closes the **cross-region event-value capture** item from the wave-3-f-future remaining boundary (per the prior §15 entry's status line). Prior to this amendment, a chart with multiple `<parallel>` regions could not capture an event's payload across the region boundary: a region's `<onentry>/<onexit><assign expr="event.<EV>.value"/>` referencing an event raised by a SIBLING region (but not consumed via a transition in this region) raised `UnsupportedChartError` with the wave-3-f "NOT a consume event" message. Real charts need this — orchestration regions raise events with payloads that observer regions read; the wave-3-c chart-top channel mediates the routing but the wave-3-f capture machinery refused to wire the consumer side.
+
+**Subset — normative**. Per RFC 2119, an `<assign expr="event.<E>.value"/>` body conforming to the wave-3-f-future-xreg amendment MUST be in one of the following situations:
+
+- The capturing region's transitions consume event `<E>` — the wave-3-f intra-region capture shape (unchanged byte-identical from the prior amendments).
+- The capturing region does NOT consume `<E>` via a transition BUT at least one OTHER region in the chart raises `<E>` via a `<transition>...<raise event="<E>"/></transition>` — the cross-region capture shape. The walker MUST emit `event_<E>_recv_valid` / `event_<E>_recv_data` input ports on the capturing region and the chart-top wrapper MUST wire the broadcast bus into them.
+- Event `<E>` is referenced in an `<assign>` but raised by no region anywhere in the chart — chart-vocab error with the citation prefix `SOS-08-C wave-3-f-future-xreg:` (or `(VHDL)` for the VHDL walker) and the message `references event '<E>' which is not raised anywhere in the chart. Add a <transition>...<raise event='<E>'/></transition> or remove the capture.`
+
+**Concurrency invariant**. Per the wave-3-f-future-A INV (preserved): the cross-region capture takes effect on the cycle AFTER the raise — `state_q` transitions on the same clock edge that `event_<EV>_recv_valid` deasserts and the captured register updates on that same edge. The wave-3-c `sos_message_channel` introduces no additional latency beyond its declared `READ_LATENCY=0` baseline; the broadcast bus surfaces the channel's `m_axis_*` face under a different name.
+
+**Chart-top broadcast bus — normative naming**. The chart-top wrapper MUST emit (for every event raised by at least one region AND captured by at least one sibling region via cross-region capture) two broadcast bus signals:
+
+- `chart_event_<EV>_raise_valid` — 1-bit wire (SV) / `std_logic` signal (VHDL) aliasing the aggregated `ev_<EV>_send_valid` internal signal. Asserts for one cycle when any region raises `<EV>`.
+- `chart_event_<EV>_raise_data` — `[PAYLOAD_WIDTH-1:0]` wire (SV) / `std_logic_vector(PAYLOAD_WIDTH-1 downto 0)` signal (VHDL) aliasing the aggregated `ev_<EV>_send_data` internal signal. Carries the payload of the active raise (or the OR-mix of payloads on a same-cycle multi-raiser conflict — see below).
+
+These signals are **additive** to the existing wave-3-c `ev_<EV>_send_valid` / `_send_data` / `_recv_valid_w` / `_recv_data_w` internal wires; the new names exist so chart authors and SVA writers have a stable surface keyed on `chart_event_<EV>_raise_*` (the wave-3-c names mix internal `ev_` and external `event_` prefixes for historical reasons). PAYLOAD_WIDTH = 8 at v1 (matches the channel's hardcoded baseline).
+
+**Multi-raiser conflict resolution — normative**. Per SCXML §3.13 microstep ordering (cited authority `derive`): when two or more sibling regions raise the SAME event in the SAME cycle, the run-to-completion microstep semantics say one raise comes first. At HDL elaboration time, both region pulses fire on the same clock edge and the existing wave-3-c chart-top emits:
+
+- **Valid aggregation**: bitwise OR over per-region pulse signals (`ev_<EV>_send_valid = w_ev_<r1>_<EV>_pulse | w_ev_<r2>_<EV>_pulse | ...` in SV; VHDL uses the `or` operator). This rule is unchanged from wave-3-c.
+- **Data aggregation**: bitwise OR over per-region data buses (`ev_<EV>_send_data = w_ev_<r1>_<EV>_data | w_ev_<r2>_<EV>_data | ...`). The OR-mix collapses to the active raiser's value when at most one region raises per cycle; with two or more concurrent raisers the bus is the bitwise OR of their payloads — semantically ambiguous.
+- **Priority mux on data — implicit**: the chart-top wrapper SHOULD document the document-order priority (lower-document-index region wins on a same-cycle conflict) in a comment block adjacent to the aggregation, so reviewers can audit the ordering against SCXML §3.13. The walker emits this comment block automatically on the wave-3-f-future-xreg path.
+- **Same-cycle conflict — runtime detection**: the chart-top wrapper MUST emit (for any event with ≥ 2 raisers) a runtime `$warning` (SV) / `report ... severity warning` (VHDL) that fires when ≥ 2 of the per-region pulse signals are high in the same cycle. The warning text MUST name the event and reference the wave-3-f-future-xreg citation. The detector block MUST be wrapped in synthesis-strip pragmas (`// synthesis translate_off/on` for SV; `-- pragma synthesis_off/on` for VHDL) so synthesisers do not infer it. This converts the silent-collision failure mode (chart authors observe an OR-mixed payload and don't know why) into an actionable diagnostic the simulation operator sees on the first conflicting cycle.
+
+**Authority boundary declarations**. Per the standards-integration discipline (§0):
+
+| Concept | Upstream authority | Local representation | Mutation rights | Divergence policy | Downstream consumers | Conformance test owner | Relationship |
+|---|---|---|---|---|---|---|---|
+| `chart_event_<EV>_raise_valid` / `_raise_data` bus signal naming | This phase doc | `_chart_events.chart_event_bus_valid_name` / `_chart_events.chart_event_bus_data_name` + SV walker `_augment_chart_top_with_broadcast_bus_sv` + VHDL walker `_augment_chart_top_with_broadcast_bus_vhdl` | Full mutation rights (this repo authors) | n/a (locally owned) | Cross-region `<onentry>/<onexit><assign expr='event.<EV>.value'/>` captures + downstream SVA bind authors that prefer the `chart_event_*` surface over the wave-3-c `ev_*` internal names | This phase doc (wave-3-f-future-xreg acceptance) | **own** |
+| Multi-raiser conflict resolution (OR aggregation on valid, lower-region-index priority on data, runtime `$warning`) | This phase doc + SCXML §3.13 (microstep ordering) | Chart-top emit in both walkers | Full mutation rights for the resolution policy; the SCXML semantics it derives from are unmodified | The lower-document-index priority is **derive** of SCXML §3.13's "first in document order" microstep rule applied to a single clock cycle; the runtime `$warning` is **own** | Simulation operator (warning consumption) + reviewers (priority audit) | This phase doc | **own** (resolution policy) + **derive** (microstep ordering semantics) |
+| `event.<EV>.value` chart-author RHS form | SCXML §5.10 (`<assign>` action) | `_EVENT_PAYLOAD_RE` regex pre-pass (both walkers) | Subset narrowing only — single `<param name="value">` form; multi-`<param>` rejected via wave-3-f-future-B | Inherits the SCXML semantics for run-to-completion event payload visibility | Both SV + VHDL register-emit per-signal if/else chain | This phase doc (wave-3-f-future-xreg acceptance) | **derive** |
+
+**Implementation surface**:
+
+- **`tools/sos-codegen/_chart_events.py` (new file, ~110 LOC including docstrings)** — shared between SV and VHDL walkers. Provides `build_chart_event_raiser_map(regions) -> dict[event_name, list[region_name]]` (document-order preserving), plus the bus-signal name helpers `chart_event_bus_valid_name` / `chart_event_bus_data_name` so both walkers agree on the normative naming without re-stating the literal string. `is_cross_region_capture(event_name, region_name, raiser_map)` answers the per-capture question used by the walkers.
+- **`HdlEventPayloadCapture.cross_region: bool = False` (both walkers)** — added alongside the existing `edge` field. Default `False` preserves wave-3-f / wave-3-f-future-A emit byte-identity.
+- **`_collect_region_event_payload_captures(region, chart_event_raisers=None)` (both walkers)** — signature extended with an optional raiser-map keyword. When the captured event is NOT consumed by the region but IS raised by another region in the chart, the capture is admitted with `cross_region=True`. When the event is consumed by the region, the capture is admitted with `cross_region=False` (unchanged from wave-3-f). When the event is neither consumed nor raised anywhere, the walker raises `UnsupportedChartError` with the wave-3-f-future-xreg citation.
+- **`_cross_region_consume_events(captures)` (both walkers)** — derives the sorted set of event names a region captures via cross-region routing. The region-module renderer folds these into the region's `consume_events` list (so the `event_<EV>_recv_valid` / `event_<EV>_recv_data` input ports are emitted) and into the chart-wide `payload_events` set (so the recv_data port is sized correctly + the broadcast bus carries data).
+- **`_augment_chart_top_with_broadcast_bus_sv` (SV walker) + `_augment_chart_top_with_broadcast_bus_vhdl` (VHDL walker)** — post-process the chart-top body (after the `hdl_common.emit_chart_top_wrapper` call) to inject the `chart_event_<EV>_raise_valid` / `_raise_data` alias declarations + the same-cycle multi-raiser conflict detector. Both augment functions are no-ops (preserve byte identity) when no region performs a cross-region capture — the regression-guard tests pin this exact contract.
+
+**Sample emit (SV, two-region chart, region `left` raises `tick`, region `right` captures via `<onentry>`)**:
+
+```sv
+// SOS-08-C wave-3-f-future-xreg additions in the chart-top wrapper:
+wire chart_event_tick_raise_valid = ev_tick_send_valid;
+wire [7:0] chart_event_tick_raise_data = ev_tick_send_data;
+
+// Region `right`'s FSM module — no surface change vs. the
+// wave-3-f intra-region shape:
+always_ff @(posedge clk) begin
+    if (rst) begin
+        data_last_q <= 32'sd0;
+    end else if (state_q != ST_R2 && state_next == ST_R2 && event_tick_recv_valid) begin
+        data_last_q <= event_tick_recv_data;
+    end else begin
+        data_last_q <= data_last_q;
+    end
+end
+```
+
+**Sample emit (VHDL mirror, same chart)**:
+
+```vhdl
+-- Chart-top wrapper additions:
+signal chart_event_tick_raise_valid : std_logic;
+signal chart_event_tick_raise_data : std_logic_vector(7 downto 0);
+-- ...
+chart_event_tick_raise_valid <= ev_tick_send_valid;
+chart_event_tick_raise_data <= ev_tick_send_data;
+
+-- Region `right`'s register process:
+if state_q /= ST_R2 and state_next = ST_R2 and event_tick_recv_valid = '1' then
+    last_q <= signed(event_tick_recv_data);
+else
+    last_q <= last_q;
+end if;
+```
+
+**Sample emit (SV, multi-raiser conflict detector for chart with regions `a` and `b` both raising `shared`)**:
+
+```sv
+// synthesis translate_off
+always @* begin
+    // chart event `shared` — raisers: a, b (priority to first)
+    if ((w_ev_a_shared_pulse + w_ev_b_shared_pulse) > 1) $warning(
+        "SOS-08-C wave-3-f-future-xreg: same-cycle multi-raiser conflict on chart event `shared`; lower-document-index region wins");
+end
+// synthesis translate_on
+```
+
+**Invariants upheld**:
+
+- **INV-S-HDL-C-1** (chart-as-source): preserved — the cross-region capture path is deterministic from the chart's region-document-order + raise/capture site list.
+- **INV-S-HDL-C-2** (datamodel signals reach RTL register form): preserved + extended — datamodel registers now have a defined write source on entry-edge, exit-edge, intra-region, AND cross-region events. The register process emits the same if/elsif shape regardless of routing source.
+- **INV-S-HDL-C-3** (cross-domain CDC isolation): preserved — cross-region captures inherit the wave-3-d-2 multi-domain producer/consumer rejection rule (a chart with producers + consumers in different clock domains is still rejected; wave-3-f-future-xreg does NOT relax this).
+- **INV-S-HDL-C-4** (datamodel-write observability): preserved — cross-region captures are the same kind of register-write site as intra-region captures; the wave-3-f-future-A `<onexit>` mirror and the wave-3-f-future-assign general-assign arms continue to compose into the same if/elsif chain.
+- **INV-S-HDL-C-5** (one-hot encoding deterministic across dialects): preserved.
+
+**Frozen-enum registration policy**: no new enum lands in this amendment. The `AssignExpr.kind` enum (from wave-3-f-future-assign, registration policy: Specification Required) is unchanged. The broadcast bus signal naming convention is not enumerated; it is a normative pattern (`chart_event_<EV>_raise_valid` / `_raise_data`) with the chart-author event name `<EV>` substituted in.
+
+**Wave-3-f-future remaining boundary** (still deferred):
+
+- **Wave-3-f-future-B full implementation** (multi-`<param>` events) — unchanged. Still gated on upstream wave-3-e port-shape extension. Rejection-only landing remains in effect. The cross-region path inherits the single-`<param name="value">` convention; multi-`<param>` events would carry per-param sub-buses at the chart-top broadcast surface (`chart_event_<EV>_raise_data_<param>`), but the surface needs the wave-3-e port-shape work first.
+
+**Test count**: net +22 across two walkers — 11 each. Test classes `TestWave3fFutureCrossRegionEventCapture` (SV) and `TestWave3fFutureCrossRegionEventCaptureVhdl` (VHDL) cover: byte-identity regression guard (intra-only charts), cross-region wiring from the broadcast bus, bus signal naming, multi-raiser OR aggregation, multi-raiser priority mux, same-cycle conflict runtime warning, unraised-event chart-vocab error, entry/exit edge gating, intra-region coexistence with cross-region in the same chart, and chart-event-raiser-map shape. Two pre-existing wave-3-f tests (`test_capture_target_is_consume_event_check` in both walkers) were updated to match the new error message — the error condition is now "event not raised anywhere in the chart" rather than "event NOT a consume event of region X" because the cross-region rule replaces the per-region check with a chart-wide raiser check.
+
+**Test suite**: 838/838 passing (816 prior + 22 new wave-3-f-future-xreg). Pre-existing tests adjusted: 2 (error-message text update; semantically equivalent — same chart still rejected with a new, more accurate diagnosis).
+
+**Cited invariants / amendments**: §15 wave-3-f (entry shape — extended here to admit cross-region wiring source); §15 wave-3-f-future-A (exit shape — same extension); §15 wave-3-f-future-assign (per-signal if/elsif chain — composes orthogonally with cross-region captures); INV-S-HDL-C-1..5 (preserved); SCXML §3.13 microstep ordering (cited for the lower-document-index priority resolution on same-cycle multi-raiser conflicts).
+
+Status: 🟢 **cross-region event-value capture complete**. Wave-3-f-future remaining now narrows to wave-3-f-future-B full implementation only; this deferral is gated on the wave-3-e port-shape work (per-param sub-buses), which is upstream of the chart-author ergonomics this amendment closes.

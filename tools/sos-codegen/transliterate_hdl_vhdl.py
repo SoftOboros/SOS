@@ -103,6 +103,15 @@ from _assign_expr import (
     _render_vhdl,
 )
 
+# SOS-08-C wave-3-f-future-xreg (2026-05-24 §15) — chart-event raiser
+# map + cross-region capture helpers.  Shared with the SV walker;
+# see `_chart_events.py` for the §15 boundary declaration.
+from _chart_events import (
+    build_chart_event_raiser_map,
+    chart_event_bus_data_name,
+    chart_event_bus_valid_name,
+)
+
 # Sibling-agent module. The wave-2 emitter imports the canonical
 # wave-2 surface defensively: helpers that may or may not yet be
 # present in hdl_common at integration time are imported with a
@@ -264,6 +273,12 @@ class HdlEventPayloadCapture:
     location: str
     event_name: str
     edge: str = "entry"
+    # SOS-08-C wave-3-f-future-xreg (2026-05-24 §15) — VHDL mirror of
+    # the SV walker's ``cross_region`` field.  When True, the value
+    # arrives via the chart-top broadcast bus
+    # (``chart_event_<EV>_raise_valid`` / ``_raise_data``) routed back
+    # to the region's ``event_<EV>_recv_valid`` / ``_recv_data`` ports.
+    cross_region: bool = False
 
 
 @dataclass
@@ -1032,14 +1047,27 @@ _EVENT_PAYLOAD_RE = re.compile(
 
 def _collect_region_event_payload_captures(
     region: HdlRegion,
+    chart_event_raisers: dict[str, list[str]] | None = None,
 ) -> list[HdlEventPayloadCapture]:
     """SOS-08-C wave-3-f (2026-05-24 §15) — VHDL-side mirror of the SV
-    walker's ``_collect_region_event_payload_captures``. Walks each
-    state's ``onentry_assigns`` AND (wave-3-f-future-A) ``onexit_assigns``
-    and extracts records matching ``expr="event.<EV>.value"``. Validates
-    the event is consumed by the region (hard error) per the SV walker's
-    contract; rejects custom suffixes with a wave-3-f-future-B citation.
+    walker's ``_collect_region_event_payload_captures``.
+
+    Walks each state's ``onentry_assigns`` AND (wave-3-f-future-A)
+    ``onexit_assigns`` and extracts records matching
+    ``expr="event.<EV>.value"``.  Rejects custom suffixes with a
+    wave-3-f-future-B citation.
+
+    SOS-08-C wave-3-f-future-xreg (2026-05-24 §15) — VHDL mirror of
+    the cross-region capture path.  When the event is consumed by
+    this region's transitions the capture wires intra-region (wave-3-f
+    baseline shape).  When the event is raised by ANOTHER region (but
+    not this one) AND not consumed via a transition in this region,
+    the capture is marked ``cross_region=True``; the chart-top wrapper
+    fans the broadcast bus into the region's input ports.  An event
+    referenced by an assign but never raised anywhere in the chart is
+    a chart-vocab error.
     """
+    chart_event_raisers = chart_event_raisers or {}
     captures: list[HdlEventPayloadCapture] = []
     consume_events = set(_collect_region_consume_events(region))
 
@@ -1060,14 +1088,26 @@ def _collect_region_event_payload_captures(
                 f"to a future wave-3-f-future-B amendment + upstream "
                 f"wave-3-e port-shape extension."
             )
-        if event_name not in consume_events:
+        if event_name in consume_events:
+            captures.append(
+                HdlEventPayloadCapture(
+                    state_id=state.state_id,
+                    location=assign.location,
+                    event_name=event_name,
+                    edge=edge,
+                    cross_region=False,
+                )
+            )
+            return
+        raisers = chart_event_raisers.get(event_name, [])
+        if not raisers:
             raise UnsupportedChartError(
-                f"SOS-08-C wave-3-f (VHDL): <on{edge}><assign "
-                f"location='{assign.location}' "
-                f"expr='event.{event_name}.value'/> references event "
-                f"`{event_name}` which is NOT a consume event of "
-                f"region `{region.name}`. Consume events: "
-                f"{sorted(consume_events) or '<none>'}."
+                f"SOS-08-C wave-3-f-future-xreg (VHDL): <on{edge}><assign "
+                f"expr='event.{event_name}.value'/> in region "
+                f"'{region.name}' references event '{event_name}' "
+                f"which is not raised anywhere in the chart. Add a "
+                f"<transition>...<raise event='{event_name}'/></transition> "
+                f"or remove the capture."
             )
         captures.append(
             HdlEventPayloadCapture(
@@ -1075,6 +1115,7 @@ def _collect_region_event_payload_captures(
                 location=assign.location,
                 event_name=event_name,
                 edge=edge,
+                cross_region=True,
             )
         )
 
@@ -1086,6 +1127,23 @@ def _collect_region_event_payload_captures(
         for assign in state.onexit_assigns:
             _process(assign, state, "exit")
     return captures
+
+
+def _cross_region_consume_events(
+    captures: list[HdlEventPayloadCapture],
+) -> list[str]:
+    """VHDL mirror of the SV walker's ``_cross_region_consume_events``.
+
+    Sorted, de-duplicated list of event names a region captures via
+    wave-3-f-future-xreg cross-region routing.  Folded into the
+    region's consume-event list so the ``event_<EV>_recv_valid`` /
+    ``event_<EV>_recv_data`` input ports are emitted.
+    """
+    seen: set[str] = set()
+    for cap in captures:
+        if cap.cross_region:
+            seen.add(cap.event_name)
+    return sorted(seen)
 
 
 def _collect_region_general_assigns(
@@ -2278,21 +2336,200 @@ def _emit_event_ingress_recv_ready_drives_vhdl(
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# SOS-08-C wave-3-f-future-xreg (2026-05-24 §15) — chart-top broadcast
+# bus emit (VHDL).
+# ---------------------------------------------------------------------------
+
+
+def _augment_chart_top_with_broadcast_bus_vhdl(
+    wrapper_body: str,
+    chart_event_raisers: dict[str, list[str]],
+    region_xreg_events: dict[str, list[str]],
+) -> str:
+    """VHDL mirror of the SV walker's chart-top broadcast bus emit.
+
+    Inserts ``chart_event_<EV>_raise_valid`` /
+    ``chart_event_<EV>_raise_data`` chart-top signal aliases and a
+    runtime ``assert`` for same-cycle multi-raiser conflicts.  Aliases
+    are wired to the existing aggregated ``ev_<EV>_send_valid`` /
+    ``ev_<EV>_send_data`` internal wires the helper already emits.
+
+    Charts without any cross-region capture skip post-processing and
+    emit byte-identical output to d879e7b (regression-guard test).
+    """
+    has_xreg = any(evs for evs in region_xreg_events.values())
+    if not has_xreg:
+        return wrapper_body
+
+    if "end architecture" not in wrapper_body:
+        return wrapper_body
+
+    # Build the declaration block (in the architecture's declarative
+    # region — VHDL requires aliases / signals to be declared before
+    # `begin`) and the body block (concurrent + a process for the
+    # multi-raiser assert).
+    decl_lines: list[str] = []
+    body_lines: list[str] = []
+    decl_lines.append("")
+    decl_lines.append(
+        "    -- SOS-08-C wave-3-f-future-xreg (2026-05-24 §15) -----"
+    )
+    decl_lines.append(
+        "    -- Chart-top broadcast bus signal aliases — see §15"
+    )
+    decl_lines.append(
+        "    -- wave-3-f-future-xreg for the normative naming."
+    )
+
+    body_lines.append("")
+    body_lines.append(
+        "    -- ----- SOS-08-C wave-3-f-future-xreg broadcast bus -----"
+    )
+    has_warning = False
+    warning_arms: list[str] = []
+    for ev, raisers in sorted(chart_event_raisers.items()):
+        if not raisers:
+            continue
+        ev_ident = _safe_event_ident_vhdl(ev)
+        valid_name = chart_event_bus_valid_name(ev_ident)
+        data_name = chart_event_bus_data_name(ev_ident)
+        # Bus VALID alias (signal declaration).
+        decl_lines.append(
+            f"    signal {valid_name} : std_logic;"
+        )
+        body_lines.append(
+            f"    {valid_name} <= "
+            f"ev_{ev_ident}_send_valid;"
+            f"  -- chart event `{ev}` broadcast valid (wave-3-f-future-xreg)"
+        )
+        # Bus DATA alias — only when aggregated send_data exists.
+        if f"ev_{ev_ident}_send_data" in wrapper_body:
+            decl_lines.append(
+                f"    signal {data_name} : "
+                f"std_logic_vector(7 downto 0);"
+            )
+            body_lines.append(
+                f"    {data_name} <= "
+                f"ev_{ev_ident}_send_data;"
+                f"  -- chart event `{ev}` broadcast data (wave-3-f-future-xreg)"
+            )
+        # Same-cycle multi-raiser conflict: VHDL `report` with
+        # severity WARNING (mirror of the SV `$warning`).  SCXML
+        # §3.13 microstep ordering — lower-document-index region
+        # wins the priority mux (derive); concurrent raises produce
+        # an aggregated valid pulse but the data OR-mix can produce
+        # an ambiguous bus when two regions raise on the same cycle.
+        if len(raisers) >= 2:
+            has_warning = True
+            terms = " + ".join(
+                f"(to_integer(unsigned'(\"\" & "
+                f"w_ev_{_safe_event_ident_vhdl(r)}_{ev_ident}_pulse)))"
+                for r in raisers
+            )
+            # Simpler boolean OR-of-pairs form rather than integer
+            # sum — VHDL doesn't permit direct numeric coercion of
+            # std_logic without explicit casting; a pairwise AND
+            # over distinct raiser pairs catches every conflict
+            # case (≥ 2 high inputs means at least one pair is both
+            # high).
+            pair_terms: list[str] = []
+            for i, a in enumerate(raisers):
+                for b in raisers[i + 1:]:
+                    pair_terms.append(
+                        f"(w_ev_{_safe_event_ident_vhdl(a)}_{ev_ident}_pulse = '1' "
+                        f"and w_ev_{_safe_event_ident_vhdl(b)}_{ev_ident}_pulse = '1')"
+                    )
+            if pair_terms:
+                cond = " or ".join(pair_terms)
+                warning_arms.append(
+                    f"            -- chart event `{ev}` — raisers: "
+                    f"{', '.join(raisers)} (priority to first)"
+                )
+                warning_arms.append(
+                    f"            if {cond} then"
+                )
+                warning_arms.append(
+                    f"                report \"SOS-08-C wave-3-f-future-xreg: "
+                    f"same-cycle multi-raiser conflict on chart event `{ev}`; "
+                    f"lower-document-index region wins\" severity warning;"
+                )
+                warning_arms.append("            end if;")
+    if has_warning:
+        body_lines.append("")
+        body_lines.append("    -- SOS-08-C wave-3-f-future-xreg same-cycle multi-")
+        body_lines.append("    -- raiser conflict detector (mirror of the SV walker's")
+        body_lines.append("    -- $warning emit).  Reports on the first conflicting")
+        body_lines.append("    -- cycle of simulation.")
+        body_lines.append("    -- pragma synthesis_off")
+        body_lines.append("    xreg_conflict_warn : process(all) is")
+        body_lines.append("    begin")
+        body_lines.extend(warning_arms)
+        body_lines.append("    end process;")
+        body_lines.append("    -- pragma synthesis_on")
+
+    decl_block = "\n".join(decl_lines) + "\n"
+    body_block = "\n".join(body_lines) + "\n"
+
+    # Insert decl_block immediately before the architecture's `begin`
+    # keyword and body_block immediately before `end architecture`.
+    # Multiple architectures aren't expected; use the LAST `begin`
+    # before the LAST `end architecture` as the insertion point.
+    end_idx = wrapper_body.rfind("end architecture")
+    # Find the `begin` that opens the architecture — the one
+    # immediately before `end architecture` at the architecture
+    # level.  Search backwards from end_idx for the nearest
+    # "\nbegin\n" line.
+    begin_marker = "\nbegin\n"
+    begin_idx = wrapper_body.rfind(begin_marker, 0, end_idx)
+    if begin_idx == -1:
+        # Couldn't locate the architecture body — defensive fallback.
+        return wrapper_body[:end_idx] + body_block + wrapper_body[end_idx:]
+
+    head = wrapper_body[:begin_idx]
+    middle = wrapper_body[begin_idx:end_idx]
+    tail = wrapper_body[end_idx:]
+    return head + decl_block + middle + body_block + tail
+
+
 def _render_region(
     region: HdlRegion,
     chart_name: str,
     depth_budget: int,
     payload_events: set[str] | None = None,
+    chart_event_raisers: dict[str, list[str]] | None = None,
 ) -> str:
     """Compose the architecture + entity for one region into a single
-    `.vhd` file body."""
+    `.vhd` file body.
+
+    SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): cross-region
+    capture events are folded into the region's consume-event list
+    (so the ``event_<EV>_recv_valid`` / ``_recv_data`` input ports are
+    emitted) and into the chart-wide payload-event set (so the
+    `_recv_data` port is sized + the broadcast bus carries data).
+    """
 
     dm_decls, dm_resets, dm_ports, _widths = _datamodel_signal_lines(region.datamodel)
     n_states = len(region.states)
     raise_events = _collect_region_raise_events(region)
     consume_events = _collect_region_consume_events(region)
+    # SOS-08-C wave-3-f (2026-05-24 §15): collect <onentry>/<onexit>
+    # <assign location="X" expr="event.<EV>.value"/> captures.
+    # Wave-3-f-future-xreg: the raiser-map enables cross-region
+    # captures; fold their events into consume_events + payload_events.
+    event_payload_captures = _collect_region_event_payload_captures(
+        region, chart_event_raisers=chart_event_raisers
+    )
+    xreg_consume_events = _cross_region_consume_events(event_payload_captures)
+    if xreg_consume_events:
+        consume_events = sorted(set(consume_events) | set(xreg_consume_events))
     # SOS-08-C wave-3-e: per-region payload-bearing event subsets.
-    payload_events = payload_events or set()
+    # Wave-3-f-future-xreg: cross-region captures imply data on the
+    # broadcast bus; fold those events into the payload-event set
+    # so the `_recv_data` port is emitted.
+    payload_events = set(payload_events or set())
+    if xreg_consume_events:
+        payload_events.update(xreg_consume_events)
     payload_send_events = [
         ev for ev in raise_events if ev in payload_events
     ]
@@ -2306,11 +2543,6 @@ def _render_region(
         payload_recv_events=payload_recv_events,
     )
     state_constants = _emit_state_constants(region)
-    # SOS-08-C wave-3-f (2026-05-24 §15): collect <onentry><assign
-    # location="X" expr="event.<EV>.value"/> captures so the register
-    # process can route the event payload data into the datamodel
-    # register on the entry-edge into the target state.
-    event_payload_captures = _collect_region_event_payload_captures(region)
     # SOS-08-C wave-3-f-future-assign (2026-05-24 §15): collect general
     # ECMAScript-subset assigns (numeric literals, datamodel idents,
     # binary +/-) for inclusion in the same per-signal if/elsif chain.
@@ -2470,6 +2702,11 @@ def render_target(chart_ir: Any, config: Any) -> dict[str, str]:
                     if params:
                         payload_events.add(ev)
 
+    # SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): chart-event
+    # raiser map — sibling of the SV walker's surface.  Used to admit
+    # cross-region <onentry>/<onexit> captures.
+    chart_event_raisers = build_chart_event_raiser_map(chart.regions)
+
     # Single-region path: one file, no wrapper.
     if len(chart.regions) == 1:
         region = chart.regions[0]
@@ -2480,21 +2717,47 @@ def render_target(chart_ir: Any, config: Any) -> dict[str, str]:
         body = _render_region(
             region, chart_name, depth_budget,
             payload_events=payload_events,
+            chart_event_raisers=chart_event_raisers,
         )
         return {f"{_entity_name(chart_name)}.vhd": body}
 
     # Multi-region path: one region file per region + chart-top wrapper.
     out: dict[str, str] = {}
+    region_xreg_events: dict[str, list[str]] = {}
     for region in chart.regions:
         region_body = _render_region(
             region, chart_name, depth_budget,
             payload_events=payload_events,
+            chart_event_raisers=chart_event_raisers,
         )
+        # Record cross-region captures per region for chart-top
+        # broadcast-bus post-processing.
+        caps = _collect_region_event_payload_captures(
+            region, chart_event_raisers=chart_event_raisers
+        )
+        region_xreg_events[region.name] = _cross_region_consume_events(caps)
         out[f"{_entity_name(chart_name, region.name)}.vhd"] = region_body
 
-    out[f"{_safe_ident(chart_name)}_top.vhd"] = _emit_chart_top_wrapper(
-        chart, payload_events=payload_events
+    # SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): fold cross-
+    # region capture events into the chart-top payload-event set
+    # so the wrapper emits `_recv_data` boundary ports + signal
+    # aggregations for events whose payload is observed only
+    # via a cross-region capture.
+    xreg_all: set[str] = set()
+    for evs in region_xreg_events.values():
+        xreg_all.update(evs)
+    top_payload_events = payload_events | xreg_all
+    wrapper_body = _emit_chart_top_wrapper(
+        chart, payload_events=top_payload_events
     )
+    # SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): post-process
+    # the chart-top body to emit the broadcast bus signal aliases +
+    # same-cycle multi-raiser runtime assert (VHDL mirror).  Charts
+    # without cross-region captures emit byte-identical to d879e7b.
+    wrapper_body = _augment_chart_top_with_broadcast_bus_vhdl(
+        wrapper_body, chart_event_raisers, region_xreg_events,
+    )
+    out[f"{_safe_ident(chart_name)}_top.vhd"] = wrapper_body
     return out
 
 

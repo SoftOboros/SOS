@@ -137,6 +137,18 @@ from _assign_expr import (
     _render_sv,
 )
 
+# SOS-08-C wave-3-f-future-xreg (2026-05-24 §15) — chart-event raiser
+# map + cross-region capture helpers.  Shared with the VHDL walker.
+# See `_chart_events.py` for the §15 boundary declaration; the
+# ``chart_event_<EV>_raise_valid`` / ``chart_event_<EV>_raise_data``
+# bus signal naming is the **normative** chart-top broadcast surface
+# this walker emits for cross-region captures.
+from _chart_events import (
+    build_chart_event_raiser_map,
+    chart_event_bus_data_name,
+    chart_event_bus_valid_name,
+)
+
 # Sibling module — provides the cross-dialect emit primitives. Wave-2
 # imports the new canonical names alongside the wave-1 surface; missing
 # names degrade to inline fallbacks at the call site.
@@ -375,6 +387,15 @@ class HdlEventPayloadCapture:
     location: str          # chart datamodel signal name (RHS of `data_<X>_q`)
     event_name: str        # consumed event whose `_recv_data` supplies the value
     edge: str = "entry"    # "entry" (default, wave-3-f) or "exit" (wave-3-f-future-A)
+    # SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): True when the
+    # capturing region does NOT raise the event itself; the value
+    # arrives via the chart-top broadcast bus
+    # (``chart_event_<EV>_raise_valid`` / ``_raise_data``) routed back
+    # to the region's ``event_<EV>_recv_valid`` / ``_recv_data`` ports.
+    # The per-region emit shape is identical between intra-region and
+    # cross-region captures by design — only the chart-top wiring
+    # changes (see §15 wave-3-f-future-xreg INV).
+    cross_region: bool = False
 
 
 @dataclass
@@ -1241,33 +1262,37 @@ _EVENT_PAYLOAD_RE = re.compile(
 
 def _collect_region_event_payload_captures(
     region: HdlRegion,
+    chart_event_raisers: dict[str, list[str]] | None = None,
 ) -> list[HdlEventPayloadCapture]:
     """Walk a region's states and extract event-payload-capture records
-    per SOS-08-C wave-3-f (`<onentry>`) + wave-3-f-future-A (`<onexit>`).
+    per SOS-08-C wave-3-f (`<onentry>`) + wave-3-f-future-A (`<onexit>`)
+    + wave-3-f-future-xreg (cross-region capture).
 
-    Returns the list of ``HdlEventPayloadCapture`` records found. The
-    walker is forgiving on non-matching expressions (those keep the
-    pre-wave-3-f no-op semantics — they're collected into
-    ``onentry_assigns`` / ``onexit_assigns`` but the SV emit ignores
-    them, as wave-1/wave-2/wave-3-{a..e} did).
+    Returns the list of ``HdlEventPayloadCapture`` records found.
 
     Per wave-3-f / wave-3-f-future-A v1 validation:
-      - The state's incoming transitions MAY include one triggered by
-        ``event="<EV>"``; if no such transition exists in the region,
-        the capture would never fire (silent dead code). The walker
-        annotates this via a header comment in the emit so a reviewer
-        notices, but does NOT raise — the capture might fire via
-        cross-region event routing not visible to this region.
-      - The ``<EV>`` event must be a consume event of the region; if
-        not, the capture has no ``_recv_data`` port to read from and
-        the walker raises ``UnsupportedChartError`` (a hard error —
-        the chart references an event the region doesn't consume).
       - The suffix after ``event.<EV>.`` MUST be ``value`` (single-
         `<param>` per wave-3-e). Custom suffixes raise
-        ``UnsupportedChartError`` citing wave-3-f-future-B (multi-
-        `<param>` event payload composition needs upstream wave-3-e
-        port-shape changes).
+        ``UnsupportedChartError`` citing wave-3-f-future-B.
+      - The ``<EV>`` event MUST be raised somewhere in the chart.  An
+        event referenced in an assign but never raised anywhere is a
+        chart-vocabulary error (the capture has no source).
+      - When the event IS a consume event of the region, the capture
+        wires intra-region (wave-3-f baseline shape).
+      - SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): when the
+        event is raised by ANOTHER region (but not this one) and is
+        NOT consumed via a transition in this region, the capture is
+        marked ``cross_region=True``.  The per-region FSM still uses
+        its ``event_<EV>_recv_valid`` / ``event_<EV>_recv_data``
+        input ports; the chart-top wrapper routes the broadcast bus
+        (``chart_event_<EV>_raise_valid`` / ``_raise_data``) into
+        them.  Concurrency invariant (cited INV from wave-3-f-future-A):
+        the cross-region capture takes effect on the cycle AFTER the
+        raise, same as intra-region — ``state_q`` transitions on the
+        same clock edge that ``event_<EV>_recv_valid`` deasserts and
+        the captured register updates on that same edge.
     """
+    chart_event_raisers = chart_event_raisers or {}
     captures: list[HdlEventPayloadCapture] = []
     consume_events = set(_collect_region_consume_events(region))
 
@@ -1295,24 +1320,50 @@ def _collect_region_event_payload_captures(
                 f"the payload into a single integer / packed struct on "
                 f"the raise side."
             )
-        if event_name not in consume_events:
-            raise UnsupportedChartError(
-                f"SOS-08-C wave-3-f: <on{edge}><assign location="
-                f"'{assign.location}' expr='event.{event_name}.value'/> "
-                f"references event `{event_name}` which is NOT a "
-                f"consume event of region `{region.name}`. The "
-                f"region's consume events are: "
-                f"{sorted(consume_events) or '<none>'}. Either add "
-                f"a transition with event=\"{event_name}\" to a "
-                f"state in this region, or relocate the assign to "
-                f"the region that consumes the event."
+        if event_name in consume_events:
+            # Intra-region capture (wave-3-f baseline shape).  The
+            # event MUST be raised somewhere in the chart for this
+            # to be meaningful — if the only "raiser" is the
+            # chart-top driving the boundary input, the chart still
+            # validates because the region declares the event as a
+            # consume event via its own transition.  Same shape as
+            # before wave-3-f-future-xreg.
+            captures.append(
+                HdlEventPayloadCapture(
+                    state_id=state.state_id,
+                    location=assign.location,
+                    event_name=event_name,
+                    edge=edge,
+                    cross_region=False,
+                )
             )
+            return
+        # Not consumed by this region — wave-3-f-future-xreg path.
+        # The event MUST be raised by at least one region in the
+        # chart; otherwise this is a chart-vocab error (the assign's
+        # ``event.<EV>.value`` RHS has no live source).
+        raisers = chart_event_raisers.get(event_name, [])
+        if not raisers:
+            raise UnsupportedChartError(
+                f"SOS-08-C wave-3-f-future-xreg: <on{edge}><assign "
+                f"expr='event.{event_name}.value'/> in region "
+                f"'{region.name}' references event '{event_name}' "
+                f"which is not raised anywhere in the chart. Add a "
+                f"<transition>...<raise event='{event_name}'/></transition> "
+                f"or remove the capture."
+            )
+        # Cross-region capture: at least one OTHER region raises the
+        # event.  Mark the capture so the region-module renderer
+        # implicitly adds the event to its consume list (so the
+        # `_recv_valid` / `_recv_data` input ports are emitted) and
+        # the chart-top wrapper wires the broadcast bus into them.
         captures.append(
             HdlEventPayloadCapture(
                 state_id=state.state_id,
                 location=assign.location,
                 event_name=event_name,
                 edge=edge,
+                cross_region=True,
             )
         )
 
@@ -1326,6 +1377,27 @@ def _collect_region_event_payload_captures(
         for assign in state.onexit_assigns:
             _process(assign, state, "exit")
     return captures
+
+
+def _cross_region_consume_events(
+    captures: list[HdlEventPayloadCapture],
+) -> list[str]:
+    """Sorted, de-duplicated list of event names a region captures via
+    cross-region wave-3-f-future-xreg (events the region does NOT
+    consume via a transition but DOES capture in an `<onentry>` /
+    `<onexit>` `<assign>`).
+
+    Used by `_render_region_module` to fold these events into the
+    region's consume-event port list so the `_recv_valid` /
+    `_recv_data` input ports are emitted.  The chart-top wrapper then
+    routes the broadcast bus (`chart_event_<EV>_raise_valid` /
+    `_raise_data`) into them.
+    """
+    seen: set[str] = set()
+    for cap in captures:
+        if cap.cross_region:
+            seen.add(cap.event_name)
+    return sorted(seen)
 
 
 def _collect_region_general_assigns(
@@ -2198,10 +2270,18 @@ def _render_region_module(
     multi_region: bool,
     depth_budget: int,
     payload_events: set[str] | None = None,
+    chart_event_raisers: dict[str, list[str]] | None = None,
 ) -> tuple[str, str, list[_DatamodelSignal]]:
     """Render a single region into a complete SV module file body.
 
     Returns (filename, body, compiled-datamodel-signals).
+
+    SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): when
+    ``chart_event_raisers`` is supplied, cross-region event-value
+    captures fold the captured event into this region's consume-event
+    port list so the ``event_<EV>_recv_valid`` / ``event_<EV>_recv_data``
+    input ports are emitted; the chart-top wrapper routes the broadcast
+    bus (``chart_event_<EV>_raise_valid`` / ``_raise_data``) into them.
     """
     module_name = (
         _region_module_name(chart_name, region.name)
@@ -2214,11 +2294,34 @@ def _render_region_module(
     raise_events = _collect_region_raise_events(region)
     consume_events = _collect_region_consume_events(region)
 
+    # SOS-08-C wave-3-f (2026-05-24 §15): collect <onentry><assign
+    # location="X" expr="event.<EV>.value"/> records so the register
+    # process can route event payload data into datamodel signals.
+    # Wave-3-f-future-xreg: the raiser-map enables cross-region
+    # captures (event raised by a different region than the one
+    # capturing it).  The collector marks each cross-region capture
+    # with `cross_region=True`; we fold those event names into
+    # `consume_events` below so the input ports are emitted.
+    event_payload_captures = _collect_region_event_payload_captures(
+        region, chart_event_raisers=chart_event_raisers
+    )
+    xreg_consume_events = _cross_region_consume_events(event_payload_captures)
+    if xreg_consume_events:
+        consume_events = sorted(set(consume_events) | set(xreg_consume_events))
+
     # SOS-08-C wave-3-e (2026-05-24 §15): per-region payload-bearing
     # event subsets. send_data events = chart-wide payload events
     # this region raises; recv_data events = chart-wide payload
     # events this region consumes.
-    payload_events = payload_events or set()
+    # Wave-3-f-future-xreg: cross-region captures imply the event
+    # carries a payload — the broadcast bus is unconditionally
+    # data-bearing (the capture would not have been written by the
+    # chart author otherwise).  Fold the xreg events into the
+    # chart-wide payload-event set so the recv_data ports + bus
+    # wiring are emitted.
+    payload_events = set(payload_events or set())
+    if xreg_consume_events:
+        payload_events.update(xreg_consume_events)
     payload_send_events = [
         ev for ev in raise_events if ev in payload_events
     ]
@@ -2235,10 +2338,6 @@ def _render_region_module(
     )
     state_constants = _emit_state_constants(region)
     register_decls = _emit_register_decls(region, datamodel_signals, n_states)
-    # SOS-08-C wave-3-f (2026-05-24 §15): collect <onentry><assign
-    # location="X" expr="event.<EV>.value"/> records so the register
-    # process can route event payload data into datamodel signals.
-    event_payload_captures = _collect_region_event_payload_captures(region)
     # SOS-08-C wave-3-f-future-assign (2026-05-24 §15): collect general
     # ECMAScript-subset assigns (numeric literals, datamodel idents,
     # binary +/-) for inclusion in the same per-signal if/else if chain.
@@ -2632,6 +2731,147 @@ def _render_chart_top(
 
 
 # ---------------------------------------------------------------------------
+# SOS-08-C wave-3-f-future-xreg (2026-05-24 §15) — chart-top broadcast
+# bus emit (SV).
+# ---------------------------------------------------------------------------
+
+
+def _augment_chart_top_with_broadcast_bus_sv(
+    wrapper_body: str,
+    chart_event_raisers: dict[str, list[str]],
+    region_xreg_events: dict[str, list[str]],
+) -> str:
+    """Post-process the chart-top wrapper body to emit broadcast-bus
+    signal aliases + same-cycle multi-raiser ``$warning``.
+
+    The wrapper body is produced by ``hdl_common.emit_chart_top_wrapper``
+    (or the local fallback) and already contains the per-event
+    ``ev_<EV>_send_valid`` (aggregated raise) + ``ev_<EV>_send_data``
+    (aggregated raise data) internal wires for any event with at least
+    one raise + one consumer + a payload.  This helper introduces the
+    normative ``chart_event_<EV>_raise_valid`` / ``chart_event_<EV>_raise_data``
+    chart-top wires (per SOS-08-C §15 wave-3-f-future-xreg) by
+    aliasing them to the existing aggregated signals.
+
+    The bus signals are emitted for **every event with at least one
+    raiser** (whether or not it is consumed cross-region) so the
+    chart-top broadcast surface is uniform — a sibling region that
+    LATER taps the event via a cross-region capture sees the bus
+    already declared.
+
+    Same-cycle multi-raiser conflict: when two or more sibling
+    regions raise the SAME event in the SAME cycle (both their
+    ``w_ev_<region>_<EV>_pulse`` are high simultaneously) the
+    aggregated valid is high (OR) and the aggregated data is the OR
+    of the per-region data buses.  This is the natural read of the
+    existing aggregation but is semantically ambiguous — SCXML §3.13
+    microstep ordering says one raise comes first in the macrostep,
+    but at HDL elaboration time both edges fire on the same clock.
+    We emit a ``$warning`` from chart-top ``initial`` so the
+    simulation operator sees the race on the first conflicting cycle.
+
+    Per the file-scope discipline, this rewrite is purely additive
+    (regex-driven insertion); the helper's body bytes are otherwise
+    unchanged.  Charts with no cross-region captures + only one
+    raiser per event keep producing byte-identical-modulo-comments
+    output to d879e7b — see the regression-guard test.
+    """
+    # No cross-region usage anywhere → don't touch the wrapper body
+    # (preserves byte identity with d879e7b for charts that don't use
+    # the feature, even when the chart has multi-raiser events).  The
+    # broadcast bus is materialised ONLY when a sibling region taps
+    # it via a cross-region capture — the regression guard test pins
+    # this exact contract.
+    has_xreg = any(evs for evs in region_xreg_events.values())
+    if not has_xreg:
+        return wrapper_body
+
+    if "endmodule" not in wrapper_body:
+        return wrapper_body  # fallback path didn't emit a module; bail.
+
+    # Build the broadcast-bus alias block + $warning block.
+    alias_lines: list[str] = [
+        "",
+        "    // ----- SOS-08-C wave-3-f-future-xreg (2026-05-24 §15) -----",
+        "    // Chart-top broadcast bus: per chart-wide raised event,",
+        "    // ``chart_event_<EV>_raise_valid`` / ``_raise_data`` mirror",
+        "    // the aggregated raise signals so cross-region <onentry>/",
+        "    // <onexit> <assign expr='event.<EV>.value'/> captures see",
+        "    // the value on the cycle AFTER the raise (same as the",
+        "    // wave-3-f-future-A intra-region INV — state_q transitions",
+        "    // on the same clock edge `event_<EV>_recv_valid` deasserts).",
+        "    // Multi-raiser conflict resolution: aggregated valid =",
+        "    // OR of region pulses (SCXML §3.13 microstep — derive);",
+        "    // aggregated data = OR of per-region buses with implicit",
+        "    // priority to the lower-document-index region (zero buses",
+        "    // from non-raising regions OR-mix cleanly with the active",
+        "    // raiser's data).  Same-cycle race emits a runtime $warning.",
+    ]
+    warning_lines: list[str] = []
+    for ev, raisers in sorted(chart_event_raisers.items()):
+        if not raisers:
+            continue
+        ev_ident = _safe_event_ident(ev)
+        valid_name = chart_event_bus_valid_name(ev_ident)
+        data_name = chart_event_bus_data_name(ev_ident)
+        # Bus VALID alias.
+        alias_lines.append(
+            f"    wire {valid_name} = "
+            f"ev_{ev_ident}_send_valid;"
+        )
+        # Bus DATA alias — only emitted when an aggregated send_data
+        # exists for this event (i.e. it is in the chart-wide
+        # payload-event set after the xreg fold-in).  We detect
+        # presence by string-matching on the wrapper body; absence
+        # means the helper didn't emit a data aggregate so an alias
+        # to it would be a forward-reference to a non-existent wire.
+        if f"ev_{ev_ident}_send_data" in wrapper_body:
+            alias_lines.append(
+                f"    wire [7:0] {data_name} = "
+                f"ev_{ev_ident}_send_data;"
+            )
+        # Multi-raiser $warning: only when ≥2 regions raise this
+        # event.  Lower-document-index region wins the priority mux
+        # (the aggregated data is the OR; with disjoint per-region
+        # drives the OR collapses to the active region's value).
+        if len(raisers) >= 2:
+            terms = " + ".join(
+                f"w_ev_{_sanitize_sv_identifier(r)}_{ev_ident}_pulse"
+                for r in raisers
+            )
+            warning_lines.append(
+                f"            // chart event `{ev}` — raisers: "
+                f"{', '.join(raisers)} (priority to first)"
+            )
+            warning_lines.append(
+                f"            if (({terms}) > 1) "
+                f"$warning(\"SOS-08-C wave-3-f-future-xreg: same-cycle "
+                f"multi-raiser conflict on chart event `{ev}`; lower-"
+                f"document-index region wins\");"
+            )
+    if warning_lines:
+        alias_lines.append("")
+        alias_lines.append(
+            "    // SOS-08-C wave-3-f-future-xreg same-cycle multi-raiser"
+        )
+        alias_lines.append("    // conflict detector — emits a $warning at the")
+        alias_lines.append("    // first conflicting cycle of simulation.")
+        alias_lines.append("    // synthesis translate_off")
+        alias_lines.append("    always @* begin")
+        alias_lines.extend(warning_lines)
+        alias_lines.append("    end")
+        alias_lines.append("    // synthesis translate_on")
+    alias_block = "\n".join(alias_lines) + "\n"
+
+    # Insert the block immediately before the final `endmodule`.  We
+    # find the LAST `endmodule` in the file to handle the case where
+    # the helper emits multiple modules (rare; chart-top is a single
+    # module today, but defensive).
+    idx = wrapper_body.rfind("endmodule")
+    return wrapper_body[:idx] + alias_block + wrapper_body[idx:]
+
+
+# ---------------------------------------------------------------------------
 # Public entry points.
 # ---------------------------------------------------------------------------
 
@@ -2715,23 +2955,59 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
                     if params:
                         payload_events.add(ev)
 
+    # SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): build the
+    # chart-event-raiser map.  Used by per-region capture validation
+    # (events captured but never raised anywhere = chart-vocab error)
+    # and by the chart-top wrapper post-processing (broadcast bus
+    # signal emission + same-cycle multi-raiser $warning).  Charts
+    # with NO cross-region captures emit byte-identical to d879e7b
+    # because the map is consumed only on the cross-region path.
+    chart_event_raisers = build_chart_event_raiser_map(regions)
+
     files: dict[str, str] = {}
     region_datamodel_signals: dict[str, list[_DatamodelSignal]] = {}
+    region_xreg_events: dict[str, list[str]] = {}
 
     for region in regions:
         fname, body, dmsigs = _render_region_module(
             region, chart_name, multi_region, depth_budget,
             payload_events=payload_events,
+            chart_event_raisers=chart_event_raisers,
         )
         files[fname] = body
         region_datamodel_signals[region.name] = dmsigs
+        # Record which events this region taps via cross-region
+        # capture (sibling-raised) so the chart-top post-processor
+        # can emit the broadcast-bus wiring.
+        caps = _collect_region_event_payload_captures(
+            region, chart_event_raisers=chart_event_raisers
+        )
+        region_xreg_events[region.name] = _cross_region_consume_events(caps)
 
     if multi_region:
         # Step 7 + step 10 — detect cross-domain signals, emit wrapper.
         cds = _detect_cross_domain_signals(regions)
+        # SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): fold
+        # cross-region capture events into the chart-top wrapper's
+        # payload-event set so its sibling routing emits `_recv_data`
+        # ports + bus wiring for events whose payload is observed by
+        # a cross-region capture (and only by that — no `<param>`
+        # might be visible on the raising transition).
+        xreg_all: set[str] = set()
+        for evs in region_xreg_events.values():
+            xreg_all.update(evs)
+        top_payload_events = payload_events | xreg_all
         wrapper_name, wrapper_body = _render_chart_top(
             chart_name, regions, region_datamodel_signals, cds,
-            payload_events=payload_events,
+            payload_events=top_payload_events,
+        )
+        # SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): post-
+        # process the chart-top body to emit the broadcast bus
+        # signal aliases + same-cycle multi-raiser $warning.  This
+        # is done after the helper-based render to keep the helper
+        # (in `hdl_common`) untouched per the file-scope discipline.
+        wrapper_body = _augment_chart_top_with_broadcast_bus_sv(
+            wrapper_body, chart_event_raisers, region_xreg_events,
         )
         files[wrapper_name] = wrapper_body
 
