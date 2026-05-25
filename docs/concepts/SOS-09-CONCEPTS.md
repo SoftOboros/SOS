@@ -84,7 +84,7 @@ Terms normative within SOS-09+. Authority relationships per §8.
 
 ### 5.1 Channel-category enumeration
 
-The chart annotation `<sos:channel kind="..." dir="..."/>` (namespace per PCDN-SOS-09-001) declares a channel; `kind` is one of the four values:
+A chart channel annotation declares a channel via iState's `other_attributes` extension surface (per PCDN-SOS-09-001 amended resolution; see §15 2026-05-25 entry); the SOS-semantic keys use the `sos:` string prefix within the `other_attributes` JSON (e.g. `{"sos:kind": "status", "sos:dir": "hw→sw"}`). `kind` is one of the four values:
 
 ```
 kind ∈ { status, command, queue, shared }
@@ -148,9 +148,9 @@ Frozen-enumeration registration policy: **Specification Required** (adding a ter
 
 ### SOS-09-A — Chart annotation surface
 
-The XML namespace and attribute schema for `<sos:channel>` elements. Allowed parent contexts (`<region>`, `<state>`, `<parallel>`). Permitted attributes: `id` (required, unique within chart), `kind` (required, per §5.1), `dir` (required, per the kind/dir pairs of §5.2), `zone` (optional, default `privileged`; per §5.4), `atomicity` (optional, default inferred per §5.3), `width` (optional, default 32; the register width in bits), `bit_layout` (optional reference to a layout block elsewhere in the chart).
+The chart-annotation attribute schema for SOS-09 channels, attached to existing iState/SCXML elements via the `other_attributes` extension surface (per PCDN-SOS-09-001 amended resolution; see §15 2026-05-25 entry). Allowed parent contexts (`<region>`, `<state>`, `<parallel>`). Permitted SOS-semantic keys (each prefixed `sos:` inside the `other_attributes` JSON): `sos:id` (required, unique within chart), `sos:kind` (required, per §5.1), `sos:dir` (required, per the kind/dir pairs of §5.2), `sos:zone` (optional, default `privileged`; per §5.4), `sos:atomicity` (optional, default inferred per §5.3), `sos:width` (optional, default 32; the register width in bits), `sos:bit_layout` (optional reference to a layout block elsewhere in the chart).
 
-PCDN-SOS-09-001 resolves whether the namespace is custom (`xmlns:sos="..."`) or leverages the existing iState `other_attributes` extension surface (per INV-SOS-D).
+PCDN-SOS-09-001 was originally resolved 2026-05-23 in favour of a custom XML namespace; that resolution was retracted and re-ratified 2026-05-25 in favour of the `other_attributes` extension surface. The `sos:` prefix on attribute keys is a STRING prefix WITHIN the `other_attributes` JSON, NOT an XML namespace prefix — no `xmlns:sos` declaration is registered or expected in chart-author-facing XML for SOS-09 channel annotations.
 
 Ratifies as `SOS-09-A-CONCEPTS.md`.
 
@@ -247,8 +247,8 @@ The following rows EXTEND the SOS-07 §7 matrix:
 | ARMv7-M MPU (per SOS-00 §6) | local distillation from ARM ARM | **mirror** (SOS-09-G uses the SOS-00 §6 subset) | SOS-09-G | none — SOS-00 §6 IS the local authority |
 | AXI4-Lite (per SOS-09-E bus interface) | AMBA (ARM, vendor-neutral) | **derive** (emit conformant slave interface) | SOS-09-E | none — bus spec is upstream |
 | APB (alternative bus interface) | AMBA | **derive** | SOS-09-E | same |
-| iState `other_attributes` extension surface (per PCDN-SOS-09-001 if chosen) | iState project | **extend** (channel-annotation attributes on `other_attributes`) | SOS-09-A | iState owns the extension surface; SOS preserves via scjson round-trip per INV-SOS-D |
-| Custom XML namespace (`xmlns:sos="..."`, per PCDN-SOS-09-001 if chosen) | this doc | **own** (SOS authors the namespace and its schema) | SOS-09-A | SOS owns; namespace MUST be registered in §15 if chosen |
+| iState `other_attributes` extension surface (per PCDN-SOS-09-001 amended 2026-05-25) | iState project | **compose** (SOS-09 attaches channel-annotation keys with `sos:` string prefix inside the `other_attributes` JSON; iState owns the surface) | SOS-09-A | iState owns the extension surface; SOS preserves via scjson round-trip per INV-SOS-D |
+| SOS-09 channel-annotation key convention (`sos:`-prefixed keys inside `other_attributes`) | this doc | **own** (SOS authors the key-prefix convention and the four-attribute set `kind` / `dir` / `mutex` / `protection-zone`) | SOS-09-A | SOS owns; NO XML namespace URL is registered — the `sos:` prefix is a JSON-key string prefix, not an XML namespace prefix |
 
 Per INV-SOS-E, the row addition policy is the same as SOS-07 §7: **Specification Required** for adding new rows (phase-owner walkthrough), **Standards Action** for modifying an existing row's relationship value.
 
@@ -353,9 +353,9 @@ This phase's umbrella ratification (after PCDN resolution) unblocks:
 
 These are the open questions whose resolution moves this doc from 🟡 drafted to 🟢 ratified.
 
-- **PCDN-SOS-09-001 — Channel-annotation XML namespace.** Custom XML namespace (`xmlns:sos="https://softoboros.com/sos/1.0"`) vs leveraging the iState `other_attributes` extension surface (per INV-SOS-D). **Recommendation**: leverage `other_attributes` at v1 — preserves the scjson round-trip path that EOQ-008 resolution depends on; keeps SOS off the namespace-registration hook; matches the existing iState `position_x`/`position_y` precedent. A future migration to a registered custom namespace stays available if iState's tooling outgrows `other_attributes`.
+- **PCDN-SOS-09-001 — Channel-annotation XML namespace.** Custom XML namespace (`xmlns:sos="https://softoboros.com/sos/1.0"`) vs leveraging the iState `other_attributes` extension surface (per INV-SOS-D). **Recommendation**: leverage `other_attributes` at v1 — preserves the scjson round-trip path that EOQ-008 resolution depends on; keeps SOS off the namespace-registration hook; matches the existing iState `position_x`/`position_y` precedent. A future migration to a registered custom namespace stays available if iState's tooling outgrows `other_attributes`. **Status: 🟢 amended 2026-05-25 — original 2026-05-23 resolution (custom `xmlns:sos="https://softoboros.com/sos/1.0"`) retracted; see the change-log amendment entry below for the re-ratified `other_attributes` resolution.**
 
-- **PCDN-SOS-09-002 — Per-channel atomicity declaration: implicit by `kind`, or explicit annotation?** §5.3 default-inference rule covers the four `kind` values cleanly, but composite registers (a `status` channel whose bits aggregate multiple HW events that need a single coherent read) need explicit override. **Recommendation**: implicit default per §5.3; explicit `atomicity` attribute on `<sos:channel>` overrides. The override is rare enough that requiring it everywhere is friction; the default-inference rule is correct for the common case.
+- **PCDN-SOS-09-002 — Per-channel atomicity declaration: implicit by `kind`, or explicit annotation?** §5.3 default-inference rule covers the four `kind` values cleanly, but composite registers (a `status` channel whose bits aggregate multiple HW events that need a single coherent read) need explicit override. **Recommendation**: implicit default per §5.3; explicit `sos:atomicity` key (within the host element's `other_attributes`, per PCDN-SOS-09-001 amended 2026-05-25) overrides. The override is rare enough that requiring it everywhere is friction; the default-inference rule is correct for the common case.
 
 - **PCDN-SOS-09-003 — Register layout (bit ordering, padding, reserved-bit policy): chart-driven or per-target derived?** A `kind="status"` channel with 13 bits of meaningful payload on a 32-bit-wide register needs a bit layout. Options: (a) chart declares the full bit layout via a `<bit_layout>` sub-element; (b) chart declares the bit fields and the codegen derives padding + reserved bits per-target ABI. **Recommendation**: option (b) — chart declares semantic fields, codegen handles the rest. Per-target overrides (e.g. for ABI compatibility with an existing register that SOS-09 is replacing) opt in via an explicit `<padding>` directive. Reserved bits MUST read-as-zero / write-as-zero per default ARMv7-M discipline.
 
@@ -373,7 +373,7 @@ These are the open questions whose resolution moves this doc from 🟡 drafted t
 - Frozen decisions §5: channel-category enum `{status, command, queue, shared}` (§5.1); channel → membrane-primitive mapping (§5.2); atomicity class `{atomic, mutex-required}` (§5.3); protection zone `{privileged, unprivileged}` at v1 (§5.4 per PCDN-SOS-09-006); CMSIS-SVD primary + SystemRDL secondary per EOQ-005-ROADMAP (§5.5).
 - Sub-phase scope §6 sketches SOS-09-A (chart annotation surface), SOS-09-B (CMSIS-SVD), SOS-09-C (C HAL), SOS-09-D (Rust HAL), SOS-09-E (HDL register-file RTL), SOS-09-F (membrane vectors), SOS-09-G (MPU configuration).
 - Cross-sub-phase invariants §7: INV-S-MEM-1 through 6 (single-source register definition; register-map-as-build-output; end-to-end protection; mandatory side-effect declaration; auditable atomicity; vectors-as-integration-contract).
-- Standards integration matrix §8: adds 9 rows to SOS-07 §7 (CMSIS-SVD, SystemRDL, svd2rust, chiptool, ARMv7-M MPU subset, AXI4-Lite, APB, iState `other_attributes` extension, custom XML namespace if PCDN-001 chooses it).
+- Standards integration matrix §8: adds 9 rows to SOS-07 §7 (CMSIS-SVD, SystemRDL, svd2rust, chiptool, ARMv7-M MPU subset, AXI4-Lite, APB, iState `other_attributes` extension, plus the SOS-09 channel-annotation key convention per PCDN-001 as originally drafted; row content was superseded 2026-05-25 — see amendment entry below).
 - Reconciliation §10: composes SOS-08-A primitives without re-derivation; SOS-04 / SOS-05 register-access pattern stays for CPU-internal peripherals; SOS-03 vector framework extends to six membrane-vector shapes via §15 amendment.
 - Six PCDNs raised covering the umbrella-level decisions that need user input before sub-phase work begins.
 
@@ -385,7 +385,7 @@ All 6 PCDNs walked and resolved:
 
 | PCDN | Resolution |
 |---|---|
-| **001 — Channel-annotation XML namespace** | ✅ **Custom `xmlns:sos="https://softoboros.com/sos/1.0"`** namespace for SOS-specific channel attributes (`kind`, `dir`, `mutex`, `protection-zone`). Cleaner separation from W3C SCXML reserved attributes; iState position attributes stay on `other_attributes` per the existing pattern. |
+| **001 — Channel-annotation XML namespace** | ✅ **Custom `xmlns:sos="https://softoboros.com/sos/1.0"`** namespace for SOS-specific channel attributes (`kind`, `dir`, `mutex`, `protection-zone`). Cleaner separation from W3C SCXML reserved attributes; iState position attributes stay on `other_attributes` per the existing pattern. — **🟡 superseded 2026-05-25; see PCDN-SOS-09-001 amendment entry below** |
 | **002 — Per-channel atomicity declaration** | ✅ **Implicit by `kind` value** with explicit override available. `kind="status"` / `"command"` are single-register atomic; `kind="queue"` is non-atomic (DPRAM access via mutex); `kind="shared"` requires explicit `mutex` attribute. Override via `atomicity="explicit"`. Reduces chart noise. |
 | **003 — Register layout policy** | ✅ **Per-target derived** at v1 (CMSIS-SVD's natural shape). Chart declares semantic fields (name, width, access, side-effect); emitter assigns physical bits per target ABI. Decouples chart from physical layout; target-specific concerns stay with target emitters. |
 | **004 — IRQ-line assignment** | ✅ **Logical IRQ → per-target NVIC table mapping**. Chart declares logical IRQ name (e.g. `irq="hw_data_ready"`); per-target table (e.g. STM32H747 SVD) maps to physical NVIC line. Multiple targets share a chart by remapping the table. |
@@ -393,3 +393,38 @@ All 6 PCDNs walked and resolved:
 | **006 — Protection-zone enumeration** | ✅ **Privileged / unprivileged at v1**. Two-zone model matches typical Cortex-M MPU. ARMv8-M TrustZone 4-zone deferred to a future phase if a customer requires it. |
 
 Status: 🟢 **ratified**. SOS-09 implementation work (extending `tools/sos-codegen/` with the channel-annotation emit path → CMSIS-SVD + HAL accessors + RTL register file + membrane vectors) unblocked. The SOS-08-A/B primitive + service layers gate the SOS-09 RTL-emit path; both SOS-08-A and SOS-09 implementation can proceed in parallel since the SOS-08-A library is consumed but not modified by SOS-09.
+
+### 2026-05-25 — PCDN-SOS-09-001 amendment — channel annotations on `other_attributes` (retraction + re-ratification)
+
+**Status: 🟢 amended 2026-05-25 — supersedes the 2026-05-23 PCDN-SOS-09-001 resolution.**
+
+**Retraction.** The 2026-05-23 PCDN-SOS-09-001 resolution that chose a custom XML namespace (`xmlns:sos="https://softoboros.com/sos/1.0"`) for SOS-specific channel attributes is hereby retracted. The two-tier convention (iState position attributes via `other_attributes`, SOS-semantic channel attributes via a registered `xmlns:sos`) is no longer the SOS-09 standard. The namespace URL `https://softoboros.com/sos/1.0` is **NOT registered** by SOS for SOS-09 channel annotations; any future PCDN that proposes a custom XML namespace for SOS-09 channel annotations is a new ratification round.
+
+**Amended resolution.** All SOS-09 channel annotations — the four-attribute set `kind`, `dir`, `mutex`, `protection-zone`, plus any future SOS-09-semantic channel attributes — attach via iState's `other_attributes` extension surface, consistent with the existing iState convention for `position_x`, `position_y`, and related layout attributes. The annotation key uses a `sos:` STRING prefix WITHIN the `other_attributes` JSON, NOT an XML namespace prefix. Example shape (illustrative, not generated XML):
+
+```
+<state id="rx_path" other_attributes='{"sos:kind": "status", "sos:dir": "hw→sw", "sos:mutex": "ch_mtx", "sos:protection-zone": "privileged", "position_x": "120", "position_y": "240"}'>
+  ...
+</state>
+```
+
+The `sos:` prefix is purely a JSON-key string convention SOS-09 owns; the surrounding XML carries NO `xmlns:sos` declaration. iState layout keys (`position_x`, `position_y`, etc.) and SOS-semantic keys (`sos:kind`, `sos:dir`, etc.) coexist in the same `other_attributes` JSON map; readers distinguish them by the `sos:` prefix on keys.
+
+**Rationale** (quoting and confirming the original 2026-05-23 staging-recommendation):
+
+- Preserves the scjson round-trip path that EOQ-008 resolution depends on. A registered custom XML namespace would have required scjson schema work upstream; staying inside `other_attributes` keeps SOS-09 implementable without iState changes.
+- Keeps SOS off the XML-namespace-registration hook. No URL is registered, claimed, or implied to be served; the namespace URL `https://softoboros.com/sos/1.0` is not a working namespace declaration anywhere in chart-author-facing XML or generated artifacts.
+- Matches the existing iState `position_x` / `position_y` precedent. Chart authors already attach layout annotations via `other_attributes`; SOS-09 channel annotations follow the same surface, reducing convention sprawl.
+- Single extension surface (`other_attributes`) for ALL chart-author-attached annotation, layout AND semantic. The element-vs-attribute distinction stays clean: attributes attach to existing iState/SCXML elements via `other_attributes`; new elements (SOS-08-D / -E vocabulary) live in their own namespace-or-not contracts.
+
+**Scope clarification (MUST).** This amendment applies to **SOS-09 channel ANNOTATIONS only** — attributes attached to existing iState/SCXML elements (`<region>`, `<state>`, `<parallel>`) via the `other_attributes` extension surface. It MUST NOT be read as amending SOS-08-D's or SOS-08-E's namespaced ELEMENT vocabulary: `<sos:cross_invariant>`, `<sos:state_ref>`, `<sos:and>`, `<sos:or>`, `<sos:not>`, `<sos:implies>`, `<sos:raw_property>`, `<sos:sampling_clock>`, `<sos:shared_signal>`, `<sos:shared_signal_ref>`, `<sos:clock_domains>`, `<sos:clock>`, `<sos:cdc_boundary>`, `<sos:channel>` (as a NEW ELEMENT in SOS-08-D / -E vocabulary) — those are new XML elements introduced and ratified in their own phases (SOS-08-D and SOS-08-E), each carrying its own emit machinery and authority, and remain outside the scope of this amendment. The element-vs-attribute distinction is preserved: attributes-on-existing-elements use `other_attributes`; new-elements use their phase-owned vocabulary. If a future PCDN proposes consolidating SOS-08-D / -E's element vocabulary into `other_attributes` (or vice versa), that PCDN MUST be a separate ratification round.
+
+**Implementation impact.** SOS-09 implementation has not begun. No code retraction is needed; this is a spec-text amendment only. When the SOS-09 emit path is implemented (future wave), it MUST read channel annotations from `other_attributes`, treating `sos:`-prefixed keys (e.g. `sos:kind`, `sos:dir`, `sos:mutex`, `sos:protection-zone`) as SOS-semantic and other keys (`position_x`, `position_y`, etc.) as iState-layout-or-other. No `xmlns:sos` declaration appears in chart-author-facing XML, in generated artifacts (CMSIS-SVD, SystemRDL, C HAL, Rust HAL, HDL RTL, MPU table, membrane vectors), or in normative XML examples within concept docs for SOS-09.
+
+**Update obligation.** Any prior text in `SOS-09-CONCEPTS.md` (§3 glossary, §6 sub-phase scope, §8 standards-integration matrix, §15 PCDN-SOS-09-001 entry, the §16 2026-05-23 ratification entry's PCDN-001 row, or any XML example) that referenced `xmlns:sos`, the URL `https://softoboros.com/sos/1.0`, or the two-tier convention has been updated to the amended `other_attributes` language in this same commit. The §15 PCDN-SOS-09-001 entry carries a 🟢 amended status marker; the §16 2026-05-23 ratification row's PCDN-001 cell carries a 🟡 superseded marker — original resolution text is preserved as institutional memory per the spec-before-code discipline (resolved entries stay in the log).
+
+**Authority.** Per SOS-07 §7 AuthorityRelationship vocabulary: the SOS-09 channel-annotation key convention (the `sos:` string-prefix on keys inside `other_attributes`) is `own` — SOS authors the prefix-convention and the four-attribute set. The relationship to iState's `other_attributes` extension surface is `compose` — SOS-09 uses iState's surface; iState owns the surface. NO XML namespace URL is registered or claimed by SOS-09; the `sos:` prefix is a JSON-key string prefix, not an XML namespace prefix.
+
+**Frozen-enumeration registration policy.** The four-attribute set (`kind`, `dir`, `mutex`, `protection-zone`) declared by this amendment is **Standards Action**: adding a fifth SOS-semantic channel-annotation key requires a §16 amendment to this doc and a ratification session. The `sos:` prefix convention itself is also Standards Action — changing the prefix string is a cross-phase contract change.
+
+**Tracking.** Supersedes the 2026-05-23 PCDN-SOS-09-001 resolution (which remains in the §16 2026-05-23 ratification table, marked 🟡 superseded). Cross-references: PCDN-SOS-09-001 entry in §15 (status marker added); §3 channel/membrane glossary terms (unchanged by this amendment — the channel category enum and primitive mappings of §5 are unaffected). Test coverage: `tools/sos-codegen/tests/test_sos_09_pcdn_001_amendment.py`.
