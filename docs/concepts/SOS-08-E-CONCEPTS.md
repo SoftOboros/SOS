@@ -1088,3 +1088,50 @@ The format-string payload — the `[FAIL] vector V%0d: chart \`<chart>\` expecte
 **Cited PCDNs / invariants**: PCDN-SOS-08-E-001 (layered hierarchy resolved by `fa06f7a` — verb-change is a follow-up clarification on top of that resolution); INV-S-HDL-E-4 (chart-vocab failure messages — strengthened by severity tagging).
 
 Status: 🟢 **`$display`→`$error` verb-change normatively pinned**. Downstream tooling has a clear migration target; the chart-contract-violation semantics now match the simulator's severity machinery per IEEE 1800-2017 §20.10.3.
+
+### 2026-05-25 — PCDN-SOS-08-D-008 cross-reference — `<sos:clock_domains>` shape now formal (Ira)
+
+This entry records the cross-reference that the wave-3-future-remaining multi-clock testbench wiring (commit `c2aa1cf`, "SOS08E3m") assumed `<sos:clock_domains>` element shape is now **formally ratified** by PCDN-SOS-08-D-008 (see `SOS-08-D-CONCEPTS.md` §15 2026-05-25 entry, landing in parallel today). At the time of the wave-3-future-mclk landing, SOS-08-E's walker `_collect_clock_domains` parsed an assumed shape with a forward-compat note in §15. As of 2026-05-25, that assumed shape is no longer assumed — it is the normative artefact owned by SOS-08-D.
+
+**Authority**. `mirror` — SOS-08-E mirrors PCDN-SOS-08-D-008's element ownership without modification. Any SOS-08-E-specific extension to the `<sos:clock_domains>` / `<sos:clock>` / `<sos:sampling_clock>` element grammar MUST go through a new PCDN. The upstream authority is `SOS-08-D-CONCEPTS.md` PCDN-SOS-08-D-008; this walker reads but does not extend.
+
+**Element shape (now formal)** — the assumed shape introduced by `c2aa1cf` is unchanged in surface form; the ratified element gains explicit `source` and `kind` attributes plus a reserved `phase_ns` per Q1–Q9 of PCDN-SOS-08-D-008:
+
+```xml
+<sos:clock_domains>
+  <sos:clock name="..." source="..." kind="..." period_ns="..." duty_cycle="..." phase_ns="..."/>
+</sos:clock_domains>
+```
+
+Per PCDN-SOS-08-D-008 Q1–Q9 ratified decisions:
+
+- **Source × kind orthogonal identity model**: a clock's identity is the `(source, kind)` pair. Two `<sos:clock>` declarations sharing the same `(source, kind)` are aliases of the same domain.
+- **Kind enum at v1**: `rising` + `falling`. Future kinds (DDR / quadrature / three-phase) are reserved and registered via Standards Action per the PCDN-SOS-08-D-008 registration policy.
+- **Alias resolution**: same `(source, kind)` ⇒ same domain; alphabetic-first declared name is the canonical name.
+- **`<sos:sampling_clock>` kind inheritance**: a `<sos:sampling_clock>` inherits its `kind` from the referenced `<sos:clock>` — sampling-clock authors do not respecify `kind`.
+- **`phase_ns`**: reserved per-clock attribute for v2; v1 walkers ignore it.
+
+**Walker mirror obligation (MUST)**. The SOS-08-E walker `_collect_clock_domains` MUST consume the SAME parsed shape as the SOS-08-D walker. After the follow-up implementation wave lands the shared helper `tools/sos-codegen/_clock_domains.py`, both walkers MUST cross-reference the resolved `(source, kind) → canonical_name` map from that shared helper rather than re-parsing the XML independently. Until the shared helper lands, the SOS-08-E walker's local `_collect_clock_domains` parsing stays as wave-1 best-effort with a TODO citing this §15 entry; the TODO MUST be removed in the follow-up implementation wave that introduces the shared helper.
+
+**Kind-enum rejection contract.** Kind values outside the v1 enum (`rising` / `falling`) MUST cause SOS-08-E's `_emit_driver_class` to raise the SAME chart-vocab error as the SOS-08-D walker would — error message verbatim `SOS-08-D wave-future-clkkind:` — since the SOS-08-E walker imports the kind-enum vocabulary from the SOS-08-D walker's chart-vocab module. This avoids two divergent rejection messages drifting between walkers; the chart-vocab error is shared at the PCDN-SOS-08-D-008 conformance boundary.
+
+**Sampling-clock kind-inheritance applicability to E (informative).** SOS-08-E's testbench wiring does NOT currently consume `<sos:sampling_clock>` (which is D-only territory — sampling-clock is used by the SVA bind walker for the `@(posedge|negedge sampling_clk)` clause). However, if a future SOS-08-E phase introduces sampling-clock-aware testbench stimulus (for example, drive on `negedge` for kind=`falling` clocks so the testbench's stimulus edge matches the SVA bind's sampling edge), the kind-inheritance rule from PCDN-SOS-08-D-008 §15 Q8 applies — the testbench MUST inherit `kind` from the referenced `<sos:clock>` rather than respecifying it on the `<sos:sampling_clock>`. Pre-staged here as informative for future SOS-08-E phases.
+
+**Alias-resolution emit contract (owed by follow-up wave).** SOS-08-E's per-clock generator emit (commit `c2aa1cf` added per-clock `forever #(period_ns/2.0 * 1ns)` blocks in `clock_generators_<chart>.svh`) keys on `name=` today — one generator per declared `<sos:clock>` element regardless of `(source, kind)` aliasing. Under PCDN-SOS-08-D-008's identity model, two `<sos:clock>` declarations sharing `(source, kind)` are aliases of one domain — SOS-08-E SHOULD emit ONE generator per resolved canonical name (alphabetic-first of the alias set) and treat the alias names as transparent at the SV emit layer. Implementation owed by the follow-up wave that lands the shared helper; documented here as the contract surface so reviewers of the follow-up PR can audit against this entry rather than re-deriving the obligation.
+
+**Backwards-compatibility**. Charts without `<sos:clock_domains>` continue to emit byte-identical per PCDN-SOS-08-D-008's MUST — the element is OPTIONAL. SOS-08-E's wave-3-future-mclk byte-identity regression guards (`test_byte_identity_for_no_clock_declared_chart`, `test_byte_identity_for_single_clock_chart` on `TestWave3FutureMultiClockTestbenchWiring`) protect this from regression as the follow-up wave lands the shared helper.
+
+**Tracking**. Cross-references `SOS-08-D-CONCEPTS.md` §15 2026-05-25 entry "Post-wave-4 follow-ups: PCDN-SOS-08-D-008 + compound traversal-order pin" (Issue A). Cites SOS-08-E's own wave commits: `c2aa1cf` (wave-3-future-mclk — the surfacing commit that assumed the now-ratified shape) and `82a49af` ("SOS08W2: wave-2 conformance audit + SOS-08-E $display→$error verb pin" — the wave-2 conformance audit that established the precedent for normatively-pinned cross-reference entries on SOS-08-E §15).
+
+**Invariants upheld**:
+
+- **INV-S-HDL-E-1** (no constrained-random) — unchanged; doc-only cross-reference.
+- **INV-S-HDL-E-2** (no UVM) — unchanged.
+- **INV-S-HDL-E-3** (no inline `assert property` outside bind files) — unchanged.
+- **INV-S-HDL-E-4** (chart-vocabulary failure messages) — unchanged; kind-enum rejection delegates to the SOS-08-D walker's `SOS-08-D wave-future-clkkind:` chart-vocab error for unified messaging across walkers.
+- **INV-S-HDL-E-5** (per-simulator build wrapper) — unchanged.
+- **INV-S-HDL-E-6** (Verilator-subset compliance) — unchanged.
+
+**Cited PCDNs / invariants**: PCDN-SOS-08-D-008 (`<sos:clock_domains>` element shape — formally ratified upstream; SOS-08-E mirrors); INV-S-HDL-E-4 (chart-vocab failure messages — kind-enum rejection routes through D's chart-vocab).
+
+Status: 🟢 **cross-reference logged** — implementation pending in follow-up wave (shared helper `tools/sos-codegen/_clock_domains.py` + alias-resolution emit collapse + TODO removal in `_collect_clock_domains`).
