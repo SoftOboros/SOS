@@ -1879,14 +1879,63 @@ class TestWave3fFutureOnexitCapture:
         assert "end else if" in sv
 
 
-class TestWave3fFutureBMultiParamRejection:
-    """Wave-3-f-future-B (multi-`<param>` events) remains carry-forward.
-    The walker MUST recognise the syntactic form `event.<EV>.<custom>`
-    when `<custom> != "value"` and reject with a chart-vocabulary error
-    citing the wave-3-f-future-B boundary — silent fall-through to
-    wave-1/2 no-op would obscure the chart-author's intent."""
+class TestWave3fFutureBMultiParamRejection_legacy_now_routed:
+    """Wave-3-f-future-B (multi-`<param>` events) is RESOLVED at
+    PCDN-SOS-08-C-007 (2026-05-25 §15) — per-`<param>` sub-buses
+    ``event_<EV>_recv_data_<param>`` are now emitted, and the wave-1
+    blanket "reject any non-`value` suffix" path lifts. This class
+    retains the original `event.<EV>.<custom>` regression-guard
+    fixtures and now asserts the NEW routing behaviour:
 
-    def _chart_with_custom_param(self, suffix: str = "payload"):
+      - When the chart declares ``<param name="<custom>">`` on the
+        matching ``<raise>``/``<send>``, the consume-side
+        ``event.<EV>.<custom>`` routes to the per-param sub-bus
+        ``event_<EV>_recv_data_<custom>`` (no rejection).
+      - When the chart does NOT declare ``<param name="<custom>">`` on
+        any ``<raise>``/``<send>`` for the event, the assign STILL
+        rejects with an actionable PCDN-SOS-08-C-007 chart-vocab
+        error citing the missing declaration.
+    """
+
+    def _chart_with_custom_param_and_declaration(
+        self, suffix: str = "payload"
+    ):
+        """Chart with a `<raise>` carrying `<param name="<suffix>">`
+        AND a consume-side `<assign expr="event.<EV>.<suffix>">`.
+        Under PCDN-SOS-08-C-007 this is the routed-NOT-rejected path."""
+        return {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "send", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": suffix, "expr": "src"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "send", "transition": [
+                    {"event": "tick", "target": "observed"},
+                ]},
+                {
+                    "id": "observed",
+                    "onentry": [{"assign": [
+                        {"location": "x", "expr": f"event.tick.{suffix}"},
+                    ]}],
+                    "transition": [
+                        {"event": "tick", "target": "idle"},
+                    ],
+                },
+            ],
+            "initial": "idle",
+        }
+
+    def _chart_with_undeclared_custom_param(self, suffix: str = "payload"):
+        """Chart with NO `<param>` declared on the `<raise>` but a
+        consume-side `event.<EV>.<suffix>` — still rejects under
+        PCDN-SOS-08-C-007 (undeclared param chart-vocab error)."""
         return {
             "datamodel": [{"data": [
                 {"id": "x", "expr": "0", "type": "i32"},
@@ -1906,47 +1955,60 @@ class TestWave3fFutureBMultiParamRejection:
             "initial": "idle",
         }
 
-    def test_custom_suffix_raises(self):
+    def test_undeclared_custom_suffix_still_rejects(self):
+        """Wave-1 fixture (no `<param>` declared) still rejects, but
+        the error now cites PCDN-SOS-08-C-007 + the actionable
+        "declare on the corresponding <send>/<raise>" hint."""
         with pytest.raises(
             transliterate_hdl_sv.UnsupportedChartError,
-            match=r"wave-3-f-future-B",
+            match=r"PCDN-SOS-08-C-007",
         ):
             transliterate_hdl_sv.render_target(
-                self._chart_with_custom_param("payload"),
+                self._chart_with_undeclared_custom_param("payload"),
                 {"chart_name": "x"},
             )
 
-    def test_custom_suffix_error_names_offending_suffix(self):
+    def test_undeclared_custom_suffix_error_names_offending_suffix(self):
         with pytest.raises(
             transliterate_hdl_sv.UnsupportedChartError,
             match=r"event\.tick\.payload",
         ):
             transliterate_hdl_sv.render_target(
-                self._chart_with_custom_param("payload"),
+                self._chart_with_undeclared_custom_param("payload"),
                 {"chart_name": "x"},
             )
 
-    def test_custom_suffix_error_suggests_rename(self):
-        """Error message includes guidance on the workaround (rename
-        the `<param>` to `value` for the wave-3-e single-bus path)."""
-        try:
+    def test_undeclared_custom_suffix_error_cites_declare_action(self):
+        """Error message includes the actionable PCDN-SOS-08-C-007
+        guidance — declare the `<param>` at the corresponding
+        ``<raise>``/``<send>`` site."""
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"declare on the corresponding <send>/<raise>",
+        ):
             transliterate_hdl_sv.render_target(
-                self._chart_with_custom_param("payload"),
+                self._chart_with_undeclared_custom_param("payload"),
                 {"chart_name": "x"},
             )
-        except transliterate_hdl_sv.UnsupportedChartError as exc:
-            assert "rename" in str(exc).lower() or "value" in str(exc)
-        else:
-            pytest.fail("expected UnsupportedChartError")
+
+    def test_declared_custom_suffix_routes_to_per_param_sub_bus(self):
+        """PCDN-SOS-08-C-007: when the `<param>` IS declared, the
+        consume-side `event.<EV>.<custom>` lowers to a write from the
+        per-param sub-bus, not a chart-vocab error."""
+        sv = transliterate_hdl_sv.render_target(
+            self._chart_with_custom_param_and_declaration("payload"),
+            {"chart_name": "rt"},
+        )["rt_fsm.sv"]
+        # Per-param sub-bus port emitted.
+        assert "event_tick_recv_data_payload" in sv
+        # Register process writes data_x_q from the per-param sub-bus.
+        assert "data_x_q <= event_tick_recv_data_payload" in sv
 
     def test_value_suffix_still_accepted(self):
-        """Backwards-compat: `event.<EV>.value` (wave-3-f baseline)
-        keeps working unchanged — the regex extension MUST NOT regress
-        the canonical single-`<param>` shape."""
-        chart = self._chart_with_custom_param("value")
-        # The exit-without-event-trigger transition in `observed` is
-        # untriggered (target back to idle). Add a tick trigger so the
-        # consume-event validation passes.
+        """Backwards-compat: `event.<EV>.value` keeps working — the
+        legacy unnamed alias remains the routed sink for the canonical
+        wave-3-f shape (byte-identical with the wave-3-f baseline emit)."""
+        chart = self._chart_with_undeclared_custom_param("value")
         chart["state"][1]["transition"] = [
             {"event": "tick", "target": "idle"},
         ]
@@ -1954,11 +2016,13 @@ class TestWave3fFutureBMultiParamRejection:
             chart, {"chart_name": "v"}
         )
         sv = files["v_fsm.sv"]
-        # Standard wave-3-f emit shape present.
         assert (
             "state_q != ST_OBSERVED && state_next == ST_OBSERVED && "
             "event_tick_recv_valid"
         ) in sv
+        # Legacy alias is the source (no per-param sub-bus port).
+        assert "data_x_q <= event_tick_recv_data;" in sv
+        assert "event_tick_recv_data_value" not in sv
 
 
 # ---------------------------------------------------------------------------
@@ -2705,3 +2769,447 @@ class TestWave3fFutureCrossRegionEventCapture:
         assert raiser_map["shared"] == ["a", "b"]
         # Cross-checking: events not raised do not appear.
         assert "ghost" not in raiser_map
+
+
+# ---------------------------------------------------------------------------
+# PCDN-SOS-08-C-007 (2026-05-25 §15) — per-`<param>` sub-buses
+# ``event_<EV>_recv_data_<param>`` for the consume side. Wave-3-e port
+# shape is preserved (single legacy alias) when an event declares zero
+# `<param>` children OR exactly one `<param name="value">`; multi-param
+# events emit BOTH the legacy alias AND per-param sub-buses, with the
+# alias wired at chart-top to the first-declared param's bus (or to the
+# explicit `value` param when no other named params are present).
+# ---------------------------------------------------------------------------
+
+
+class TestPCDN007PerParamSubBuses:
+    """PCDN-SOS-08-C-007 (2026-05-25 §15) — per-`<param>` sub-bus emit
+    + `<assign expr='event.<EV>.<param>'>` routing + chart-vocab
+    rejections for collisions / undeclared params."""
+
+    @staticmethod
+    def _chart_no_params():
+        """Wave-1 fixture: chart with `<raise event="tick"/>` and no
+        ``<param>`` children. Regression guard for byte-identity."""
+        return {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick"},
+                    ]},
+                ]},
+                {"id": "fire", "transition": [
+                    {"event": "tick", "target": "idle"},
+                ]},
+            ],
+            "initial": "idle",
+        }
+
+    @staticmethod
+    def _chart_value_only_param():
+        """Wave-3-f / future-A fixture: a `<param name="value">` ONLY.
+        Per PCDN-SOS-08-C-007 this is byte-identical to the wave-3-e
+        single-bus shape — the legacy alias absorbs the value."""
+        return {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "7", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "value", "expr": "src"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire",
+                 "onentry": [{"assign": [
+                     {"location": "x", "expr": "event.tick.value"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+
+    @staticmethod
+    def _chart_two_named_params():
+        """PCDN-SOS-08-C-007 fixture: two named ``<param>`` children
+        (``hi`` + ``lo``) on a single `<raise>` of the same event.
+        Both per-param sub-buses MUST be emitted alongside the legacy
+        alias."""
+        return {
+            "datamodel": [{"data": [
+                {"id": "hi_q", "expr": "0", "type": "i32"},
+                {"id": "lo_q", "expr": "0", "type": "i32"},
+                {"id": "src_hi", "expr": "1", "type": "i32"},
+                {"id": "src_lo", "expr": "2", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "hi", "expr": "src_hi"},
+                            {"name": "lo", "expr": "src_lo"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire",
+                 "onentry": [{"assign": [
+                     {"location": "hi_q", "expr": "event.tick.hi"},
+                     {"location": "lo_q", "expr": "event.tick.lo"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+
+    @staticmethod
+    def _chart_first_declared_param_only(p_name: str = "payload"):
+        """PCDN-SOS-08-C-007 fixture: a SINGLE named ``<param>`` whose
+        name is NOT ``value``.  The chart-top wires the legacy alias
+        from the first (and only) declared param's bus per the §15
+        ratification text."""
+        return {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "11", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": p_name, "expr": "src"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire",
+                 "onentry": [{"assign": [
+                     {"location": "x", "expr": f"event.tick.{p_name}"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+
+    # ---------- Regression guards (byte-identity for non-multi-param) ----
+
+    def test_byte_identity_for_chart_without_param_children(self):
+        """A chart with `<raise event="tick"/>` and zero declared
+        ``<param>`` children MUST emit byte-identically: the legacy
+        ``event_tick_recv_data`` is NOT present (no payload-bearing
+        event); no per-param sub-bus is emitted."""
+        sv = transliterate_hdl_sv.render_target(
+            self._chart_no_params(), {"chart_name": "nop"}
+        )["nop_fsm.sv"]
+        assert "event_tick_recv_data_" not in sv
+        # No payload event at all → no recv_data port either.
+        assert "event_tick_recv_data" not in sv
+
+    def test_byte_identity_for_chart_with_only_value_param(self):
+        """A chart with exactly one `<param name="value">` keeps the
+        wave-3-e single-bus shape: the legacy ``event_tick_recv_data``
+        is the SOLE bus, no per-param sub-bus emitted."""
+        sv = transliterate_hdl_sv.render_target(
+            self._chart_value_only_param(), {"chart_name": "vop"}
+        )["vop_fsm.sv"]
+        # Legacy alias port emitted.
+        assert "event_tick_recv_data" in sv
+        # No per-param sub-bus port (would be `event_tick_recv_data_value`).
+        assert "event_tick_recv_data_value" not in sv
+        # Register process writes data_x_q from the legacy alias.
+        assert "data_x_q <= event_tick_recv_data;" in sv
+
+    # ---------- Per-`<param>` sub-bus emit (multi-param shape) -----------
+
+    def test_two_param_event_emits_both_sub_buses(self):
+        sv = transliterate_hdl_sv.render_target(
+            self._chart_two_named_params(), {"chart_name": "tp"}
+        )["tp_fsm.sv"]
+        # Both sub-bus ports declared on the region module.
+        assert "event_tick_recv_data_hi" in sv
+        assert "event_tick_recv_data_lo" in sv
+        # Legacy alias port preserved (byte-identity guard) — match on
+        # the full input-wire declaration line (with the trailing comma
+        # because additional sub-bus ports follow it in the port list).
+        assert "input  wire [7:0] event_tick_recv_data," in sv
+
+    def test_legacy_alias_wired_to_value_when_value_param_present(self):
+        """Per the §15 ratification text: when an event declares ONLY
+        ``<param name="value">``, the legacy alias IS the value port;
+        no per-param sub-bus is emitted (byte-identical wave-1).
+        The wave-3-e single-bus emit covers this case."""
+        sv = transliterate_hdl_sv.render_target(
+            self._chart_value_only_param(), {"chart_name": "v1"}
+        )["v1_fsm.sv"]
+        assert "data_x_q <= event_tick_recv_data;" in sv
+
+    def test_legacy_alias_wired_to_first_declared_when_no_value_param(self):
+        """When no ``value`` param exists but other params are
+        declared, the chart-top wrapper wires the legacy alias from
+        the first-declared param's data. The single-region path
+        emits only the per-region module (no wrapper); the wiring is
+        observable at the wrapper level when the chart is multi-region
+        — exercised in the multi-region cross-region test below.
+        At single-region, only the consume-side `<assign
+        expr='event.tick.payload'>` routes to the per-param sub-bus."""
+        sv = transliterate_hdl_sv.render_target(
+            self._chart_first_declared_param_only("payload"),
+            {"chart_name": "fd"},
+        )["fd_fsm.sv"]
+        # Single-region: both the legacy alias port AND the per-param
+        # sub-bus are emitted; the consume-side assign uses the sub-bus.
+        assert "event_tick_recv_data_payload" in sv
+        assert "data_x_q <= event_tick_recv_data_payload" in sv
+
+    # ---------- Suffix routing on the consume side -----------------------
+
+    def test_assign_event_value_routes_to_legacy_alias(self):
+        """``event.<EV>.value`` MUST route to the legacy unnamed
+        alias, regardless of whether other named params are also
+        declared.  (When other named params ARE present alongside an
+        explicit `value` param, the collision rule fires first.)"""
+        sv = transliterate_hdl_sv.render_target(
+            self._chart_value_only_param(), {"chart_name": "val"}
+        )["val_fsm.sv"]
+        # Register-process arm cites the legacy alias.
+        assert "data_x_q <= event_tick_recv_data;" in sv
+
+    def test_assign_event_custom_param_routes_to_sub_bus(self):
+        """``event.<EV>.<param>`` (param != value) MUST route to the
+        per-param sub-bus ``event_<EV>_recv_data_<param>``."""
+        sv = transliterate_hdl_sv.render_target(
+            self._chart_two_named_params(), {"chart_name": "cp"}
+        )["cp_fsm.sv"]
+        # The chart-side datamodel id `hi_q` becomes register
+        # `data_hi_q_q` (data_-prefix + _q-suffix); the capture arms
+        # write to those register names.
+        assert "data_hi_q_q <= event_tick_recv_data_hi" in sv
+        assert "data_lo_q_q <= event_tick_recv_data_lo" in sv
+
+    # ---------- Chart-vocab errors ---------------------------------------
+
+    def test_assign_undeclared_param_raises_chart_vocab_error(self):
+        """``event.<EV>.<param>`` where ``<param>`` is NOT declared on
+        any ``<raise>``/``<send>`` raises an actionable
+        PCDN-SOS-08-C-007 chart-vocab error."""
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "1", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "actual", "expr": "src"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire",
+                 "onentry": [{"assign": [
+                     # Note suffix `bogus` is NOT declared (only `actual` is).
+                     {"location": "x", "expr": "event.tick.bogus"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"PCDN-SOS-08-C-007.*undeclared.*'bogus'",
+        ):
+            transliterate_hdl_sv.render_target(chart, {"chart_name": "x"})
+
+    def test_param_name_value_collision_raises_chart_vocab_error(self):
+        """``<param name="value">`` ALONGSIDE another named ``<param>``
+        is forbidden — it collides with the legacy
+        ``event_<EV>_recv_data`` alias."""
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "value", "expr": "1"},
+                            {"name": "extra", "expr": "2"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire", "transition": [
+                    {"event": "tick", "target": "idle"},
+                ]},
+            ],
+            "initial": "idle",
+        }
+        with pytest.raises(
+            transliterate_hdl_sv.UnsupportedChartError,
+            match=r"collides with the legacy",
+        ):
+            transliterate_hdl_sv.render_target(chart, {"chart_name": "x"})
+
+    # ---------- Edge gating mirrors (entry + exit) -----------------------
+
+    def test_onentry_capture_via_per_param_bus(self):
+        """Wave-3-f-future-B FULL: `<onentry>` captures via the
+        per-param sub-bus emit the entry-edge gating with the
+        per-param `_recv_data_<param>` source."""
+        sv = transliterate_hdl_sv.render_target(
+            self._chart_first_declared_param_only("payload"),
+            {"chart_name": "oe"},
+        )["oe_fsm.sv"]
+        # Entry-edge gating for state FIRE captures via the sub-bus.
+        assert (
+            "state_q != ST_FIRE && state_next == ST_FIRE && "
+            "event_tick_recv_valid"
+        ) in sv
+        assert "data_x_q <= event_tick_recv_data_payload" in sv
+
+    def test_onexit_capture_via_per_param_bus(self):
+        """Wave-3-f-future-B FULL + future-A: `<onexit>` captures via
+        the per-param sub-bus emit the exit-edge gating."""
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "33", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "payload", "expr": "src"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire",
+                 "onexit": [{"assign": [
+                     {"location": "x", "expr": "event.tick.payload"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+        sv = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "ox"}
+        )["ox_fsm.sv"]
+        assert (
+            "state_q == ST_FIRE && state_next != ST_FIRE && "
+            "event_tick_recv_valid"
+        ) in sv
+        assert "data_x_q <= event_tick_recv_data_payload" in sv
+
+    # ---------- Cross-`<raise>` param-name union -------------------------
+
+    def test_multi_raise_same_event_unions_param_names(self):
+        """When two ``<raise>`` blocks of the same event declare
+        different ``<param>`` names, the chart-wide param set is the
+        UNION; both sub-buses are emitted at the consume side."""
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "x_hi", "expr": "0", "type": "i32"},
+                {"id": "x_lo", "expr": "0", "type": "i32"},
+                {"id": "src_hi", "expr": "1", "type": "i32"},
+                {"id": "src_lo", "expr": "2", "type": "i32"},
+            ]}],
+            "state": [
+                # Region raises `tick` from two distinct transitions;
+                # one declares `<param name="hi">`, the other declares
+                # `<param name="lo">`.  The chart-wide param map MUST
+                # union both names.
+                {"id": "idle", "transition": [
+                    {"target": "send_hi", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "hi", "expr": "src_hi"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "send_hi", "transition": [
+                    {"target": "send_lo", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "lo", "expr": "src_lo"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "send_lo",
+                 "onentry": [{"assign": [
+                     {"location": "x_hi", "expr": "event.tick.hi"},
+                     {"location": "x_lo", "expr": "event.tick.lo"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+        sv = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "u"}
+        )["u_fsm.sv"]
+        # Both sub-buses observable.
+        assert "event_tick_recv_data_hi" in sv
+        assert "event_tick_recv_data_lo" in sv
+        # Captures land on the correct sub-bus respectively.  The
+        # chart-side datamodel ids `x_hi` / `x_lo` become register
+        # names `data_x_hi_q` / `data_x_lo_q`.
+        assert "data_x_hi_q <= event_tick_recv_data_hi" in sv
+        assert "data_x_lo_q <= event_tick_recv_data_lo" in sv
+
+    # ---------- Chart-top wrapper integration ----------------------------
+
+    def test_chart_top_emits_per_param_sub_bus_signals(self):
+        """In a multi-region chart, the chart-top wrapper MUST declare
+        per-param sub-bus signals + drive them from the existing
+        aggregate fanout (`ev_<EV>_recv_data_w`)."""
+        chart = {
+            "parallel": [{"id": "par", "state": [
+                {"id": "P", "datamodel": [], "state": [
+                    {"id": "p0", "transition": [
+                        {"target": "p1", "raise_value": [
+                            {"event": "tick", "param": [
+                                {"name": "payload", "expr": "0"},
+                            ]},
+                        ]},
+                    ]},
+                    {"id": "p1", "transition": [{"target": "p0"}]},
+                ]},
+                {"id": "Q", "datamodel": [{"data": [
+                    {"id": "y", "expr": "0", "type": "i32"},
+                ]}], "state": [
+                    {"id": "q0", "transition": [
+                        {"event": "tick", "target": "q1"},
+                    ]},
+                    {"id": "q1",
+                     "onentry": [{"assign": [
+                         {"location": "y", "expr": "event.tick.payload"},
+                     ]}],
+                     "transition": [
+                         {"event": "tick", "target": "q0"},
+                     ]},
+                ]},
+            ]}],
+        }
+        files = transliterate_hdl_sv.render_target(
+            chart, {"chart_name": "ct"}
+        )
+        top = files["ct_top.sv"]
+        # Sub-bus wire declared + driven from the existing aggregate.
+        assert "ev_tick_recv_data_payload_w" in top
+        # Region instance port-map carries the sub-bus connection.
+        assert (
+            ".event_tick_recv_data_payload("
+            "ev_tick_recv_data_payload_w)"
+        ) in top

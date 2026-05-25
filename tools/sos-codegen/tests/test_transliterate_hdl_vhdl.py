@@ -875,11 +875,15 @@ class TestWave3fFutureOnexitCaptureVhdl:
         ) not in vhd
 
 
-class TestWave3fFutureBMultiParamRejectionVhdl:
-    """Wave-3-f-future-B VHDL mirror: custom suffix rejected with
-    actionable chart-vocabulary error."""
+class TestWave3fFutureBMultiParamRejectionVhdl_legacy_now_routed:
+    """VHDL mirror: PCDN-SOS-08-C-007 (2026-05-25 §15) resolves
+    wave-3-f-future-B's blanket "reject any non-`value` suffix".  The
+    walker now routes ``event.<EV>.<param>`` to per-param sub-buses
+    ``event_<EV>_recv_data_<param>`` when ``<param>`` is declared on
+    the corresponding ``<raise>``/``<send>``; undeclared suffixes
+    still reject with an actionable chart-vocab error."""
 
-    def _chart_with_custom_param(self, suffix: str = "payload"):
+    def _chart_with_undeclared_custom_param(self, suffix: str = "payload"):
         return {
             "datamodel": [{"data": [
                 {"id": "x", "expr": "0", "type": "i32"},
@@ -899,28 +903,69 @@ class TestWave3fFutureBMultiParamRejectionVhdl:
             "initial": "idle",
         }
 
-    def test_custom_suffix_raises_vhdl(self):
+    def _chart_with_custom_param_and_declaration(
+        self, suffix: str = "payload"
+    ):
+        return {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "send", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": suffix, "expr": "src"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "send", "transition": [
+                    {"event": "tick", "target": "observed"},
+                ]},
+                {
+                    "id": "observed",
+                    "onentry": [{"assign": [
+                        {"location": "x", "expr": f"event.tick.{suffix}"},
+                    ]}],
+                    "transition": [
+                        {"event": "tick", "target": "idle"},
+                    ],
+                },
+            ],
+            "initial": "idle",
+        }
+
+    def test_undeclared_custom_suffix_still_rejects_vhdl(self):
         with pytest.raises(
             UnsupportedChartError,
-            match=r"wave-3-f-future-B",
+            match=r"PCDN-SOS-08-C-007",
         ):
             render_target(
-                self._chart_with_custom_param("payload"),
+                self._chart_with_undeclared_custom_param("payload"),
                 {"chart_name": "x"},
             )
 
-    def test_custom_suffix_error_names_offending_suffix_vhdl(self):
+    def test_undeclared_custom_suffix_error_names_offending_suffix_vhdl(self):
         with pytest.raises(
             UnsupportedChartError,
             match=r"event\.tick\.payload",
         ):
             render_target(
-                self._chart_with_custom_param("payload"),
+                self._chart_with_undeclared_custom_param("payload"),
                 {"chart_name": "x"},
             )
 
+    def test_declared_custom_suffix_routes_to_per_param_sub_bus_vhdl(self):
+        files = render_target(
+            self._chart_with_custom_param_and_declaration("payload"),
+            {"chart_name": "rt"},
+        )
+        vhd = files["rt_fsm.vhd"]
+        assert "event_tick_recv_data_payload" in vhd
+        assert "x_q <= signed(event_tick_recv_data_payload)" in vhd
+
     def test_value_suffix_still_accepted_vhdl(self):
-        chart = self._chart_with_custom_param("value")
+        chart = self._chart_with_undeclared_custom_param("value")
         chart["state"][1]["transition"] = [
             {"event": "tick", "target": "idle"},
         ]
@@ -931,6 +976,8 @@ class TestWave3fFutureBMultiParamRejectionVhdl:
             "state_next = ST_OBSERVED and "
             "event_tick_recv_valid = '1'"
         ) in vhd
+        # Legacy alias is the source (no per-param sub-bus port).
+        assert "event_tick_recv_data_value" not in vhd
 
 
 # ---------------------------------------------------------------------------
@@ -1569,3 +1616,367 @@ class TestWave3fFutureCrossRegionEventCaptureVhdl:
         assert "shared" in raiser_map
         assert raiser_map["shared"] == ["a", "b"]
         assert "ghost" not in raiser_map
+
+
+# ---------------------------------------------------------------------------
+# PCDN-SOS-08-C-007 (2026-05-25 §15) — per-`<param>` sub-buses (VHDL).
+# Mirror of the SV walker's `TestPCDN007PerParamSubBuses`.  Same fixture
+# layout; assertions adapted for VHDL emit (entity port decls, signal
+# declarations, signed() casts, port-map associations).
+# ---------------------------------------------------------------------------
+
+
+class TestPCDN007PerParamSubBusesVhdl:
+    """PCDN-SOS-08-C-007 (2026-05-25 §15) — VHDL mirror of the SV
+    walker's per-`<param>` sub-bus emit + suffix routing + chart-vocab
+    rejection assertions."""
+
+    @staticmethod
+    def _chart_no_params():
+        return {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick"},
+                    ]},
+                ]},
+                {"id": "fire", "transition": [
+                    {"event": "tick", "target": "idle"},
+                ]},
+            ],
+            "initial": "idle",
+        }
+
+    @staticmethod
+    def _chart_value_only_param():
+        return {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "7", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "value", "expr": "src"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire",
+                 "onentry": [{"assign": [
+                     {"location": "x", "expr": "event.tick.value"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+
+    @staticmethod
+    def _chart_two_named_params():
+        return {
+            "datamodel": [{"data": [
+                {"id": "hi_q", "expr": "0", "type": "i32"},
+                {"id": "lo_q", "expr": "0", "type": "i32"},
+                {"id": "src_hi", "expr": "1", "type": "i32"},
+                {"id": "src_lo", "expr": "2", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "hi", "expr": "src_hi"},
+                            {"name": "lo", "expr": "src_lo"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire",
+                 "onentry": [{"assign": [
+                     {"location": "hi_q", "expr": "event.tick.hi"},
+                     {"location": "lo_q", "expr": "event.tick.lo"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+
+    @staticmethod
+    def _chart_first_declared_param_only(p_name: str = "payload"):
+        return {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "11", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": p_name, "expr": "src"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire",
+                 "onentry": [{"assign": [
+                     {"location": "x", "expr": f"event.tick.{p_name}"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+
+    # ---------- Regression guards ---------------------------------------
+
+    def test_byte_identity_for_chart_without_param_children_vhdl(self):
+        """No `<param>` children → no payload-bearing event → no
+        recv_data port emitted at the entity boundary."""
+        vhd = render_target(
+            self._chart_no_params(), {"chart_name": "nop"}
+        )["nop_fsm.vhd"]
+        assert "event_tick_recv_data_" not in vhd
+        assert "event_tick_recv_data" not in vhd
+
+    def test_byte_identity_for_chart_with_only_value_param_vhdl(self):
+        """A SOLE `<param name="value">` keeps the wave-3-e single-bus
+        emit — the legacy alias is the sole bus; no per-param sub-bus."""
+        vhd = render_target(
+            self._chart_value_only_param(), {"chart_name": "vop"}
+        )["vop_fsm.vhd"]
+        assert "event_tick_recv_data" in vhd
+        assert "event_tick_recv_data_value" not in vhd
+        assert "x_q <= signed(event_tick_recv_data)" in vhd
+
+    # ---------- Per-`<param>` sub-bus emit ------------------------------
+
+    def test_two_param_event_emits_both_sub_buses_vhdl(self):
+        vhd = render_target(
+            self._chart_two_named_params(), {"chart_name": "tp"}
+        )["tp_fsm.vhd"]
+        # Both per-param sub-bus port decls present.
+        assert "event_tick_recv_data_hi" in vhd
+        assert "event_tick_recv_data_lo" in vhd
+        # Legacy alias port preserved (byte-identity guard).
+        assert "event_tick_recv_data " in vhd or "event_tick_recv_data:" in vhd
+
+    def test_legacy_alias_wired_to_value_when_value_param_present_vhdl(self):
+        vhd = render_target(
+            self._chart_value_only_param(), {"chart_name": "v1"}
+        )["v1_fsm.vhd"]
+        assert "x_q <= signed(event_tick_recv_data)" in vhd
+
+    def test_legacy_alias_wired_to_first_declared_when_no_value_param_vhdl(self):
+        vhd = render_target(
+            self._chart_first_declared_param_only("payload"),
+            {"chart_name": "fd"},
+        )["fd_fsm.vhd"]
+        assert "event_tick_recv_data_payload" in vhd
+        assert "x_q <= signed(event_tick_recv_data_payload)" in vhd
+
+    # ---------- Suffix routing ------------------------------------------
+
+    def test_assign_event_value_routes_to_legacy_alias_vhdl(self):
+        vhd = render_target(
+            self._chart_value_only_param(), {"chart_name": "val"}
+        )["val_fsm.vhd"]
+        assert "x_q <= signed(event_tick_recv_data)" in vhd
+
+    def test_assign_event_custom_param_routes_to_sub_bus_vhdl(self):
+        vhd = render_target(
+            self._chart_two_named_params(), {"chart_name": "cp"}
+        )["cp_fsm.vhd"]
+        # Chart-side datamodel id `hi_q` becomes register `hi_q_q`
+        # (VHDL walker keeps the `_q` register suffix).
+        assert "hi_q_q <= signed(event_tick_recv_data_hi)" in vhd
+        assert "lo_q_q <= signed(event_tick_recv_data_lo)" in vhd
+
+    # ---------- Chart-vocab errors --------------------------------------
+
+    def test_assign_undeclared_param_raises_chart_vocab_error_vhdl(self):
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "1", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "actual", "expr": "src"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire",
+                 "onentry": [{"assign": [
+                     {"location": "x", "expr": "event.tick.bogus"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+        with pytest.raises(
+            UnsupportedChartError,
+            match=r"PCDN-SOS-08-C-007.*undeclared.*'bogus'",
+        ):
+            render_target(chart, {"chart_name": "x"})
+
+    def test_param_name_value_collision_raises_chart_vocab_error_vhdl(self):
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "value", "expr": "1"},
+                            {"name": "extra", "expr": "2"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire", "transition": [
+                    {"event": "tick", "target": "idle"},
+                ]},
+            ],
+            "initial": "idle",
+        }
+        with pytest.raises(
+            UnsupportedChartError,
+            match=r"collides with the legacy",
+        ):
+            render_target(chart, {"chart_name": "x"})
+
+    # ---------- Edge gating mirrors -------------------------------------
+
+    def test_onentry_capture_via_per_param_bus_vhdl(self):
+        vhd = render_target(
+            self._chart_first_declared_param_only("payload"),
+            {"chart_name": "oe"},
+        )["oe_fsm.vhd"]
+        assert (
+            "state_q /= ST_FIRE and state_next = ST_FIRE and "
+            "event_tick_recv_valid = '1'"
+        ) in vhd
+        assert "x_q <= signed(event_tick_recv_data_payload)" in vhd
+
+    def test_onexit_capture_via_per_param_bus_vhdl(self):
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "x", "expr": "0", "type": "i32"},
+                {"id": "src", "expr": "33", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "fire", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "payload", "expr": "src"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "fire",
+                 "onexit": [{"assign": [
+                     {"location": "x", "expr": "event.tick.payload"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+        vhd = render_target(chart, {"chart_name": "ox"})["ox_fsm.vhd"]
+        assert (
+            "state_q = ST_FIRE and state_next /= ST_FIRE and "
+            "event_tick_recv_valid = '1'"
+        ) in vhd
+        assert "x_q <= signed(event_tick_recv_data_payload)" in vhd
+
+    # ---------- Cross-`<raise>` param-name union ------------------------
+
+    def test_multi_raise_same_event_unions_param_names_vhdl(self):
+        chart = {
+            "datamodel": [{"data": [
+                {"id": "x_hi", "expr": "0", "type": "i32"},
+                {"id": "x_lo", "expr": "0", "type": "i32"},
+                {"id": "src_hi", "expr": "1", "type": "i32"},
+                {"id": "src_lo", "expr": "2", "type": "i32"},
+            ]}],
+            "state": [
+                {"id": "idle", "transition": [
+                    {"target": "send_hi", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "hi", "expr": "src_hi"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "send_hi", "transition": [
+                    {"target": "send_lo", "raise_value": [
+                        {"event": "tick", "param": [
+                            {"name": "lo", "expr": "src_lo"},
+                        ]},
+                    ]},
+                ]},
+                {"id": "send_lo",
+                 "onentry": [{"assign": [
+                     {"location": "x_hi", "expr": "event.tick.hi"},
+                     {"location": "x_lo", "expr": "event.tick.lo"},
+                 ]}],
+                 "transition": [
+                     {"event": "tick", "target": "idle"},
+                 ]},
+            ],
+            "initial": "idle",
+        }
+        vhd = render_target(chart, {"chart_name": "u"})["u_fsm.vhd"]
+        assert "event_tick_recv_data_hi" in vhd
+        assert "event_tick_recv_data_lo" in vhd
+        assert "x_hi_q <= signed(event_tick_recv_data_hi)" in vhd
+        assert "x_lo_q <= signed(event_tick_recv_data_lo)" in vhd
+
+    # ---------- Chart-top wrapper integration ---------------------------
+
+    def test_chart_top_emits_per_param_sub_bus_signals_vhdl(self):
+        chart = {
+            "parallel": [{"id": "par", "state": [
+                {"id": "P", "datamodel": [], "state": [
+                    {"id": "p0", "transition": [
+                        {"target": "p1", "raise_value": [
+                            {"event": "tick", "param": [
+                                {"name": "payload", "expr": "0"},
+                            ]},
+                        ]},
+                    ]},
+                    {"id": "p1", "transition": [{"target": "p0"}]},
+                ]},
+                {"id": "Q", "datamodel": [{"data": [
+                    {"id": "y", "expr": "0", "type": "i32"},
+                ]}], "state": [
+                    {"id": "q0", "transition": [
+                        {"event": "tick", "target": "q1"},
+                    ]},
+                    {"id": "q1",
+                     "onentry": [{"assign": [
+                         {"location": "y", "expr": "event.tick.payload"},
+                     ]}],
+                     "transition": [
+                         {"event": "tick", "target": "q0"},
+                     ]},
+                ]},
+            ]}],
+        }
+        files = render_target(chart, {"chart_name": "ct"})
+        top = files["ct_top.vhd"]
+        # Sub-bus signal declared + driven from the existing aggregate.
+        assert "ev_tick_recv_data_payload_w" in top
+        # Region instance port-map carries the sub-bus association.
+        assert (
+            "event_tick_recv_data_payload => "
+            "ev_tick_recv_data_payload_w"
+        ) in top

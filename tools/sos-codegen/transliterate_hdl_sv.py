@@ -396,6 +396,17 @@ class HdlEventPayloadCapture:
     # cross-region captures by design — only the chart-top wiring
     # changes (see §15 wave-3-f-future-xreg INV).
     cross_region: bool = False
+    # PCDN-SOS-08-C-007 (2026-05-25 §15): when the capture references a
+    # declared <param name> on the corresponding <raise>/<send> (i.e.
+    # the original expr was ``event.<EV>.<param>`` with ``<param> !=
+    # "value"``), the captured bus is the per-param sub-bus
+    # ``event_<EV>_recv_data_<param>`` rather than the legacy unnamed
+    # alias.  ``None`` (default) preserves the wave-3-f / future-A
+    # byte-identity path: the legacy ``event_<EV>_recv_data`` alias is
+    # the source.  Per-param sub-buses become additional input ports
+    # at region-module boundary and are wired at chart-top to the same
+    # channel data fanout at v1 (no per-param channel demux yet).
+    param_name: str | None = None
 
 
 @dataclass
@@ -1246,53 +1257,149 @@ def _collect_region_raise_events(region: HdlRegion) -> list[str]:
 
 # SOS-08-C wave-3-f (2026-05-24 §15) — `event.<EV>.value` event-object
 # binding on the consume side. Pattern matches exactly the v1 frozen
-# shape; whitespace tolerated around tokens, no other suffixes (e.g.
-# `event.<EV>.<param_name>` for multi-param events) accepted at v1.
+# shape; whitespace tolerated around tokens.
+#
+# PCDN-SOS-08-C-007 (2026-05-25 §15) — the rejection path for
+# ``event.<EV>.<custom>`` is RESOLVED: per-`<param>` sub-buses
+# ``event_<EV>_recv_data_<param>`` are now emitted, and the rejection
+# lifts when the suffix names a declared ``<param name>`` on the
+# corresponding ``<send>``/``<raise>``. Undeclared suffixes still
+# reject with an actionable wave-3-f-future-B / PCDN-SOS-08-C-007
+# chart-vocab error citing the param-declaration requirement.
 _EVENT_PAYLOAD_RE = re.compile(
-    # SOS-08-C wave-3-f-future-A (2026-05-24 §15): extend the regex to
-    # capture the suffix after `event.<EV>.` — `value` is the canonical
-    # single-`<param>` form; any other suffix is recognised
-    # syntactically but rejected with a wave-3-f-future-B citation
-    # because the wave-3-e port shape is single-bus (multi-`<param>`
-    # requires per-param `_recv_data_<custom>` buses, an upstream
-    # amendment).
     r"^\s*event\.([A-Za-z_][A-Za-z0-9_\-]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*$"
 )
+
+
+def _collect_chart_payload_params(
+    regions: list[HdlRegion],
+) -> dict[str, list[str]]:
+    """PCDN-SOS-08-C-007 (2026-05-25 §15) — chart-wide map of event-name
+    → list of declared ``<param name>`` values (UNION across every
+    ``<raise>``/``<send>`` of that event).
+
+    Walked from ``HdlTransition.raise_params`` records (populated by
+    ``_states_from_container``).  Names are deduplicated; first-seen
+    order is preserved (document-order across regions then transitions)
+    because the legacy-alias wiring rule cites "first declared param"
+    when no explicit ``value`` param exists.
+
+    Also enforces the PCDN-SOS-08-C-007 hard-reject collision:
+    ``<param name="value">`` collides with the legacy unnamed alias
+    ``event_<EV>_recv_data`` and is forbidden WHEN it appears alongside
+    one or more other named ``<param>`` children for the same event
+    (the alias slot would be claimed twice). A SOLE ``<param name="value">``
+    is the canonical wave-1 shape and is accepted byte-identically (the
+    legacy alias absorbs the value; no per-param sub-bus is emitted).
+    The walker raises ``UnsupportedChartError`` at chart-XML parse time
+    (before any port emission) when the collision is detected.
+    """
+    out: dict[str, list[str]] = {}
+    seen_per_event: dict[str, set[str]] = {}
+    has_value: dict[str, bool] = {}
+    has_non_value: dict[str, bool] = {}
+    for region in regions:
+        for state in region.states:
+            for tr in state.transitions:
+                for ev, params in tr.raise_params.items():
+                    if not params:
+                        continue
+                    for p_name, _p_expr in params:
+                        if p_name == "value":
+                            has_value[ev] = True
+                        else:
+                            has_non_value[ev] = True
+                        seen = seen_per_event.setdefault(ev, set())
+                        if p_name in seen:
+                            continue
+                        seen.add(p_name)
+                        out.setdefault(ev, []).append(p_name)
+    for ev in sorted(out):
+        if has_value.get(ev) and has_non_value.get(ev):
+            raise UnsupportedChartError(
+                f"SOS-08-C wave-3-f-future-B / PCDN-SOS-08-C-007: "
+                f"<param name='value'/> collides with the legacy "
+                f"<code>event_{_safe_event_ident(ev)}_recv_data</code> "
+                f"alias; use a different param name."
+            )
+    # PCDN-SOS-08-C-007: when the event declares ONLY <param name="value">
+    # the legacy alias absorbs the value (byte-identical wave-1 emit);
+    # remove "value" from the per-param sub-bus map so no extra port is
+    # emitted in that case. Multi-param events with non-`value` names
+    # never reach this branch because the collision rule above rejects
+    # any mix.
+    cleaned: dict[str, list[str]] = {}
+    for ev, names in out.items():
+        if names == ["value"]:
+            continue
+        cleaned[ev] = [n for n in names if n != "value"]
+        if not cleaned[ev]:
+            del cleaned[ev]
+    return cleaned
+
+
+def _per_param_sub_bus_emit_map(
+    chart_payload_params: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """PCDN-SOS-08-C-007 (2026-05-25 §15) — per-event list of
+    ``<param>`` names whose per-param sub-bus
+    ``event_<EV>_recv_data_<param>`` is emitted at the region-module
+    boundary.
+
+    Per the §15 ratification text:
+      - Zero declared params → legacy alias is the SOLE bus; suppress
+        all per-param emit.
+      - Exactly one ``<param name="value">`` → impossible (rejected by
+        ``_collect_chart_payload_params`` as a hard collision).
+      - One or more named params (all != "value" by construction) → the
+        per-param sub-bus emit is materialised for each declared
+        ``<param>``.
+
+    The legacy ``event_<EV>_recv_data`` alias is preserved unconditionally
+    for byte-identity with the wave-3-e / wave-3-f port shape.
+    """
+    return {
+        ev: list(names)
+        for ev, names in chart_payload_params.items()
+        if names
+    }
 
 
 def _collect_region_event_payload_captures(
     region: HdlRegion,
     chart_event_raisers: dict[str, list[str]] | None = None,
+    chart_payload_params: dict[str, list[str]] | None = None,
 ) -> list[HdlEventPayloadCapture]:
     """Walk a region's states and extract event-payload-capture records
     per SOS-08-C wave-3-f (`<onentry>`) + wave-3-f-future-A (`<onexit>`)
-    + wave-3-f-future-xreg (cross-region capture).
+    + wave-3-f-future-xreg (cross-region capture) + PCDN-SOS-08-C-007
+    (per-`<param>` sub-bus routing).
 
     Returns the list of ``HdlEventPayloadCapture`` records found.
 
+    PCDN-SOS-08-C-007 (2026-05-25 §15) — suffix routing:
+      - ``event.<EV>.value`` continues to route to the legacy unnamed
+        alias ``event_<EV>_recv_data`` (``param_name=None``).
+      - ``event.<EV>.<param>`` where ``<param>`` is declared on any
+        ``<raise>``/``<send>`` of ``<EV>`` routes to the per-param
+        sub-bus ``event_<EV>_recv_data_<param>``
+        (``param_name=<param>``).
+      - ``event.<EV>.<param>`` where ``<param>`` is NOT declared
+        raises ``UnsupportedChartError`` citing wave-3-f-future-B /
+        PCDN-SOS-08-C-007 with the actionable fix (declare the param
+        at the raise site).
+
     Per wave-3-f / wave-3-f-future-A v1 validation:
-      - The suffix after ``event.<EV>.`` MUST be ``value`` (single-
-        `<param>` per wave-3-e). Custom suffixes raise
-        ``UnsupportedChartError`` citing wave-3-f-future-B.
-      - The ``<EV>`` event MUST be raised somewhere in the chart.  An
-        event referenced in an assign but never raised anywhere is a
-        chart-vocabulary error (the capture has no source).
+      - The ``<EV>`` event MUST be raised somewhere in the chart.
       - When the event IS a consume event of the region, the capture
         wires intra-region (wave-3-f baseline shape).
       - SOS-08-C wave-3-f-future-xreg (2026-05-24 §15): when the
         event is raised by ANOTHER region (but not this one) and is
         NOT consumed via a transition in this region, the capture is
-        marked ``cross_region=True``.  The per-region FSM still uses
-        its ``event_<EV>_recv_valid`` / ``event_<EV>_recv_data``
-        input ports; the chart-top wrapper routes the broadcast bus
-        (``chart_event_<EV>_raise_valid`` / ``_raise_data``) into
-        them.  Concurrency invariant (cited INV from wave-3-f-future-A):
-        the cross-region capture takes effect on the cycle AFTER the
-        raise, same as intra-region — ``state_q`` transitions on the
-        same clock edge that ``event_<EV>_recv_valid`` deasserts and
-        the captured register updates on that same edge.
+        marked ``cross_region=True``.
     """
     chart_event_raisers = chart_event_raisers or {}
+    chart_payload_params = chart_payload_params or {}
     captures: list[HdlEventPayloadCapture] = []
     consume_events = set(_collect_region_consume_events(region))
 
@@ -1302,32 +1409,29 @@ def _collect_region_event_payload_captures(
             return
         event_name = m.group(1)
         suffix = m.group(2)
-        # Wave-3-f-future-B boundary: only the canonical ``.value``
-        # suffix maps to the wave-3-e single-`<param>` payload bus.
-        # Anything else needs per-param ``_recv_data_<custom>`` ports.
-        if suffix != "value":
+        # PCDN-SOS-08-C-007 (2026-05-25 §15) — suffix routing.
+        param_name: str | None
+        if suffix == "value":
+            param_name = None
+        elif suffix in chart_payload_params.get(event_name, []):
+            param_name = suffix
+        else:
+            declared = chart_payload_params.get(event_name, [])
+            if declared:
+                hint = "; declared params: " + ", ".join(declared)
+            else:
+                hint = (
+                    "; no <param> declared on any <raise>/<send> "
+                    "for this event"
+                )
             raise UnsupportedChartError(
-                f"SOS-08-C wave-3-f-future-B: <on{edge}><assign "
-                f"location='{assign.location}' expr='event.{event_name}."
-                f"{suffix}'/> uses a non-`value` suffix; the wave-3-e "
-                f"payload-bearing event port shape carries a single "
-                f"unnamed bus (``event_{event_name}_recv_data``). "
-                f"Multi-`<param>` event payload composition (per-param "
-                f"sub-buses keyed on `<param name=\"{suffix}\">`) is "
-                f"deferred to a future wave-3-f-future-B amendment + "
-                f"upstream wave-3-e port-shape extension. Until then, "
-                f"either rename your `<param>` to `value`, or compose "
-                f"the payload into a single integer / packed struct on "
-                f"the raise side."
+                f"SOS-08-C wave-3-f-future-B / PCDN-SOS-08-C-007: "
+                f"<on{edge}><assign location='{assign.location}' "
+                f"expr='event.{event_name}.{suffix}'/> references "
+                f"undeclared <param name='{suffix}'/>; declare on the "
+                f"corresponding <send>/<raise>{hint}."
             )
         if event_name in consume_events:
-            # Intra-region capture (wave-3-f baseline shape).  The
-            # event MUST be raised somewhere in the chart for this
-            # to be meaningful — if the only "raiser" is the
-            # chart-top driving the boundary input, the chart still
-            # validates because the region declares the event as a
-            # consume event via its own transition.  Same shape as
-            # before wave-3-f-future-xreg.
             captures.append(
                 HdlEventPayloadCapture(
                     state_id=state.state_id,
@@ -1335,28 +1439,20 @@ def _collect_region_event_payload_captures(
                     event_name=event_name,
                     edge=edge,
                     cross_region=False,
+                    param_name=param_name,
                 )
             )
             return
-        # Not consumed by this region — wave-3-f-future-xreg path.
-        # The event MUST be raised by at least one region in the
-        # chart; otherwise this is a chart-vocab error (the assign's
-        # ``event.<EV>.value`` RHS has no live source).
         raisers = chart_event_raisers.get(event_name, [])
         if not raisers:
             raise UnsupportedChartError(
                 f"SOS-08-C wave-3-f-future-xreg: <on{edge}><assign "
-                f"expr='event.{event_name}.value'/> in region "
+                f"expr='event.{event_name}.{suffix}'/> in region "
                 f"'{region.name}' references event '{event_name}' "
                 f"which is not raised anywhere in the chart. Add a "
                 f"<transition>...<raise event='{event_name}'/></transition> "
                 f"or remove the capture."
             )
-        # Cross-region capture: at least one OTHER region raises the
-        # event.  Mark the capture so the region-module renderer
-        # implicitly adds the event to its consume list (so the
-        # `_recv_valid` / `_recv_data` input ports are emitted) and
-        # the chart-top wrapper wires the broadcast bus into them.
         captures.append(
             HdlEventPayloadCapture(
                 state_id=state.state_id,
@@ -1364,6 +1460,7 @@ def _collect_region_event_payload_captures(
                 event_name=event_name,
                 edge=edge,
                 cross_region=True,
+                param_name=param_name,
             )
         )
 
@@ -1532,6 +1629,7 @@ def _emit_module_header(
     consume_events: list[str] | None = None,
     payload_send_events: list[str] | None = None,
     payload_recv_events: list[str] | None = None,
+    payload_recv_params: dict[str, list[str]] | None = None,
 ) -> str:
     """Emit the SV module port list for a region FSM.
 
@@ -1545,6 +1643,7 @@ def _emit_module_header(
     consume_events = consume_events or []
     payload_send_events = payload_send_events or []
     payload_recv_events = payload_recv_events or []
+    payload_recv_params = payload_recv_params or {}
     port_lines: list[str] = []
     port_lines.append("input  wire clk")
     port_lines.append("input  wire rst")
@@ -1627,6 +1726,27 @@ def _emit_module_header(
         egress_annotations.append(
             f"        // chart event `{ev}` (wave-3-e payload)"
         )
+    # PCDN-SOS-08-C-007 (2026-05-25 §15): per-`<param>` sub-bus input
+    # ports for payload-bearing events whose ``<raise>``/``<send>``
+    # declares one or more ``<param name>`` children (where ``<param>``
+    # != "value", which is reserved for the legacy unnamed alias and
+    # rejected at chart-XML parse time by ``_collect_chart_payload_params``).
+    # Each declared ``<param>`` becomes an additional ingress port
+    # ``event_<EV>_recv_data_<param>`` alongside the wave-3-e legacy
+    # alias ``event_<EV>_recv_data`` (preserved for byte-identity).
+    n_subbus_ports = 0
+    for ev in payload_recv_events:
+        ev_ident = _safe_event_ident(ev)
+        for p_name in payload_recv_params.get(ev, []):
+            port_lines.append(
+                f"input  wire [{_PAYLOAD_WIDTH - 1}:0] "
+                f"event_{ev_ident}_recv_data_{p_name}"
+            )
+            egress_annotations.append(
+                f"        // chart event `{ev}` (PCDN-SOS-08-C-007 "
+                f"per-param `{p_name}`)"
+            )
+            n_subbus_ports += 1
 
     lines: list[str] = []
     lines.append(f"module {module_name} (")
@@ -1634,11 +1754,14 @@ def _emit_module_header(
     # so the comma lands BEFORE the comment, not at end-of-line. Raise
     # events contribute 2 ports each; consume events contribute 2
     # ports each; wave-3-e payload events add 1 port per (send|recv).
+    # PCDN-SOS-08-C-007: per-param sub-buses add one additional port
+    # per (event, param) pair.
     n_egress_ports = (
         2 * len(raise_events)
         + 2 * len(consume_events)
         + len(payload_send_events)
         + len(payload_recv_events)
+        + n_subbus_ports
     )
     n_pre_egress = len(port_lines) - n_egress_ports
     egress_idx = 0
@@ -1765,8 +1888,17 @@ def _emit_register_process(
                 "            if" if arm_idx == 0 else "            end else if"
             )
             chain_lines.append(f"{keyword} ({cond}) begin")
+            # PCDN-SOS-08-C-007 (2026-05-25 §15): per-`<param>` sub-bus
+            # routing. ``param_name=None`` → legacy unnamed alias
+            # ``event_<EV>_recv_data`` (byte-identical wave-3-f).
+            # ``param_name=<name>`` → per-param sub-bus
+            # ``event_<EV>_recv_data_<name>``.
+            if cap.param_name is None:
+                rhs_bus = f"event_{ev_ident}_recv_data"
+            else:
+                rhs_bus = f"event_{ev_ident}_recv_data_{cap.param_name}"
             chain_lines.append(
-                f"                {sig.sv_name}_q <= event_{ev_ident}_recv_data;"
+                f"                {sig.sv_name}_q <= {rhs_bus};"
             )
             arm_idx += 1
         # Wave-3-f-future-assign arms — same per-signal if/else if
@@ -2271,6 +2403,7 @@ def _render_region_module(
     depth_budget: int,
     payload_events: set[str] | None = None,
     chart_event_raisers: dict[str, list[str]] | None = None,
+    chart_payload_params: dict[str, list[str]] | None = None,
 ) -> tuple[str, str, list[_DatamodelSignal]]:
     """Render a single region into a complete SV module file body.
 
@@ -2303,7 +2436,9 @@ def _render_region_module(
     # with `cross_region=True`; we fold those event names into
     # `consume_events` below so the input ports are emitted.
     event_payload_captures = _collect_region_event_payload_captures(
-        region, chart_event_raisers=chart_event_raisers
+        region,
+        chart_event_raisers=chart_event_raisers,
+        chart_payload_params=chart_payload_params,
     )
     xreg_consume_events = _cross_region_consume_events(event_payload_captures)
     if xreg_consume_events:
@@ -2328,6 +2463,16 @@ def _render_region_module(
     payload_recv_events = [
         ev for ev in consume_events if ev in payload_events
     ]
+    # PCDN-SOS-08-C-007 (2026-05-25 §15): per-event per-`<param>`
+    # sub-bus map for the recv side. The region only needs the
+    # sub-bus port when it consumes the event (either via a
+    # transition or via a cross-region capture).
+    chart_payload_params = chart_payload_params or {}
+    payload_recv_params: dict[str, list[str]] = {
+        ev: list(chart_payload_params.get(ev, []))
+        for ev in payload_recv_events
+        if chart_payload_params.get(ev)
+    }
 
     header = _emit_header(chart_name, kind=f"region-fsm:{region.name}")
     module_header = _emit_module_header(
@@ -2335,6 +2480,7 @@ def _render_region_module(
         raise_events, consume_events,
         payload_send_events=payload_send_events,
         payload_recv_events=payload_recv_events,
+        payload_recv_params=payload_recv_params,
     )
     state_constants = _emit_state_constants(region)
     register_decls = _emit_register_decls(region, datamodel_signals, n_states)
@@ -2872,6 +3018,129 @@ def _augment_chart_top_with_broadcast_bus_sv(
 
 
 # ---------------------------------------------------------------------------
+# PCDN-SOS-08-C-007 (2026-05-25 §15) — chart-top per-`<param>` sub-bus
+# emit (SV).
+# ---------------------------------------------------------------------------
+
+
+def _augment_chart_top_with_per_param_sub_buses_sv(
+    wrapper_body: str,
+    chart_payload_params: dict[str, list[str]],
+    region_payload_recv_events: dict[str, list[str]],
+) -> str:
+    """Post-process the chart-top wrapper body to emit per-`<param>`
+    sub-bus wires + inject sub-bus connections into region instances.
+
+    For each chart-wide event with declared ``<param>`` children:
+      - Declare ``wire [7:0] ev_<EV>_recv_data_<param>_w;`` and assign
+        it from the existing ``ev_<EV>_recv_data_w`` aggregate (at v1
+        all sub-buses carry the same payload as the legacy alias; per-
+        param channel demux is a future amendment).
+      - For each region module's instance that has ``event_<EV>_recv_data``
+        connected, inject ``.event_<EV>_recv_data_<param>(ev_<EV>_recv_data_<param>_w)``
+        immediately after the legacy connection.
+
+    The wrapper body is otherwise untouched — byte-identical to the
+    pre-PCDN-SOS-08-C-007 output for events with no declared
+    ``<param>`` children, AND for events with only the legacy `.value`
+    suffix consumed.
+
+    Args:
+      wrapper_body: the chart-top wrapper SV source.
+      chart_payload_params: per-event list of declared ``<param>``
+        names (built by ``_collect_chart_payload_params``).
+      region_payload_recv_events: per-region list of payload-recv
+        events (declared OR cross-region) — used to locate where each
+        instance's ``event_<EV>_recv_data`` connection lives so the
+        sub-bus connection is injected at the right place.
+    """
+    if not chart_payload_params:
+        return wrapper_body
+    if "endmodule" not in wrapper_body:
+        return wrapper_body
+    # Only act when at least one event has at least one declared param.
+    active = {
+        ev: names for ev, names in chart_payload_params.items() if names
+    }
+    if not active:
+        return wrapper_body
+
+    # 1) Declare per-param sub-bus wires + drive them from the existing
+    #    aggregate fanout.  Insert the block right before the final
+    #    `endmodule` (after any prior wave-3-f-future-xreg block).
+    sub_bus_lines: list[str] = [
+        "",
+        "    // ----- PCDN-SOS-08-C-007 (2026-05-25 §15) -----",
+        "    // Per-`<param>` sub-buses for payload-bearing events.",
+        "    // Each sub-bus mirrors the chart-wide recv_data aggregate",
+        "    // at v1 (per-param channel demux is a future amendment);",
+        "    // the per-param naming is the cross-walker contract surface",
+        "    // SOS-08-D + E + F + G consume.",
+    ]
+    for ev in sorted(active):
+        ev_ident = _safe_event_ident(ev)
+        for p_name in active[ev]:
+            wname = f"ev_{ev_ident}_recv_data_{p_name}_w"
+            src = f"ev_{ev_ident}_recv_data_w"
+            if src in wrapper_body:
+                sub_bus_lines.append(f"    wire [7:0] {wname} = {src};")
+            else:
+                # Defensive: if the aggregate wasn't emitted (e.g. an
+                # event with declared params but no payload-recv
+                # consumer that produced the `_w` aggregate), zero the
+                # sub-bus so downstream consumers see a defined value.
+                sub_bus_lines.append(f"    wire [7:0] {wname} = 8'd0;")
+    sub_bus_block = "\n".join(sub_bus_lines) + "\n"
+
+    idx = wrapper_body.rfind("endmodule")
+    wrapper_body = wrapper_body[:idx] + sub_bus_block + wrapper_body[idx:]
+
+    # 2) For each region instance, inject per-param sub-bus connections
+    #    after each existing ``.event_<EV>_recv_data(ev_<EV>_recv_data_w)``
+    #    line.  We don't need to know region instance names — we look
+    #    for the connection pattern and inject the matching sub-buses
+    #    only when the event has declared params.
+    for ev in sorted(active):
+        ev_ident = _safe_event_ident(ev)
+        legacy_conn = (
+            f".event_{ev_ident}_recv_data"
+            f"(ev_{ev_ident}_recv_data_w)"
+        )
+        # Build the injection block (one new connection per declared param).
+        new_conns: list[str] = []
+        for p_name in active[ev]:
+            new_conns.append(
+                f".event_{ev_ident}_recv_data_{p_name}"
+                f"(ev_{ev_ident}_recv_data_{p_name}_w)"
+            )
+        # Walk the body line-by-line, find lines ending in the legacy
+        # connection (with optional trailing comma), and emit the new
+        # connection lines preserving indentation + comma discipline.
+        out_lines: list[str] = []
+        for line in wrapper_body.split("\n"):
+            stripped = line.rstrip(",").rstrip()
+            if stripped.endswith(legacy_conn):
+                # Strip the existing trailing comma so we add one back
+                # AFTER inserting the new connections (the LAST line of
+                # the instance keeps its no-comma shape; intermediate
+                # lines carry the comma).
+                base_indent = line[: len(line) - len(line.lstrip())]
+                had_trailing_comma = line.rstrip().endswith(",")
+                # The legacy connection now needs a comma (we're adding
+                # more connections after it).
+                out_lines.append(f"{stripped},")
+                for j, conn in enumerate(new_conns):
+                    if j < len(new_conns) - 1 or had_trailing_comma:
+                        out_lines.append(f"{base_indent}{conn},")
+                    else:
+                        out_lines.append(f"{base_indent}{conn}")
+            else:
+                out_lines.append(line)
+        wrapper_body = "\n".join(out_lines)
+    return wrapper_body
+
+
+# ---------------------------------------------------------------------------
 # Public entry points.
 # ---------------------------------------------------------------------------
 
@@ -2964,6 +3233,14 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
     # because the map is consumed only on the cross-region path.
     chart_event_raisers = build_chart_event_raiser_map(regions)
 
+    # PCDN-SOS-08-C-007 (2026-05-25 §15): chart-wide map of declared
+    # `<param name>` values per event.  Drives the wave-3-e per-`<param>`
+    # sub-bus emit + the suffix-routing inside
+    # ``_collect_region_event_payload_captures``.  Also enforces the
+    # ``<param name="value">`` hard-reject collision at chart-XML parse
+    # time (before any port emit).
+    chart_payload_params = _collect_chart_payload_params(regions)
+
     files: dict[str, str] = {}
     region_datamodel_signals: dict[str, list[_DatamodelSignal]] = {}
     region_xreg_events: dict[str, list[str]] = {}
@@ -2973,6 +3250,7 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
             region, chart_name, multi_region, depth_budget,
             payload_events=payload_events,
             chart_event_raisers=chart_event_raisers,
+            chart_payload_params=chart_payload_params,
         )
         files[fname] = body
         region_datamodel_signals[region.name] = dmsigs
@@ -2980,7 +3258,9 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
         # capture (sibling-raised) so the chart-top post-processor
         # can emit the broadcast-bus wiring.
         caps = _collect_region_event_payload_captures(
-            region, chart_event_raisers=chart_event_raisers
+            region,
+            chart_event_raisers=chart_event_raisers,
+            chart_payload_params=chart_payload_params,
         )
         region_xreg_events[region.name] = _cross_region_consume_events(caps)
 
@@ -3008,6 +3288,24 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
         # (in `hdl_common`) untouched per the file-scope discipline.
         wrapper_body = _augment_chart_top_with_broadcast_bus_sv(
             wrapper_body, chart_event_raisers, region_xreg_events,
+        )
+        # PCDN-SOS-08-C-007 (2026-05-25 §15): post-process the
+        # chart-top body to emit per-`<param>` sub-bus wires + inject
+        # sub-bus connections into region instances.  Same file-scope
+        # rationale as the broadcast-bus augmenter above.
+        region_payload_recv: dict[str, list[str]] = {}
+        for region in regions:
+            recv_evs = [
+                ev for ev in _collect_region_consume_events(region)
+                if ev in chart_payload_params
+            ]
+            # Include cross-region capture events too.
+            recv_evs = sorted(
+                set(recv_evs) | set(region_xreg_events.get(region.name, []))
+            )
+            region_payload_recv[region.name] = recv_evs
+        wrapper_body = _augment_chart_top_with_per_param_sub_buses_sv(
+            wrapper_body, chart_payload_params, region_payload_recv,
         )
         files[wrapper_name] = wrapper_body
 
