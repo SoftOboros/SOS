@@ -24,6 +24,7 @@ These tests verify the wave-1 surface of
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -113,12 +114,14 @@ class TestFileSet:
     ratification = 12 total.
     """
 
-    def test_emits_twelve_files(self):
+    def test_emits_fourteen_files(self):
         files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
-        # Six SV files + five build wrappers + verilator stubs = 12 (wave-3).
-        assert len(files) == 12, (
-            f"SOS-08-E §6 + wave-3 §15: expected 12 emitted files, "
-            f"got {len(files)}: {sorted(files)}"
+        # Six SV files + five build wrappers + verilator stubs +
+        # wave-3-future parser package + per-chart state-symbol
+        # table = 14.
+        assert len(files) == 14, (
+            f"SOS-08-E §6 + wave-3 + wave-3-future §15: expected 14 "
+            f"emitted files, got {len(files)}: {sorted(files)}"
         )
 
     def test_emits_top_module(self):
@@ -823,16 +826,14 @@ class TestWave3ParallelChartEmit:
         return sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
 
     def test_parallel_emit_keeps_same_artifact_count(self):
-        """Parallel charts emit 12 files (8 wave-1 SV + 5 wave-2
-        wrappers + 1 wave-3 stub header)... wait, wave-1 SV was 6.
-        So: 4 SV + 5 wrappers + 1 stub header + 2 SVA-bind files per
-        region = 4 + 5 + 1 + (2 * regions). For two regions: 14."""
+        """Parallel charts emit 16 files post wave-3-future:
+        4 SV core + 5 wrappers + 1 stub header + 2 wave-3-future
+        helpers (parser pkg + state-symbol table) + 2 SVA files per
+        region (2 regions = 4) = 16."""
         files = self._files()
-        # 4 SV core + 5 wrappers + 1 stub header = 10 + 2 regions * 2
-        # SVA files = 14.
-        assert len(files) == 14, (
-            f"Wave-3 parallel emit expected 14 files; got {len(files)}: "
-            f"{sorted(files)}"
+        assert len(files) == 16, (
+            f"Wave-3-future parallel emit expected 16 files; got "
+            f"{len(files)}: {sorted(files)}"
         )
 
     def test_parallel_emit_per_region_sva_bind(self):
@@ -930,12 +931,14 @@ class TestWave3ParallelChartEmit:
 
     def test_single_region_path_unchanged(self):
         """Wave-3 keeps the single-region emit path intact — the
-        wave-2 file set + wave-3's added stubs header = 12."""
+        wave-2 file set + wave-3's added stubs header +
+        wave-3-future helpers (parser pkg + state-symbol table) = 14."""
         files = sv_tb.render_target(
             _simple_chart(), {"chart_name": "demo"}
         )
-        # Same 11 wave-2 files + 1 wave-3 stubs header.
-        assert len(files) == 12
+        # Same 11 wave-2 files + 1 wave-3 stubs header +
+        # 2 wave-3-future helpers = 14.
+        assert len(files) == 14
         assert "tb/sv/demo/verilator_stubs.svh" in files
         # Single-region vif keeps the wave-1 shape.
         vif = files["tb/sv/demo/dut_if_demo.sv"]
@@ -1085,3 +1088,252 @@ class TestWave3SvaBindParityWithSOS08D:
                 f"between SOS-08-D + SOS-08-E walkers (gate (h) "
                 f"byte-identical claim)"
             )
+
+
+# ---------------------------------------------------------------------------
+# Wave-3-future (2026-05-24 §15) — full SOS-03 vector-schema consumer.
+#
+# Replaces the wave-1 LCD inline integer-field extractor with a shared
+# JSONL parser package + per-chart state symbol table, so SOS-03 vector
+# traces with string-valued state names (per SOS-03 §15 2026-05-24
+# schema extension) are consumable directly by the SV checker without
+# an external Python preflight.
+# ---------------------------------------------------------------------------
+
+
+class TestWave3FutureSharedParserPackage:
+    """``sos_jsonl_parser_pkg.svh`` emit shape."""
+
+    def _files(self):
+        return sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+
+    def test_parser_package_file_emitted(self):
+        files = self._files()
+        assert "tb/sv/demo/sos_jsonl_parser_pkg.svh" in files
+
+    def test_parser_package_has_include_guard(self):
+        src = self._files()["tb/sv/demo/sos_jsonl_parser_pkg.svh"]
+        assert "`ifndef SOS_JSONL_PARSER_PKG_DEMO_SVH" in src
+        assert "`define SOS_JSONL_PARSER_PKG_DEMO_SVH" in src
+        assert "`endif // SOS_JSONL_PARSER_PKG_DEMO_SVH" in src
+
+    def test_parser_package_defines_parse_int(self):
+        src = self._files()["tb/sv/demo/sos_jsonl_parser_pkg.svh"]
+        assert "function automatic int sos_jsonl_parse_int(" in src
+
+    def test_parser_package_defines_parse_string(self):
+        """Wave-3-future adds string-field extraction so SOS-03's
+        string-valued `expected_state_str` can be consumed."""
+        src = self._files()["tb/sv/demo/sos_jsonl_parser_pkg.svh"]
+        assert "function automatic int sos_jsonl_parse_string(" in src
+
+    def test_parser_string_extractor_bounds_inner_loop(self):
+        """Defensive: malformed line without closing quote MUST not
+        spin — the extractor caps at 1024 chars."""
+        src = self._files()["tb/sv/demo/sos_jsonl_parser_pkg.svh"]
+        assert "if (k >= 1024) break" in src
+
+    def test_parser_package_no_uvm_or_random(self):
+        """INV-S-HDL-E-1 + INV-S-HDL-E-2 hold for the new package."""
+        src = self._files()["tb/sv/demo/sos_jsonl_parser_pkg.svh"]
+        # Strip line comments before scanning to avoid false positives.
+        scanned = re.sub(r"//.*$", "", src, flags=re.MULTILINE)
+        assert "randomize" not in scanned
+        assert "rand " not in scanned
+        assert "uvm_pkg" not in scanned
+
+    def test_parallel_chart_also_emits_parser_package(self):
+        files = sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
+        assert "tb/sv/p/sos_jsonl_parser_pkg.svh" in files
+
+
+class TestWave3FutureStateSymbolTable:
+    """``sos_<chart>_state_symbols.svh`` emit shape."""
+
+    def _files(self):
+        return sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+
+    def test_state_symbols_file_emitted(self):
+        files = self._files()
+        assert "tb/sv/demo/sos_demo_state_symbols.svh" in files
+
+    def test_state_symbols_function_signature(self):
+        src = self._files()["tb/sv/demo/sos_demo_state_symbols.svh"]
+        assert (
+            "function automatic int sos_demo_state_id_of(input string name);"
+            in src
+        )
+
+    def test_state_symbols_enumerates_chart_states(self):
+        """Each chart state appears in the if/elsif chain at its
+        document-order index (matching SOS-08-C one-hot encoding)."""
+        src = self._files()["tb/sv/demo/sos_demo_state_symbols.svh"]
+        # _simple_chart has states [idle(0), active(1)].
+        assert 'if (name == "idle") return 0;' in src
+        assert 'if (name == "active") return 1;' in src
+        # Unknown name returns -1.
+        assert "return -1;" in src
+
+    def test_state_symbols_parallel_chart_flattens_all_regions(self):
+        """For parallel charts the symbol table includes EVERY region's
+        states so a per-region `expected_state_<region>_str` can
+        resolve any name the trace references."""
+        files = sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
+        src = files["tb/sv/p/sos_p_state_symbols.svh"]
+        for sid in ("l_idle", "l_active", "r_idle", "r_active"):
+            assert f'if (name == "{sid}") return ' in src
+
+    def test_state_symbols_include_guard(self):
+        src = self._files()["tb/sv/demo/sos_demo_state_symbols.svh"]
+        assert "`ifndef SOS_STATE_SYMBOLS_DEMO_SVH" in src
+        assert "`define SOS_STATE_SYMBOLS_DEMO_SVH" in src
+
+
+class TestWave3FutureCheckerStringFieldPath:
+    """Checker emit consumes string-valued expected_state via the
+    symbol table."""
+
+    def _checker(self):
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        return files["tb/sv/demo/sos_checker_demo.sv"]
+
+    def test_checker_includes_shared_parser_header(self):
+        src = self._checker()
+        assert '`include "sos_jsonl_parser_pkg.svh"' in src
+
+    def test_checker_includes_state_symbol_header(self):
+        src = self._checker()
+        assert '`include "sos_demo_state_symbols.svh"' in src
+
+    def test_checker_calls_shared_parse_int(self):
+        src = self._checker()
+        assert "sos_jsonl_parse_int(" in src
+
+    def test_checker_calls_shared_parse_string(self):
+        src = self._checker()
+        assert "sos_jsonl_parse_string(" in src
+
+    def test_checker_resolves_string_via_symbol_table(self):
+        src = self._checker()
+        assert "sos_demo_state_id_of(expected_state_str)" in src
+
+    def test_checker_drops_inline_parse_int(self):
+        """Wave-3-future deduplicates: the inline parse_int_field that
+        wave-1/2 emit is gone — sourced from the shared header."""
+        src = self._checker()
+        # The shared parser declaration belongs in the header file;
+        # the checker class should NOT declare its own `function int
+        # parse_int_field(...)`.
+        assert "function int parse_int_field(string line" not in src
+
+    def test_checker_failure_message_uses_chart_state_string(self):
+        """INV-S-HDL-E-4 + INV-SOS-H — when the trace named the state
+        by string, the failure message names it back."""
+        src = self._checker()
+        # The wave-3-future failure-message branch quotes the string
+        # value via %s.
+        assert "expected state=\\\"%s\\\"" in src
+
+    def test_checker_failure_message_backwards_compatible_int_branch(self):
+        """When the trace used the integer field only (wave-1/2 shape),
+        the failure message is the legacy `expected_state=%0d` form."""
+        src = self._checker()
+        assert "expected_state=%0d at cycle" in src
+
+
+class TestWave3FutureParallelCheckerStringFieldPath:
+    """Per-region string-field path for parallel charts."""
+
+    def _checker(self):
+        files = sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
+        return files["tb/sv/p/sos_checker_p.sv"]
+
+    def test_parallel_checker_includes_shared_parser_header(self):
+        src = self._checker()
+        assert '`include "sos_jsonl_parser_pkg.svh"' in src
+
+    def test_parallel_checker_includes_state_symbol_header(self):
+        src = self._checker()
+        assert '`include "sos_p_state_symbols.svh"' in src
+
+    def test_parallel_checker_per_region_string_field(self):
+        """Each region declares its own `expected_state_<region>_str`
+        + resolves via the symbol table."""
+        src = self._checker()
+        # Region `left`.
+        assert "string expected_state_left_str" in src
+        assert (
+            "sos_jsonl_parse_string(\n                line, "
+            "\"expected_state_left_str\", expected_state_left_str"
+            in src
+        )
+        # Region `right`.
+        assert "string expected_state_right_str" in src
+        assert (
+            "sos_jsonl_parse_string(\n                line, "
+            "\"expected_state_right_str\", expected_state_right_str"
+            in src
+        )
+
+    def test_parallel_checker_per_region_symbol_lookup(self):
+        src = self._checker()
+        assert "sos_p_state_id_of(expected_state_left_str)" in src
+        assert "sos_p_state_id_of(expected_state_right_str)" in src
+
+    def test_parallel_checker_drops_inline_parse_int(self):
+        """Parallel checker no longer carries its own copy of the
+        integer-field extractor."""
+        src = self._checker()
+        assert "function int parse_int_field(string line" not in src
+
+
+class TestWave3FutureDriverUsesSharedParser:
+    """Driver was already using `parse_int_field`; wave-3-future
+    swaps it for `sos_jsonl_parse_int` and removes the inline copy."""
+
+    def _driver(self):
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        return files["tb/sv/demo/sos_driver_demo.sv"]
+
+    def test_driver_includes_shared_parser_header(self):
+        src = self._driver()
+        assert '`include "sos_jsonl_parser_pkg.svh"' in src
+
+    def test_driver_calls_shared_parse_int(self):
+        src = self._driver()
+        assert "sos_jsonl_parse_int(line, \"event\"" in src
+        assert "sos_jsonl_parse_int(line, \"cycles\"" in src
+
+    def test_driver_drops_inline_parse_int(self):
+        src = self._driver()
+        assert "function int parse_int_field(string line" not in src
+
+
+class TestWave3FutureInvariantsPreserved:
+    """The new emit MUST not regress INV-S-HDL-E-1..3."""
+
+    def test_render_target_does_not_raise(self):
+        """If any emitted file violates INV-S-HDL-E-1/2/3, _audit_all
+        raises InvariantAuditError. Round-tripping both chart shapes
+        through render_target without exception is the load-bearing
+        invariant check."""
+        # Single-region.
+        sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        # Parallel.
+        sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
+
+    def test_emitted_files_contain_no_random_keywords(self):
+        """Wave-3-future emit MUST keep INV-S-HDL-E-1 (no
+        constrained-random). Belt-and-suspenders against the audit."""
+        for chart, name in (
+            (_simple_chart(), "demo"),
+            (_parallel_chart(), "p"),
+        ):
+            files = sv_tb.render_target(chart, {"chart_name": name})
+            for fname, src in files.items():
+                if fname.endswith((".mk", ".do", ".sh", ".tcl",
+                                   "_sva.sv", "_bind.sv")):
+                    continue
+                scanned = re.sub(r"//.*$", "", src, flags=re.MULTILINE)
+                assert "randomize(" not in scanned, fname
+                assert "uvm_pkg" not in scanned, fname

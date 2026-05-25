@@ -552,3 +552,89 @@ For the canonical 2-region test fixture (`left` + `right`): 14 files. For the SO
 **Cited PCDNs**: PCDN-SOS-08-E-002 (Verilator-subset compliance via deferred-failure stubs — wave-3 ratifies); PCDN-SOS-08-E-004 (per-region testbench shape at v1 — wave-3 implements); PCDN-SOS-08-E-001 (flat class hierarchy at v1 — wave-3 preserves); §12 gate (h) cross-path equivalence with SOS-08-D (extended to parallel charts).
 
 Status: 🟢 **wave-3 complete** — parallel charts emit cleanly through the SV-testbench walker; Verilator deferred-failure-stub policy header ratifies INV-S-HDL-E-6. Wave-3-future tracks the full SOS-03 vector-schema consumer + layered class hierarchy opt-in + per-region SVA datamodel-binding + multi-clock-domain parallel-chart wiring.
+
+### 2026-05-24 — Impl wave-3-future: full SOS-03 vector-schema consumer (Ira)
+
+Lands the first wave-3-future carry-forward: the **full SOS-03 vector-schema consumer**. Wave-1's emitted SV checker consumed a minimal `{"event": N, "cycles": N, "expected_state": N}` JSONL shape via a hand-rolled inline `parse_int_field` function duplicated across driver + checker classes. Wave-3-future:
+
+1. Factors the inline parser into a shared SystemVerilog header (`sos_jsonl_parser_pkg.svh`) — driver + checker + parallel-checker source from one parser implementation.
+2. Adds string-field extraction (`sos_jsonl_parse_string`) — SOS-03's §15 2026-05-24 schema extension uses string-valued `expected_state` names; the SV checker now consumes them directly.
+3. Emits a per-chart state symbol table (`sos_<chart>_state_symbols.svh`) — single function `sos_<chart>_state_id_of(string name) → int` resolving chart-state names to their document-order one-hot bit position (matching SOS-08-C `_emit_state_constants` encoding).
+4. Extends the single-region + parallel checkers to consume the string-valued `expected_state_str` / `expected_state_<region>_str` fields via the symbol table. Wave-1/2 integer-only traces keep working unchanged via the backwards-compatible fall-through.
+
+**Implementation surface** (one walker, two new emitters):
+
+- **`_emit_jsonl_parser_pkg(chart_name)` (new)** — emits `sos_jsonl_parser_pkg.svh` carrying `sos_jsonl_parse_int(line, key, value)` + `sos_jsonl_parse_string(line, key, value)`. Header-only (`\`include`-able), include-guard form. Per-chart guard name `SOS_JSONL_PARSER_PKG_<CHART>_SVH` ensures the same header file co-exists across multiple per-chart SV testbenches in one compilation unit without redefinition collisions. The string-extractor caps its inner loop at 1024 characters to bound malformed-line behaviour (no spinning on a line that drops its closing quote).
+- **`_emit_state_symbols(chart_name, state_ids)` (new)** — emits `sos_<chart>_state_symbols.svh`. Single function (`function automatic int sos_<chart>_state_id_of(input string name)`) with a straight-line if/elsif chain over the chart's states in document order. Each `if (name == "<state_id>") return <idx>;` line; `return -1;` terminator for unknown names. Parallel charts get a flattened symbol table covering EVERY region's states so any `expected_state_<region>_str` value can resolve.
+- **`_emit_driver_class` (extended)** — adds `\`include "sos_jsonl_parser_pkg.svh"`; calls `sos_jsonl_parse_int(line, "event", event_code)` + `sos_jsonl_parse_int(line, "cycles", cycles_wait)` instead of the inline form; removes the inline `parse_int_field` function from the emitted class body. INV-S-HDL-E-3 audit preserved (no `assert property`); INV-S-HDL-E-1 preserved (pure procedural SV).
+- **`_emit_checker_class` (extended)** — adds both `\`include`s + per-line dual parse: integer (`expected_state`) AND optional string (`expected_state_str`). When the string field is present, the value is resolved via `sos_<chart>_state_id_of` to its bit position; the one-hot value `1 << bit_idx` is then compared against `current_state`. Unknown-state-string surfaces as a chart-vocabulary failure (`expected_state_str=\"<x>\" is not a known chart-state`) per INV-S-HDL-E-4 + INV-SOS-H. When only the integer field is present, the legacy wave-1/2 comparison path runs unchanged — backwards-compatible by construction.
+- **`_emit_checker_class_parallel` (extended)** — same per-region: each region declares its own `expected_state_<region>_str` + parses + resolves via the symbol table. The per-region failure-message format names the region AND the chart-state string verbatim, concretising INV-S-HDL-E-4 + INV-SOS-H at the region grain for parallel charts.
+- **`render_target` (extended)** — computes `all_state_ids` once (flattens regions for parallel charts), wires both new emit helpers into the file set. Net: every chart's emit grows by exactly two files (parser pkg + state symbols).
+
+**Emit shape (chart-vocabulary trace example)**:
+
+The wave-3-future checker now consumes a SOS-03-aligned trace like:
+
+```jsonl
+{"expected_state_str": "active", "cycles": 4}
+{"expected_state_str": "idle", "cycles": 2}
+```
+
+A mismatch produces a chart-vocabulary failure message naming the state by string:
+
+```
+[FAIL] vector V3: chart `demo` expected state="active" (one-hot=0b10) at cycle 40ns; observed current_state=0b01.
+```
+
+The string `"active"` round-trips from the trace file through the symbol table to the failure message verbatim — that's INV-S-HDL-E-4's load-bearing concretisation at the chart-vocabulary level.
+
+For parallel charts the per-region trace shape is:
+
+```jsonl
+{"expected_state_left_str": "l_active", "expected_state_right_str": "r_idle", "cycles": 1}
+```
+
+Each region resolves independently; failure messages name the failing region:
+
+```
+[FAIL] vector V5 region `right` chart `p`: expected state="r_idle" (one-hot=0b01) at cycle 50ns; observed current_state=0b10.
+```
+
+**Invariants upheld**:
+
+- **INV-S-HDL-E-1** (no constrained-random) — preserved. Both new helpers (`sos_jsonl_parse_int`, `sos_jsonl_parse_string`, `sos_<chart>_state_id_of`) are pure procedural SV. `_audit_emitted_file` continues to pass cleanly.
+- **INV-S-HDL-E-2** (no UVM) — preserved.
+- **INV-S-HDL-E-3** (no inline `assert property` outside bind files) — preserved.
+- **INV-S-HDL-E-4** (chart-vocabulary failure messages) — **strengthened**: failure messages now name chart states by their string identifier when the trace did, removing the wave-1/2 "expected_state=3" integer-bit-pattern form that required the reader to know the encoding.
+- **INV-S-HDL-E-5** (per-region testbench shape) — preserved + extended: per-region string-field support adds depth, not new structure.
+- **INV-S-HDL-E-6** (Verilator-subset compliance) — preserved: the new helper functions use only basic SV control flow + `string.getc` / `string.len` / string concatenation, all within Verilator's documented subset.
+- **PCDN-SOS-08-E-001** (flat class hierarchy at v1) — preserved.
+- **PCDN-SOS-08-E-002** (Verilator deferred-failure stubs) — preserved unchanged.
+- **PCDN-SOS-08-E-004** (per-region testbench shape) — preserved.
+- **SOS-03 §15 2026-05-24 schema extension** (string-valued state names) — **now consumable by the SV-testbench walker directly**. No external Python preflight needed.
+
+**Cross-walker source-of-truth boundary**: the per-chart symbol table uses document-order indices matching SOS-08-C's `_emit_state_constants` exactly. SOS-08-C owns the per-region FSM module's one-hot encoding; this wave-3-future emit mirrors that encoding by-construction through shared `_collect_state_ids` / `_collect_regions` walkers. Any future SOS-08-C refactor that reorders states must propagate to SOS-08-E in the same wave; the parity is structural, not test-pinned.
+
+**Wave-3-future remaining boundary** (still deferred; revisit when bench evidence arrives):
+
+- **Full SOS-03 vector JSON parser** (nested `inputs` object, `cycles_advance`, multi-step file structure) — wave-3-future v1 consumes a JSONL-flattened form of the SOS-03 schema. A real multi-line / nested-object JSON parser in pure SV is a substantial undertaking (string + array indexing + escape handling); the JSONL-flat shape captures the load-bearing 80% (string-valued state names, per-region expected states, cycles_wait) with a fraction of the implementation cost. Lift to nested parsing when a real chart needs `inputs.<port>` driving on the SV side.
+- **Layered class hierarchy opt-in** — PCDN-SOS-08-E-001 names a flat hierarchy at v1; layered (test → env → agent → sequencer) opt-in lands when a customer authors a chart whose stimulus complexity justifies the additional structure.
+- **Per-region SVA datamodel-binding** — sibling SOS-08-D wave-4-future tracks the cross-region datamodel binding; SOS-08-E inherits the SVA bind output, so no separate work on the SV-testbench side until the SOS-08-D wave-4-future remaining items land.
+- **Multi-clock-domain parallel-chart testbench wiring** — wave-3 emits a single chart-top clock; multi-clock-domain region clocking lands when SOS-08-D wave-4 multi-clock-domain bind wiring (already landed) needs a testbench-side clock partitioner.
+
+**Test count**: net +30 across `tools/sos-codegen/tests/test_transliterate_hdl_sv_tb.py`:
+
+- `TestWave3FutureSharedParserPackage` (7) — file emit; include guard; `sos_jsonl_parse_int` declared; `sos_jsonl_parse_string` declared; string-extractor 1024-cap bound; no UVM / random keywords; parallel chart emits the same package.
+- `TestWave3FutureStateSymbolTable` (5) — file emit; function signature; each chart state at its document-order index; parallel chart flattens all regions' states; include guard.
+- `TestWave3FutureCheckerStringFieldPath` (8) — single-region checker includes both new headers; calls shared helpers; resolves string via symbol table; drops the inline `parse_int_field`; failure messages render chart-state strings; backwards-compatible integer-only path retained.
+- `TestWave3FutureParallelCheckerStringFieldPath` (5) — parallel checker mirrors the same shape per-region.
+- `TestWave3FutureDriverUsesSharedParser` (3) — driver includes the parser header; calls `sos_jsonl_parse_int`; drops inline parser.
+- `TestWave3FutureInvariantsPreserved` (2) — round-trip both chart shapes through `render_target` without `InvariantAuditError`; emitted SV contains no `randomize(` / `uvm_pkg` outside bind/build files.
+
+Plus three file-count assertions updated (`test_emits_twelve_files` → `test_emits_fourteen_files`; parallel-chart parity test extended from 14 → 16 files; single-region wave-3 stability test extended from 12 → 14 files).
+
+**Test suite**: 673/673 passing (643 prior + 30 new wave-3-future).
+
+**Cited PCDNs / invariants**: PCDN-SOS-08-E-001 / -002 / -004 unchanged; INV-S-HDL-E-1..6 preserved (E-4 strengthened); SOS-03 §15 2026-05-24 schema extension consumed; SOS-08-C `_emit_state_constants` encoding mirrored by-construction.
+
+Status: 🟢 **wave-3-future SOS-03 schema consumer landed**. Layered class hierarchy + nested-JSON parser + per-region SVA datamodel-binding + multi-clock-domain testbench wiring remain on the wave-3-future track, each gated on customer demand / sibling-walker dependencies.

@@ -418,6 +418,13 @@ def _emit_driver_class(chart_name: str) -> str:
 //
 // Per INV-S-HDL-E-3 the driver does NOT inline any ``assert property``;
 // property checking lives exclusively in the bound SVA module.
+//
+// Wave-3-future (2026-05-24 §15): JSONL parsing is sourced from the
+// shared ``sos_jsonl_parser_pkg.svh`` header (single-source for both
+// the driver and the checker); the legacy inline ``parse_int_field``
+// is gone in favour of ``sos_jsonl_parse_int``.
+
+`include "sos_jsonl_parser_pkg.svh"
 
 class {cls};
 
@@ -480,12 +487,14 @@ class {cls};
         event_code  = 0;
         cycles_wait = 1;
 
-        // Extract `"event": N` and `"cycles": N` from the line. Wave-1
-        // uses simple substring matching; INV-S-HDL-E-1 forbids
-        // randomize() so we cannot use SystemVerilog's class-based
-        // randomization helpers — manual parse is the LCD path.
-        parsed = parse_int_field(line, "event", event_code);
-        parsed = parse_int_field(line, "cycles", cycles_wait);
+        // Extract `"event": N` and `"cycles": N` from the line.
+        // Wave-3-future (2026-05-24 §15): both extractions go through
+        // the shared `sos_jsonl_parse_int` from sos_jsonl_parser_pkg.svh
+        // — no more per-class duplication of the parser body.
+        // INV-S-HDL-E-1 (no constrained-random) preserved — the
+        // shared helper is pure procedural SV.
+        parsed = sos_jsonl_parse_int(line, "event", event_code);
+        parsed = sos_jsonl_parse_int(line, "cycles", cycles_wait);
         if (cycles_wait <= 0) cycles_wait = 1;
 
         vif.event_in = event_code[7:0];
@@ -498,61 +507,231 @@ class {cls};
                  vector_idx, event_code, cycles_wait);
     endtask
 
-    // Tiny JSON-Lines integer-field extractor — wave-1 LCD form.
-    // Returns 1 on hit, 0 on miss. Wave-2 swaps in a full JSON parser.
-    function int parse_int_field(string line, string key,
-                                 inout int value);
-        int klen;
-        int slen;
-        int i;
-        int j;
-        int sign;
-        byte ch;
-        int  hit;
-        int  acc;
-        slen = line.len();
-        klen = key.len();
-        hit  = 0;
-        // Find `"<key>"` in the line.
-        for (i = 0; i + klen + 2 <= slen; i++) begin
-            if (line.getc(i) == "\\"") begin
-                // Compare key.
-                hit = 1;
-                for (j = 0; j < klen; j++) begin
-                    if (line.getc(i + 1 + j) != key.getc(j)) begin
-                        hit = 0;
-                        break;
-                    end
-                end
-                if (hit && line.getc(i + 1 + klen) == "\\"") begin
-                    // Skip whitespace + colon.
-                    j = i + 2 + klen;
-                    while (j < slen &&
-                          (line.getc(j) == " " || line.getc(j) == ":" ||
-                           line.getc(j) == 9)) j++;
-                    sign = 1;
-                    if (j < slen && line.getc(j) == "-") begin
-                        sign = -1;
-                        j++;
-                    end
-                    acc = 0;
-                    while (j < slen &&
-                          line.getc(j) >= "0" && line.getc(j) <= "9") begin
-                        ch = line.getc(j);
-                        acc = acc * 10 + (ch - 8'h30);
-                        j++;
-                    end
-                    value = sign * acc;
-                    return 1;
-                end
-                hit = 0;
-            end
-        end
-        return 0;
-    endfunction
+    // Wave-3-future (2026-05-24 §15): the integer-field extractor
+    // formerly inlined here is now sourced from
+    // sos_jsonl_parser_pkg.svh — driver + checker share one parser
+    // implementation.
 
 endclass
 """
+
+
+def _emit_jsonl_parser_pkg(chart_name: str) -> str:
+    """``sos_jsonl_parser_pkg.svh`` — shared SV header-only package.
+
+    SOS-08-E wave-3-future (2026-05-24 §15): factors the wave-1
+    integer-field extractor out of the driver + checker source files
+    into a shared SystemVerilog header, and adds a string-field
+    extractor so SOS-03 vector traces with string-valued state names
+    (per the SOS-03 §15 2026-05-24 schema extension) can be consumed
+    directly by the checker without an external Python preflight.
+
+    The package is header-only (``\\`include``-able) rather than a
+    SV package import to keep wave-1 build flows unchanged — adding a
+    `package` keyword would force every Makefile to compile the
+    package before the consumers, which is unnecessary tooling churn
+    for a two-function helper.
+
+    Functions:
+
+      * ``sos_jsonl_parse_int(line, key, value) → int`` — extracts a
+        bare-integer JSON field. Returns 1 on hit, 0 on miss.
+        Identical contract to the wave-1 ``parse_int_field`` it
+        supersedes (the wave-3-future emit aliases the legacy name
+        inside the consumer classes for source-level continuity).
+      * ``sos_jsonl_parse_string(line, key, value, max_len) → int`` —
+        extracts a quoted-string JSON field, populating ``value``
+        (output string) up to ``max_len`` characters. Returns 1 on
+        hit, 0 on miss. Strips no escapes — SOS-03 chart-state names
+        are bare identifiers with no special characters per §5.4 of
+        the SOS-03 vector schema spec.
+
+    Per INV-S-HDL-E-1 both functions are constrained-random-free.
+    Per INV-S-HDL-E-2 no UVM symbols are referenced.
+    Per INV-S-HDL-E-3 no SVA properties are declared.
+    """
+    base = _normalise_chart_name(chart_name)
+    guard = f"SOS_JSONL_PARSER_PKG_{base.upper()}_SVH"
+    return _HEADER_PREFIX + f"""//
+// Shared JSON-Lines field extractors for the {chart_name} SV testbench.
+//
+// Per SOS-08-E §15 wave-3-future (2026-05-24): factor the wave-1
+// integer-field extractor into a shared header; add string-field
+// extraction for SOS-03 vector traces that carry symbolic state
+// names (per SOS-03 §15 2026-05-24 schema extension).
+//
+// `\\`include`d by ``sos_driver_{chart_name}.sv`` and
+// ``sos_checker_{chart_name}.sv`` to keep parse logic single-source.
+
+`ifndef {guard}
+`define {guard}
+
+// ---------------------------------------------------------------------------
+// sos_jsonl_parse_int — wave-1 integer-field extractor, lifted into
+// the shared header. Returns 1 on hit, 0 on miss; populates ``value``
+// (inout) with the parsed signed integer.
+// ---------------------------------------------------------------------------
+function automatic int sos_jsonl_parse_int(
+    input  string line,
+    input  string key,
+    inout  int    value
+);
+    int   klen;
+    int   slen;
+    int   i;
+    int   j;
+    int   sign;
+    byte  ch;
+    int   hit;
+    int   acc;
+    slen = line.len();
+    klen = key.len();
+    hit  = 0;
+    for (i = 0; i + klen + 2 <= slen; i++) begin
+        if (line.getc(i) == "\\"") begin
+            hit = 1;
+            for (j = 0; j < klen; j++) begin
+                if (line.getc(i + 1 + j) != key.getc(j)) begin
+                    hit = 0;
+                    break;
+                end
+            end
+            if (hit && line.getc(i + 1 + klen) == "\\"") begin
+                j = i + 2 + klen;
+                while (j < slen &&
+                      (line.getc(j) == " " || line.getc(j) == ":" ||
+                       line.getc(j) == 9)) j++;
+                sign = 1;
+                if (j < slen && line.getc(j) == "-") begin
+                    sign = -1;
+                    j++;
+                end
+                acc = 0;
+                while (j < slen &&
+                      line.getc(j) >= "0" && line.getc(j) <= "9") begin
+                    ch = line.getc(j);
+                    acc = acc * 10 + (ch - 8'h30);
+                    j++;
+                end
+                value = sign * acc;
+                return 1;
+            end
+            hit = 0;
+        end
+    end
+    return 0;
+endfunction
+
+// ---------------------------------------------------------------------------
+// sos_jsonl_parse_string — quoted-string field extractor. Populates
+// ``value`` with the contents of the matched `"<key>": "<string>"`
+// pair. Returns 1 on hit, 0 on miss. No escape processing — SOS-03
+// chart-state names are bare identifiers per the vector-schema spec.
+// ---------------------------------------------------------------------------
+function automatic int sos_jsonl_parse_string(
+    input  string line,
+    input  string key,
+    inout  string value
+);
+    int   klen;
+    int   slen;
+    int   i;
+    int   j;
+    int   k;
+    int   hit;
+    byte  ch;
+    slen = line.len();
+    klen = key.len();
+    hit  = 0;
+    for (i = 0; i + klen + 2 <= slen; i++) begin
+        if (line.getc(i) == "\\"") begin
+            hit = 1;
+            for (j = 0; j < klen; j++) begin
+                if (line.getc(i + 1 + j) != key.getc(j)) begin
+                    hit = 0;
+                    break;
+                end
+            end
+            if (hit && line.getc(i + 1 + klen) == "\\"") begin
+                j = i + 2 + klen;
+                // Skip whitespace + colon.
+                while (j < slen &&
+                      (line.getc(j) == " " || line.getc(j) == ":" ||
+                       line.getc(j) == 9)) j++;
+                // Expect opening quote.
+                if (j >= slen || line.getc(j) != "\\"") begin
+                    return 0;
+                end
+                j++; // skip opening quote
+                value = "";
+                k = 0;
+                while (j < slen && line.getc(j) != "\\"") begin
+                    ch = line.getc(j);
+                    value = {{value, string'(ch)}};
+                    j++;
+                    k++;
+                    // Cap to keep the inner loop bounded against
+                    // malformed lines (no closing quote). 1024 chars
+                    // is multiples of any realistic chart-state name.
+                    if (k >= 1024) break;
+                end
+                return 1;
+            end
+            hit = 0;
+        end
+    end
+    return 0;
+endfunction
+
+`endif // {guard}
+"""
+
+
+def _emit_state_symbols(chart_name: str, state_ids: list[str]) -> str:
+    """``sos_<chart>_state_symbols.svh`` — per-chart state symbol table.
+
+    SOS-08-E wave-3-future (2026-05-24 §15): emits a single SV
+    function ``sos_<chart>_state_id_of(string name) → int`` mapping
+    chart-state names to their one-hot encoding bit position (matching
+    SOS-08-C ``_emit_state_constants`` document-order convention).
+    Returns -1 for unknown names so the checker can render a chart-
+    vocabulary failure message naming the offending state.
+
+    Index 0..N-1 corresponds to the bit position in the one-hot
+    encoding; the checker constructs the one-hot value via
+    ``1 << sos_<chart>_state_id_of(name)`` and compares against
+    ``current_state``.
+    """
+    base = _normalise_chart_name(chart_name)
+    guard = f"SOS_STATE_SYMBOLS_{base.upper()}_SVH"
+    fn_name = f"sos_{base}_state_id_of"
+    lines: list[str] = []
+    lines.append(_HEADER_PREFIX.rstrip())
+    lines.append(
+        f"\n//\n// Per-chart state symbol table for `{chart_name}` — \n"
+        f"// maps chart-state names to their one-hot bit position.\n"
+        f"//\n// Per SOS-08-E §15 wave-3-future: the checker uses this\n"
+        f"// to consume SOS-03 vector traces with string-valued\n"
+        f"// `expected_state_str` fields (per SOS-03 §15 2026-05-24\n"
+        f"// schema extension), rendering chart-vocabulary failure\n"
+        f"// messages naming the offending state by chart name per\n"
+        f"// INV-S-HDL-E-4 + INV-SOS-H.\n//\n"
+    )
+    lines.append(f"`ifndef {guard}")
+    lines.append(f"`define {guard}")
+    lines.append("")
+    lines.append("// Returns the one-hot bit position for `name`, or -1 if")
+    lines.append("// the name is not a known chart-state.")
+    lines.append(f"function automatic int {fn_name}(input string name);")
+    if state_ids:
+        for idx, sid in enumerate(state_ids):
+            # SystemVerilog string comparison uses ==.
+            lines.append(f'    if (name == "{sid}") return {idx};')
+    lines.append("    return -1;")
+    lines.append("endfunction")
+    lines.append("")
+    lines.append(f"`endif // {guard}")
+    return "\n".join(lines) + "\n"
 
 
 def _emit_checker_class(chart_name: str) -> str:
@@ -561,9 +740,20 @@ def _emit_checker_class(chart_name: str) -> str:
     Observes the DUT's ``current_state`` through the virtual interface
     and compares against the trace's ``expected_state`` field. Failures
     render in chart vocabulary per §5.5 + INV-S-HDL-E-4.
+
+    SOS-08-E wave-3-future (2026-05-24 §15): the checker reads BOTH
+    the wave-1 integer ``expected_state`` field AND a new string-
+    valued ``expected_state_str`` field. When ``expected_state_str``
+    is present, it is resolved via the per-chart state-symbol table
+    (``sos_<chart>_state_id_of``) and takes precedence; the integer
+    field is retained for backwards compatibility with wave-1/2
+    traces. Failure messages name the chart-state STRING when the
+    string field was used — concretising INV-S-HDL-E-4 + INV-SOS-H.
     """
     cls = checker_class_name(chart_name)
     iface = virtual_if_name(chart_name)
+    base = _normalise_chart_name(chart_name)
+    symbol_fn = f"sos_{base}_state_id_of"
     return _HEADER_PREFIX + f"""//
 // Response checker class for the {chart_name} chart testbench.
 //
@@ -575,6 +765,15 @@ def _emit_checker_class(chart_name: str) -> str:
 //
 // Per INV-S-HDL-E-3 the checker does NOT inline any ``assert property``;
 // property checking is in the SOS-08-D-emitted SVA bind file.
+//
+// Wave-3-future (2026-05-24 §15): JSONL parsing is sourced from the
+// shared ``sos_jsonl_parser_pkg.svh`` header (single-source for both
+// the driver and the checker). The string-valued ``expected_state_str``
+// field is resolved via the per-chart state-symbol table emitted in
+// ``sos_<chart>_state_symbols.svh``.
+
+`include "sos_jsonl_parser_pkg.svh"
+`include "sos_{base}_state_symbols.svh"
 
 class {cls};
 
@@ -595,8 +794,12 @@ class {cls};
         string line;
         int    rc;
         int    expected_state;
+        string expected_state_str;
+        int    expected_state_resolved;
         int    cycles_wait;
-        int    parsed;
+        int    parsed_int;
+        int    parsed_str;
+        int    bit_idx;
 
         fh = $fopen(trace_path, "r");
         if (fh == 0) begin
@@ -614,27 +817,63 @@ class {cls};
             rc = $fgets(line, fh);
             if (rc == 0) break;
 
-            expected_state = -1;
-            cycles_wait    = 1;
-            parsed = parse_int_field(line, "expected_state",
-                                     expected_state);
-            parsed = parse_int_field(line, "cycles", cycles_wait);
+            expected_state          = -1;
+            expected_state_str      = "";
+            expected_state_resolved = -1;
+            cycles_wait             = 1;
+            parsed_int = sos_jsonl_parse_int(
+                line, "expected_state", expected_state
+            );
+            parsed_str = sos_jsonl_parse_string(
+                line, "expected_state_str", expected_state_str
+            );
+            parsed_int = sos_jsonl_parse_int(line, "cycles", cycles_wait);
             if (cycles_wait <= 0) cycles_wait = 1;
+
+            // Wave-3-future: string field takes precedence when present.
+            // Resolution path: symbol table -> bit position -> one-hot
+            // value compared against current_state.
+            if (parsed_str) begin
+                bit_idx = {symbol_fn}(expected_state_str);
+                if (bit_idx < 0) begin
+                    fail_count = fail_count + 1;
+                    $display(
+                        "[FAIL] vector V%0d: chart `{chart_name}` trace named expected_state_str=\\"%s\\" which is not a known chart-state of `{chart_name}`. INV-S-HDL-E-4 vocabulary violation.",
+                        vector_idx + 1, expected_state_str
+                    );
+                end else begin
+                    expected_state_resolved = 1 << bit_idx;
+                end
+            end else if (parsed_int) begin
+                expected_state_resolved = expected_state;
+            end
 
             // Wait the prescribed cycles before sampling.
             repeat (cycles_wait) @(posedge vif.clk);
 
             vector_idx = vector_idx + 1;
 
-            if (expected_state >= 0) begin
-                if (vif.current_state != expected_state[vif.current_state'left:0]) begin
+            if (expected_state_resolved >= 0) begin
+                if (vif.current_state != expected_state_resolved[vif.current_state'left:0]) begin
                     fail_count = fail_count + 1;
                     // INV-S-HDL-E-4: chart-vocabulary failure message.
-                    $display(
-                        "[FAIL] vector V%0d: chart `{chart_name}` produced expected_state=%0d at cycle %0t; observed current_state=%0b.",
-                        vector_idx, expected_state, $time,
-                        vif.current_state
-                    );
+                    // When the trace named the state by string (the
+                    // wave-3-future shape), surface that string in the
+                    // failure message verbatim.
+                    if (parsed_str) begin
+                        $display(
+                            "[FAIL] vector V%0d: chart `{chart_name}` expected state=\\"%s\\" (one-hot=0b%0b) at cycle %0t; observed current_state=0b%0b.",
+                            vector_idx, expected_state_str,
+                            expected_state_resolved, $time,
+                            vif.current_state
+                        );
+                    end else begin
+                        $display(
+                            "[FAIL] vector V%0d: chart `{chart_name}` produced expected_state=%0d at cycle %0t; observed current_state=%0b.",
+                            vector_idx, expected_state, $time,
+                            vif.current_state
+                        );
+                    end
                 end
             end
         end
@@ -644,55 +883,6 @@ class {cls};
 
     function int get_fail_count();
         return fail_count;
-    endfunction
-
-    // Same minimal JSON-Lines integer-field extractor as the driver.
-    function int parse_int_field(string line, string key,
-                                 inout int value);
-        int klen;
-        int slen;
-        int i;
-        int j;
-        int sign;
-        byte ch;
-        int  hit;
-        int  acc;
-        slen = line.len();
-        klen = key.len();
-        hit  = 0;
-        for (i = 0; i + klen + 2 <= slen; i++) begin
-            if (line.getc(i) == "\\"") begin
-                hit = 1;
-                for (j = 0; j < klen; j++) begin
-                    if (line.getc(i + 1 + j) != key.getc(j)) begin
-                        hit = 0;
-                        break;
-                    end
-                end
-                if (hit && line.getc(i + 1 + klen) == "\\"") begin
-                    j = i + 2 + klen;
-                    while (j < slen &&
-                          (line.getc(j) == " " || line.getc(j) == ":" ||
-                           line.getc(j) == 9)) j++;
-                    sign = 1;
-                    if (j < slen && line.getc(j) == "-") begin
-                        sign = -1;
-                        j++;
-                    end
-                    acc = 0;
-                    while (j < slen &&
-                          line.getc(j) >= "0" && line.getc(j) <= "9") begin
-                        ch = line.getc(j);
-                        acc = acc * 10 + (ch - 8'h30);
-                        j++;
-                    end
-                    value = sign * acc;
-                    return 1;
-                end
-                hit = 0;
-            end
-        end
-        return 0;
     endfunction
 
 endclass
@@ -1188,40 +1378,96 @@ def _emit_checker_class_parallel(
     """
     cls = checker_class_name(chart_name)
     iface = virtual_if_name(chart_name)
+    base = _normalise_chart_name(chart_name)
+    symbol_fn = f"sos_{base}_state_id_of"
     region_names = [r[0] for r in regions]
 
     region_reads = []
     region_parse = []
+    region_decls_lines = []
     for rn in region_names:
         ident = _sanitize_sv_identifier(rn)
+        region_decls_lines.append(
+            f"        int    expected_state_{ident};"
+        )
+        region_decls_lines.append(
+            f"        string expected_state_{ident}_str;"
+        )
+        region_decls_lines.append(
+            f"        int    expected_state_{ident}_resolved;"
+        )
+        region_decls_lines.append(
+            f"        int    parsed_str_{ident};"
+        )
+        region_decls_lines.append(
+            f"        int    bit_idx_{ident};"
+        )
+        # Per-region parse block: integer + string + resolution.
         region_parse.append(
-            f"            expected_state_{ident} = -1;\n"
-            f"            parsed = parse_int_field(line, "
-            f"\"expected_state_{ident}\", expected_state_{ident});"
+            f"            expected_state_{ident}          = -1;\n"
+            f"            expected_state_{ident}_str      = \"\";\n"
+            f"            expected_state_{ident}_resolved = -1;\n"
+            f"            parsed = sos_jsonl_parse_int(\n"
+            f"                line, \"expected_state_{ident}\", "
+            f"expected_state_{ident}\n"
+            f"            );\n"
+            f"            parsed_str_{ident} = sos_jsonl_parse_string(\n"
+            f"                line, \"expected_state_{ident}_str\", "
+            f"expected_state_{ident}_str\n"
+            f"            );\n"
+            f"            if (parsed_str_{ident}) begin\n"
+            f"                bit_idx_{ident} = {symbol_fn}("
+            f"expected_state_{ident}_str);\n"
+            f"                if (bit_idx_{ident} < 0) begin\n"
+            f"                    fail_count = fail_count + 1;\n"
+            f"                    $display(\n"
+            f"                        \"[FAIL] vector V%0d region "
+            f"`{rn}` chart `{chart_name}`: expected_state_{ident}_str=\\\"%s\\\" is not a known chart-state.\",\n"
+            f"                        vector_idx + 1, "
+            f"expected_state_{ident}_str\n"
+            f"                    );\n"
+            f"                end else begin\n"
+            f"                    expected_state_{ident}_resolved = "
+            f"1 << bit_idx_{ident};\n"
+            f"                end\n"
+            f"            end else if (expected_state_{ident} >= 0) begin\n"
+            f"                expected_state_{ident}_resolved = "
+            f"expected_state_{ident};\n"
+            f"            end"
         )
         region_reads.append(
-            f"            if (expected_state_{ident} >= 0) begin\n"
+            f"            if (expected_state_{ident}_resolved >= 0) begin\n"
             f"                if (vif.current_state_{ident} != "
-            f"expected_state_{ident}[vif.current_state_{ident}'left:0]) "
+            f"expected_state_{ident}_resolved[vif.current_state_{ident}'left:0]) "
             f"begin\n"
             f"                    fail_count = fail_count + 1;\n"
             f"                    // INV-S-HDL-E-4: chart-vocabulary "
             f"failure message; region named.\n"
-            f"                    $display(\n"
-            f"                        \"[FAIL] vector V%0d region "
+            f"                    if (parsed_str_{ident}) begin\n"
+            f"                        $display(\n"
+            f"                            \"[FAIL] vector V%0d region "
+            f"`{rn}` chart `{chart_name}`: expected state=\\\"%s\\\" "
+            f"(one-hot=0b%0b) at cycle %0t; observed current_state=0b%0b.\",\n"
+            f"                            vector_idx, "
+            f"expected_state_{ident}_str, "
+            f"expected_state_{ident}_resolved, $time, "
+            f"vif.current_state_{ident}\n"
+            f"                        );\n"
+            f"                    end else begin\n"
+            f"                        $display(\n"
+            f"                            \"[FAIL] vector V%0d region "
             f"`{rn}` chart `{chart_name}`: expected_state=%0d at cycle "
             f"%0t; observed current_state=%0b.\",\n"
-            f"                        vector_idx, expected_state_{ident}, "
-            f"$time, vif.current_state_{ident}\n"
-            f"                    );\n"
+            f"                            vector_idx, "
+            f"expected_state_{ident}, $time, "
+            f"vif.current_state_{ident}\n"
+            f"                        );\n"
+            f"                    end\n"
             f"                end\n"
             f"            end"
         )
 
-    region_decls = "\n".join(
-        f"        int expected_state_{_sanitize_sv_identifier(rn)};"
-        for rn in region_names
-    )
+    region_decls = "\n".join(region_decls_lines)
     region_parse_block = "\n".join(region_parse)
     region_compare_block = "\n".join(region_reads)
 
@@ -1232,6 +1478,14 @@ def _emit_checker_class_parallel(
 // virtual interface; compares against the trace JSONL's per-region
 // ``expected_state_<region>`` field. Per SOS-08-E wave-3 + INV-S-HDL-
 // E-4 every failure cites the failing region in chart vocabulary.
+//
+// Wave-3-future (2026-05-24 §15): per-region string-valued
+// ``expected_state_<region>_str`` resolved via the per-chart symbol
+// table (``sos_<chart>_state_id_of``). Wave-1/2 integer-only traces
+// keep working unchanged via the backwards-compatible fall-through.
+
+`include "sos_jsonl_parser_pkg.svh"
+`include "sos_{base}_state_symbols.svh"
 
 class {cls};
 
@@ -1272,7 +1526,7 @@ class {cls};
 
 {region_parse_block}
             cycles_wait = 1;
-            parsed = parse_int_field(line, "cycles", cycles_wait);
+            parsed = sos_jsonl_parse_int(line, "cycles", cycles_wait);
             if (cycles_wait <= 0) cycles_wait = 1;
 
             repeat (cycles_wait) @(posedge vif.clk);
@@ -1287,58 +1541,6 @@ class {cls};
 
     function int get_fail_count();
         return fail_count;
-    endfunction
-
-    // INV-S-HDL-E-1: hand-rolled integer-field extractor (no
-    // constrained-random). Identical body to the single-region
-    // checker; copied here to keep the parallel walker's emit a
-    // single self-contained class for INV-S-HDL-E-3 audit clarity.
-    function int parse_int_field(string line, string key,
-                                 inout int value);
-        int klen;
-        int slen;
-        int i;
-        int j;
-        int sign;
-        byte ch;
-        int  hit;
-        int  acc;
-        slen = line.len();
-        klen = key.len();
-        hit  = 0;
-        for (i = 0; i + klen + 2 <= slen; i++) begin
-            if (line.getc(i) == "\\"") begin
-                hit = 1;
-                for (j = 0; j < klen; j++) begin
-                    if (line.getc(i + 1 + j) != key.getc(j)) begin
-                        hit = 0;
-                        break;
-                    end
-                end
-                if (hit && line.getc(i + 1 + klen) == "\\"") begin
-                    j = i + 2 + klen;
-                    while (j < slen &&
-                          (line.getc(j) == " " || line.getc(j) == ":" ||
-                           line.getc(j) == 9)) j++;
-                    sign = 1;
-                    if (j < slen && line.getc(j) == "-") begin
-                        sign = -1;
-                        j++;
-                    end
-                    acc = 0;
-                    while (j < slen &&
-                          line.getc(j) >= "0" && line.getc(j) <= "9") begin
-                        ch = line.getc(j);
-                        acc = acc * 10 + (ch - 8'h30);
-                        j++;
-                    end
-                    value = sign * acc;
-                    return 1;
-                end
-                hit = 0;
-            end
-        end
-        return 0;
     endfunction
 
 endclass
@@ -1760,6 +1962,22 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
     # SOS-08-C §6.10) mirrored at the SV testbench's virtual interface.
     regions = _collect_regions(chart_ir)
 
+    # Wave-3-future (2026-05-24 §15): collect state IDs up-front for
+    # both paths so the per-chart symbol-table emit has the chart's
+    # state list available. For parallel charts we flatten across all
+    # regions' states so the symbol table covers every name a
+    # per-region `expected_state_<region>_str` field might reference.
+    if regions:
+        all_state_ids: list[str] = []
+        seen: set[str] = set()
+        for _region_name, _initial, region_state_ids in regions:
+            for sid in region_state_ids:
+                if sid not in seen:
+                    all_state_ids.append(sid)
+                    seen.add(sid)
+    else:
+        all_state_ids = _collect_state_ids(chart_ir)
+
     if regions:
         # Parallel-chart emit (wave-3): per-region virtual interface +
         # per-region checker + chart-top-wrapper DUT instantiation.
@@ -1781,8 +1999,7 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
         }
     else:
         # Single-region emit (wave-1 path unchanged).
-        states = _collect_state_ids(chart_ir)
-        n_states = max(len(states), 1)
+        n_states = max(len(all_state_ids), 1)
         files = {
             f"tb/sv/{base}/dut_if_{base}.sv":
                 _emit_virtual_interface(chart_name),
@@ -1799,6 +2016,18 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
             f"tb/sv/{base}/run_xrun.sh": _emit_xcelium_argfile(chart_name),
             f"tb/sv/{base}/run_riviera.tcl": _emit_riviera_tcl(chart_name),
         }
+
+    # Wave-3-future (2026-05-24 §15): shared JSONL parser package +
+    # per-chart state-symbol table. Both files are header-only
+    # (`\\`include`d by driver + checker) — single-source of the
+    # parser implementation and per-chart string-to-bit-position
+    # resolution.
+    files[f"tb/sv/{base}/sos_jsonl_parser_pkg.svh"] = (
+        _emit_jsonl_parser_pkg(chart_name)
+    )
+    files[f"tb/sv/{base}/sos_{base}_state_symbols.svh"] = (
+        _emit_state_symbols(chart_name, all_state_ids)
+    )
 
     # Wave-3 (2026-05-24 §15) co-lands the Verilator deferred-failure-
     # stub policy header per INV-S-HDL-E-6 / PCDN-SOS-08-E-002. Shared
