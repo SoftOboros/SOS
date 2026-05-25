@@ -727,3 +727,81 @@ Frozen-enumeration registration policy for the declaration field set: **Standard
 **Cited PCDNs / amendments**: §15 wave-4 (this entry) ratifies the `<sos:cross_invariant>` declaration form; SOS-08-C wave-3 clock-distribution contract (consumed for per-domain bind wiring); INV-S-HDL-D-4/-5 extended; PCDN-SOS-08-C-wave3-clk-naming-passthrough (consumed via `hdl_common.clk_port_name` / `rst_port_name`).
 
 Status: 🟢 **wave-4 complete** for multi-clock-domain bind wiring + cross-region invariant declarations. Wave-4-future tracks state-encoding pass-through, compound cross-invariant expressions, `raw_property` escape hatch, multi-clock cross-region sampling, and shared-datamodel cross-region transition driving.
+
+### 2026-05-24 — Impl wave-4-future: state-encoding pass-through (Ira)
+
+Lands the first wave-4-future carry-forward: **state-encoding pass-through** from the per-region FSM emit (SOS-08-C) into `<chart>_top_sva.sv` (this phase). The wave-4 v1 emit declared each state constant via the placeholder `(N'(1) << 0)` — every state, every region collapsed to bit 0. The cross-region property's RHS `current_state_<region> == ST_<state>` therefore only fired when the antecedent region was in its first-document-order state, masking real cross-region violations behind a silent false-match. This entry closes that v1 boundary.
+
+**Implementation surface** (one walker module, no external callers touched):
+
+- `_build_region_state_indices(regions) → {region: {state_id: bit_idx}}` — new helper. Mirrors SOS-08-C's `_emit_state_constants` document-order traversal by walking each region subtree with `_walk_states_in_order` and assigning index 0..N-1 per state in first-encounter order. The two walkers share the same traversal helper so by-construction the bit indices align.
+- `_validate_cross_invariant_state_refs(invariants, region_state_indices)` — new validation pass. Raises `UnsupportedChartError` with chart-vocabulary error (citing the cross-invariant id, the offending region/state name, and the role — antecedent vs consequent — plus the list of states the region actually declares) when an invariant references an unknown region or unknown state. Replaces the wave-4 v1 silent fall-through to bit 0.
+- `_state_index_for(region, state, region_state_indices) → int` — new lookup helper. Returns the document-order bit position when the encoding map is provided; falls back to the wave-4 v1 placeholder behaviour (bit 0) when the map is `None` — preserves the legacy emit shape so internal `_emit_cross_invariant_state_constants` callers that have not yet been migrated remain valid.
+- `_emit_cross_invariant_state_constants(invariants, region_state_indices=None)` — extended. When the map is provided, emits a per-constant comment naming the bit position (`bit <N> per SOS-08-C document-order encoding`) and the actual shifted value; when omitted, emits a `WAVE-4-V1 PLACEHOLDER — bit position is 0` comment and the legacy `(N'(1) << 0)` shift. The conditional preserves wave-4 v1 emit identity for any legacy direct caller while letting the wave-4-future render path produce by-construction-correct constants.
+- `_emit_cross_region_sva_module(..., region_state_indices=None)` — extended. Threads the map through to `_emit_cross_invariant_state_constants`.
+- `render_target` parallel-chart path — wires the new pieces together: builds `region_state_indices` via `_build_region_state_indices(regions)`, calls `_validate_cross_invariant_state_refs(cross_invariants, region_state_indices)` before emit (so a typo surfaces as a chart-author error, not a silently-mismatched bit position), passes the map into `_emit_cross_region_sva_module`. The wave-4 v1 `_state_index_placeholder` function is gone — superseded by `_state_index_for`.
+
+**Sample emit change** (reference chart with regions `left` containing `[L1, L2]` and `right` containing `[R1, R2]`, cross-invariant referencing `region.left == L2 |-> region.right == R2`):
+
+Before (wave-4 v1):
+```
+// State constant `ST_L2` for region `left` — matches SOS-08-C one-hot encoding.
+`ifndef ST_L2_DEFINED
+`define ST_L2_DEFINED
+localparam logic [N_STATES_LEFT-1:0] ST_L2 = {N_STATES_LEFT{1'b0}} | (N_STATES_LEFT'(1) << 0);
+`endif
+```
+
+After (wave-4-future):
+```
+// State constant `ST_L2` for region `left` — matches SOS-08-C one-hot encoding (bit 1 per SOS-08-C document-order encoding).
+`ifndef ST_L2_DEFINED
+`define ST_L2_DEFINED
+localparam logic [N_STATES_LEFT-1:0] ST_L2 = {N_STATES_LEFT{1'b0}} | (N_STATES_LEFT'(1) << 1);
+`endif
+```
+
+The shift literal advances from `0` to the state's actual document-order index. The comment explicitly names the bit position so a reviewer can audit the SVA module against SOS-08-C's per-region FSM emit by reading the comment alone — no cross-file inspection needed.
+
+**Cross-encoding equivalence proof**: the test `TestWave4FutureEncodingPassthrough.test_state_constants_match_sos_08c_emit_exactly` invokes `transliterate_hdl_sv.one_hot_value(1, 2)` (the SOS-08-C helper) and verifies the wave-4-future SVA constant for an index-1 state in a 2-state region produces the same numeric value (`2'b10`). The two walkers' encoders converge by-construction through the shared `_walk_states_in_order` traversal — the test pins this for any future SOS-08-C refactor.
+
+**Chart-author validation** (closes a wave-4 v1 cliff edge):
+
+Wave-4 v1 silently accepted typos in cross-invariant region/state names — the chart compiled, the SVA module compiled, and the assertion appeared to be running, but the RHS state constant (always bit 0) made the property fire only against the region's first state regardless of what the chart author intended. Wave-4-future converts this silent failure into an actionable chart-vocabulary error:
+
+```python
+UnsupportedChartError: SOS-08-D wave-4-future: cross-invariant 'INV-S-CHART-BAD's
+antecedent references state 'L99' in region 'left' which the region does not declare.
+Known states in region 'left': ['L1', 'L2'].
+```
+
+The error message names: (a) the invariant id (the chart-author handle), (b) the role (antecedent vs consequent — disambiguates which side of the `|->` to fix), (c) the bad reference, (d) the known-good state list (so the chart author can correct without re-reading their chart). Concretizes INV-S-HDL-D-5 (chart-vocabulary failure messages) at the validation layer, not just the runtime assertion layer.
+
+**Invariants upheld** (no §15 changes to invariants themselves; this entry concretizes the wave-4 v1 placeholder boundary):
+
+- **INV-S-HDL-D-2** (one-hot, reset-initial state encoding) — wave-4-future emit MATCHES SOS-08-C's per-region FSM module emit by-construction via the shared traversal helper. The wave-4 v1 emit DID NOT match — the placeholder produced a constant that was structurally one-hot but bit-positionally wrong for any non-first state.
+- **INV-S-HDL-D-3** (per-region FSM as the DUT for the per-region bind) — unchanged; the SVA module references region observables via the chart-top wrapper's port wiring, which already exposes the per-region one-hot encoding correctly.
+- **INV-S-HDL-D-5** (chart-vocabulary failure messages) — extended in spirit to the validation layer: chart authors get actionable typo errors with chart vocabulary, not silently-broken assertions.
+- **PCDN-SOS-08-C-state-encoding-mirror** (cross-walker encoding parity) — wave-4-future closes this open question by sharing the `_walk_states_in_order` traversal helper between SOS-08-C and SOS-08-D and pinning the equivalence via `test_state_constants_match_sos_08c_emit_exactly`.
+
+**Backwards compatibility**: `_emit_cross_invariant_state_constants` and `_state_index_for` accept `region_state_indices=None` and produce the wave-4 v1 emit verbatim. Any external test or downstream tool that called the wave-4 v1 helper directly continues to receive the placeholder emit. The render path is the only caller that has been migrated; the helper-direct invocations stay legacy-correct. `TestWave4FutureBackwardsCompatibleEmit` (2 tests) pins both halves of this contract — the `None`-map call produces `WAVE-4-V1 PLACEHOLDER` comments + bit-0 shifts; the map-provided call produces real-encoding comments + correct shifts.
+
+**Wave-4-future remaining**:
+
+- **Compound cross-invariant expressions** (Boolean conjunctions / disjunctions across `region.X == STATE_A` terms). Currently the antecedent / consequent grammar accepts exactly one `region.<name> == <state>` clause; chart authors needing AND/OR semantics author multiple invariants. Lift to a small expression DSL when bench evidence shows a real need.
+- **Multi-clock cross-region sampling** (sample the antecedent on its own clock and consequent on its own clock, with a synchronisation handoff between them). Currently wave-4 emit samples both observables on the chart-top reference clock per INV-S-HDL-3 (regions are synced through `sos_synchronizer` before the chart-top exposes them); cross-clock sampling primitives are a future amendment if a chart needs truly clock-asymmetric assertions.
+- **`raw_property` escape hatch** for invariants too expressive for the wave-4 grammar — accept a literal SVA `property` body and bypass the structured emit path. Gated on chart-author demand.
+- **Shared-datamodel cross-region transition driving** — extending cross_invariant antecedent / consequent grammar to reference datamodel signals (`data.<X> == <K>`) in addition to region states. Useful for invariants like "when the shared counter reaches K, region.Y must be in STATE_Z within W cycles".
+
+**Test count**: net +17 across four new classes in `tools/sos-codegen/tests/test_transliterate_sva_bind.py`:
+
+- `TestWave4FutureEncodingPassthrough` (6): bit position resolves correctly for L1 (bit 0), L2 (bit 1), R2 (bit 1); per-constant comment names the bit position; placeholder comment is gone; distinct states resolve to distinct bits; SVA encoding matches `transliterate_hdl_sv.one_hot_value` exactly.
+- `TestWave4FutureValidation` (5): rejects unknown region; rejects unknown state in known region; error cites invariant id; error cites role; error lists known states.
+- `TestWave4FutureHelperFunctions` (4): `_build_region_state_indices` document-order map; `_state_index_for` fallback for `None` map; `_state_index_for` returns mapped bit; unknown lookups return 0 (helper stays total — validation is the gate).
+- `TestWave4FutureBackwardsCompatibleEmit` (2): legacy `None`-map call produces wave-4 v1 emit; map-provided call produces real-encoding emit.
+
+**Test suite**: 572/572 passing (555 prior + 17 new wave-4-future). The wave-4 v1 cross-region test suite (`TestWave4CrossRegionInvariants`, `TestWave4CrossInvariantValidation`) is unchanged — wave-4 v1 callers continue to receive the v1 emit shape via the `None` fallback.
+
+**Cited invariants / PCDNs**: INV-S-HDL-D-2 (state encoding parity — now achieved by construction); INV-S-HDL-D-5 (chart vocabulary — extended to validation diagnostics); PCDN-SOS-08-C-state-encoding-mirror (resolved by `_walk_states_in_order` sharing); SOS-08-C `_one_hot_value` (consumed indirectly through the shared traversal helper for the equivalence test).
+
+Status: 🟢 **wave-4-future complete** for state-encoding pass-through + chart-author validation. Compound antecedent/consequent expressions, multi-clock cross-region sampling, `raw_property` escape hatch, and shared-datamodel cross-region transition driving remain on the wave-4-future track.

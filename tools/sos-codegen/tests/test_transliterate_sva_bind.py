@@ -827,3 +827,286 @@ class TestWave4SingleRegionUnchanged:
         # reference); the top-sva / top-bind files are NOT emitted.
         assert "tests/demo/demo_top_sva.sv" not in files
         assert "tests/demo/demo_top_bind.sv" not in files
+
+
+# ---------------------------------------------------------------------------
+# SOS-08-D wave-4-future (2026-05-24 §15): state-encoding pass-through into
+# `<chart>_top_sva.sv`. The wave-4 v1 placeholder resolved every state
+# constant to bit 0 — the cross-region property's RHS therefore matched
+# the region's first-document-order state regardless of which state the
+# invariant named. Wave-4-future threads the per-region state-index map
+# (matching SOS-08-C's document-order one-hot encoding) through the
+# emitter so every state constant resolves to its actual bit position.
+# ---------------------------------------------------------------------------
+
+
+def _bit_index_in_const_definition(sva: str, state_const: str) -> int | None:
+    """Return the integer bit index in the ``localparam ST_X = ...`` line
+    of ``sva``. Parses the ``({param}'(1) << <idx>)`` form emitted by
+    ``_emit_cross_invariant_state_constants``."""
+    pat = (
+        rf"localparam\s+logic\s+\[N_STATES_[A-Z0-9_]+-1:0\]\s+"
+        rf"{re.escape(state_const)}\s*=\s*\{{N_STATES_[A-Z0-9_]+\{{1'b0\}}\}}\s*\|"
+        rf"\s*\(N_STATES_[A-Z0-9_]+'\(1\)\s*<<\s*(\d+)\)"
+    )
+    m = re.search(pat, sva)
+    return int(m.group(1)) if m else None
+
+
+class TestWave4FutureEncodingPassthrough:
+    """Wave-4-future closes the v1 placeholder: every state constant in
+    ``<chart>_top_sva.sv`` MUST encode the actual one-hot bit position
+    matching SOS-08-C's per-region FSM module emit.
+
+    The reference parallel chart (``_parallel_chart``) has region
+    ``left`` with states (L1, L2) — bit 0, bit 1 — and region ``right``
+    with states (R1, R2) — bit 0, bit 1. The reference cross-invariant
+    chart (``_chart_with_cross_invariants``) references L2 + R2, both
+    of which should now resolve to bit 1.
+    """
+
+    def _sva(self):
+        files = transliterate_sva_bind.render_target(
+            _chart_with_cross_invariants(), {"chart_name": "p"}
+        )
+        return files["tests/p/p_top_sva.sv"]
+
+    def test_l2_constant_resolves_to_bit_1(self):
+        """L2 is document-order index 1 in region `left` (after L1)."""
+        sva = self._sva()
+        bit = _bit_index_in_const_definition(sva, "ST_L2")
+        assert bit == 1, (
+            f"ST_L2 must be bit 1 (matching SOS-08-C's document-order "
+            f"one-hot encoding for left.L2); got bit {bit}"
+        )
+
+    def test_r2_constant_resolves_to_bit_1(self):
+        """R2 is document-order index 1 in region `right` (after R1)."""
+        sva = self._sva()
+        bit = _bit_index_in_const_definition(sva, "ST_R2")
+        assert bit == 1, (
+            f"ST_R2 must be bit 1 (matching SOS-08-C's document-order "
+            f"one-hot encoding for right.R2); got bit {bit}"
+        )
+
+    def test_l1_constant_resolves_to_bit_0_when_referenced(self):
+        """L1 is document-order index 0; verifying a state at index 0
+        still encodes cleanly (not via the v1 placeholder)."""
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [{
+            "id": "INV-S-CHART-X",
+            "antecedent": "region.left == L1",
+            "consequent": "region.right == R1",
+        }]
+        files = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )
+        sva = files["tests/p/p_top_sva.sv"]
+        bit = _bit_index_in_const_definition(sva, "ST_L1")
+        assert bit == 0
+
+    def test_emit_marks_real_encoding_in_comment(self):
+        """The state-constant comment SHOULD name the bit position so
+        a reviewer can audit the SVA module against SOS-08-C's emit by
+        reading the comment alone."""
+        sva = self._sva()
+        # Each referenced state's comment cites its bit position.
+        assert "bit 1 per SOS-08-C document-order encoding" in sva
+        # The wave-4 v1 placeholder comment MUST NOT appear when the
+        # encoding map is threaded through.
+        assert "WAVE-4-V1 PLACEHOLDER" not in sva
+
+    def test_distinct_states_resolve_to_distinct_bits(self):
+        """L1 + L2 referenced together must produce distinct bit
+        positions (0 + 1) — verifies the per-region map is consulted
+        per-state, not a single value per region."""
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [
+            {
+                "id": "INV-S-CHART-A",
+                "antecedent": "region.left == L1",
+                "consequent": "region.right == R1",
+            },
+            {
+                "id": "INV-S-CHART-B",
+                "antecedent": "region.left == L2",
+                "consequent": "region.right == R2",
+            },
+        ]
+        files = transliterate_sva_bind.render_target(
+            chart, {"chart_name": "p"}
+        )
+        sva = files["tests/p/p_top_sva.sv"]
+        l1_bit = _bit_index_in_const_definition(sva, "ST_L1")
+        l2_bit = _bit_index_in_const_definition(sva, "ST_L2")
+        r1_bit = _bit_index_in_const_definition(sva, "ST_R1")
+        r2_bit = _bit_index_in_const_definition(sva, "ST_R2")
+        assert (l1_bit, l2_bit, r1_bit, r2_bit) == (0, 1, 0, 1)
+
+    def test_state_constants_match_sos_08c_emit_exactly(self):
+        """The wave-4-future encoding emit MUST match what SOS-08-C's
+        ``_one_hot_value`` produces for the same (index, n) — verified
+        by cross-checking against the SOS-08-C walker helper."""
+        import importlib
+        hdl_sv = importlib.import_module("transliterate_hdl_sv")
+        sva = self._sva()
+        # Region `left` has 2 states; L2 is index 1.
+        expected = hdl_sv.one_hot_value(1, 2)  # → "2'b10"
+        # Reconstruct the wave-4-future emit's constant value.
+        # The `localparam` form is {N{1'b0}} | (N'(1) << bit); for N=2,
+        # bit=1, the constant equals 2'b10 = expected.
+        bit = _bit_index_in_const_definition(sva, "ST_L2")
+        n_states = 2
+        synthesised = (1 << bit) & ((1 << n_states) - 1)
+        expected_int = int(expected.split("'b")[1], 2)
+        assert synthesised == expected_int
+
+
+class TestWave4FutureValidation:
+    """Wave-4-future rejects cross-invariants referencing unknown
+    region.state names with chart-vocabulary errors per INV-S-HDL-D-5."""
+
+    def test_rejects_unknown_region(self):
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [{
+            "id": "INV-S-CHART-BAD",
+            "antecedent": "region.middle == M1",
+            "consequent": "region.right == R1",
+        }]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"references region 'middle' which the chart does not declare",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_rejects_unknown_state_in_known_region(self):
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [{
+            "id": "INV-S-CHART-BAD",
+            "antecedent": "region.left == L99",
+            "consequent": "region.right == R1",
+        }]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"references state 'L99' in region 'left'",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_validation_error_cites_invariant_id(self):
+        """Chart-vocabulary error (INV-S-HDL-D-5) MUST cite the
+        offending cross-invariant id so the chart author can locate it
+        directly."""
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [{
+            "id": "INV-S-CHART-DEBUG-ME",
+            "antecedent": "region.left == BOGUS",
+            "consequent": "region.right == R1",
+        }]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"INV-S-CHART-DEBUG-ME",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_validation_error_cites_role(self):
+        """Validation error names whether the antecedent or consequent
+        side carried the bad reference so the chart author can fix the
+        right side directly."""
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [{
+            "id": "INV-S-CHART-BAD",
+            "antecedent": "region.left == L1",
+            "consequent": "region.right == BOGUS",
+        }]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"consequent references state 'BOGUS'",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+    def test_validation_error_lists_known_states(self):
+        """Error message includes the list of states the chart DOES
+        declare — actionable diagnostic for the chart author."""
+        chart = _parallel_chart()
+        chart["sos:cross_invariant"] = [{
+            "id": "INV-S-CHART-BAD",
+            "antecedent": "region.left == BOGUS",
+            "consequent": "region.right == R1",
+        }]
+        with pytest.raises(
+            transliterate_sva_bind.UnsupportedChartError,
+            match=r"Known states in region 'left': \['L1', 'L2'\]",
+        ):
+            transliterate_sva_bind.render_target(chart, {"chart_name": "p"})
+
+
+class TestWave4FutureHelperFunctions:
+    """Direct-call tests for ``_build_region_state_indices`` +
+    ``_state_index_for`` so the helpers' contracts are pinned outside
+    the full render_target path."""
+
+    def test_build_region_state_indices_document_order(self):
+        chart = _parallel_chart()
+        # Match the `regions` shape `_collect_parallel_regions` yields.
+        regions = transliterate_sva_bind._collect_parallel_regions(chart)
+        indices = transliterate_sva_bind._build_region_state_indices(regions)
+        assert indices == {
+            "left":  {"L1": 0, "L2": 1},
+            "right": {"R1": 0, "R2": 1},
+        }
+
+    def test_state_index_for_returns_zero_when_map_absent(self):
+        """Backwards-compatible behaviour: callers that do not yet thread
+        the encoding map (wave-4 v1 path) get bit-0 fallback. Walker's
+        public render_target always threads the map; this is a
+        helper-contract pin."""
+        bit = transliterate_sva_bind._state_index_for("any", "any", None)
+        assert bit == 0
+
+    def test_state_index_for_returns_mapped_bit(self):
+        m = {"left": {"L1": 0, "L2": 1, "L3": 2}}
+        assert transliterate_sva_bind._state_index_for("left", "L1", m) == 0
+        assert transliterate_sva_bind._state_index_for("left", "L2", m) == 1
+        assert transliterate_sva_bind._state_index_for("left", "L3", m) == 2
+
+    def test_state_index_for_unknown_returns_zero_fallback(self):
+        """Without explicit validation, unknown lookups return 0; the
+        validation pass at collect-time is what raises — keep the helper
+        total so internal callers don't need defensive try/except."""
+        m = {"left": {"L1": 0}}
+        assert transliterate_sva_bind._state_index_for("left", "BOGUS", m) == 0
+        assert transliterate_sva_bind._state_index_for("nope", "X", m) == 0
+
+
+class TestWave4FutureBackwardsCompatibleEmit:
+    """When the encoding map is NOT threaded through (legacy callers),
+    the wave-4 v1 behaviour MUST persist verbatim: bit 0 + placeholder
+    comment. Verifies the migration path is gradual."""
+
+    def test_v1_placeholder_comment_when_map_omitted(self):
+        invariants = transliterate_sva_bind._collect_cross_invariants(
+            _chart_with_cross_invariants()
+        )
+        lines = transliterate_sva_bind._emit_cross_invariant_state_constants(
+            invariants  # no region_state_indices
+        )
+        body = "\n".join(lines)
+        assert "WAVE-4-V1 PLACEHOLDER" in body
+        # Every localparam emitted with shift bit 0.
+        for state_const in ("ST_L2", "ST_R2"):
+            assert re.search(
+                rf"{state_const}\s*=.*<<\s*0\)",
+                body,
+            )
+
+    def test_real_encoding_comment_when_map_provided(self):
+        invariants = transliterate_sva_bind._collect_cross_invariants(
+            _chart_with_cross_invariants()
+        )
+        m = {"left": {"L1": 0, "L2": 1}, "right": {"R1": 0, "R2": 1}}
+        lines = transliterate_sva_bind._emit_cross_invariant_state_constants(
+            invariants, m
+        )
+        body = "\n".join(lines)
+        assert "WAVE-4-V1 PLACEHOLDER" not in body
+        assert "bit 1 per SOS-08-C document-order encoding" in body

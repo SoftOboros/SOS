@@ -1026,6 +1026,84 @@ _REGION_STATE_RE = re.compile(
 )
 
 
+def _build_region_state_indices(
+    regions: list[tuple[str, dict[str, Any]]]
+) -> dict[str, dict[str, int]]:
+    """For each region, return ``state_id → bit_index`` matching the
+    per-region FSM's one-hot encoding from SOS-08-C's
+    ``_emit_state_constants``.
+
+    Wave-4-future (2026-05-24 §15): the cross-region SVA module emits
+    ``ST_<X> = N_STATES_<R>'b... | (N_STATES_<R>'(1) << bit_idx)`` for
+    each referenced state. ``bit_idx`` MUST match the bit position the
+    per-region FSM module uses inside its one-hot encoding, or the SVA
+    comparison ``current_state_<region> == ST_<X>`` never holds.
+
+    SOS-08-C's ``_emit_state_constants`` enumerates ``region.states`` in
+    chart document order (the order ``_walk_states_in_order`` yields) and
+    assigns ``one_hot[idx]``. The cross-region SVA emitter must consume
+    that same per-region traversal so the indices align.
+
+    INV-S-HDL-D-2 (one-hot, reset-initial) keeps the encoding stable
+    over future SOS-08-C refactors as long as both walkers traverse the
+    state subtree identically. Both helpers MUST use the
+    ``_walk_states_in_order`` definition above, which they do.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for region_name, region_state in regions:
+        # Per-region pseudo-chart: same shape passed to
+        # ``_normalise_chart`` by the parallel walker.
+        per_region_ir: dict[str, Any] = {
+            "state": region_state.get("state") or [],
+        }
+        index_map: dict[str, int] = {}
+        for idx, (sid, _st) in enumerate(_walk_states_in_order(per_region_ir)):
+            # First-occurrence wins for any duplicate ids; SOS-08-C's
+            # _emit_state_constants iterates ``region.states`` (a list)
+            # which preserves the same first-occurrence semantics.
+            if sid not in index_map:
+                index_map[sid] = idx
+        out[region_name] = index_map
+    return out
+
+
+def _validate_cross_invariant_state_refs(
+    invariants: list["_CrossInvariant"],
+    region_state_indices: dict[str, dict[str, int]],
+) -> None:
+    """Raise ``UnsupportedChartError`` if any cross-invariant references
+    a region the chart does not declare, or a state the referenced
+    region does not contain.
+
+    Wave-4-future (2026-05-24 §15): previously the wave-4 emitter trusted
+    chart authors to spell region + state names correctly; an unknown
+    spelling produced a SVA constant with a 0-bit-position template that
+    silently matched the region's first-document-order state. The
+    validation below converts the silent miscompare into an actionable
+    chart-vocabulary error citing INV-S-HDL-D-2 + the cross-invariant id.
+    """
+    for inv in invariants:
+        for region, state, role in (
+            (inv.antecedent_region, inv.antecedent_state, "antecedent"),
+            (inv.consequent_region, inv.consequent_state, "consequent"),
+        ):
+            region_map = region_state_indices.get(region)
+            if region_map is None:
+                raise UnsupportedChartError(
+                    f"SOS-08-D wave-4-future: cross-invariant {inv.id!r}'s "
+                    f"{role} references region {region!r} which the chart "
+                    f"does not declare. Known regions: "
+                    f"{sorted(region_state_indices.keys())}."
+                )
+            if state not in region_map:
+                raise UnsupportedChartError(
+                    f"SOS-08-D wave-4-future: cross-invariant {inv.id!r}'s "
+                    f"{role} references state {state!r} in region {region!r} "
+                    f"which the region does not declare. Known states in "
+                    f"region {region!r}: {sorted(region_map.keys())}."
+                )
+
+
 def _parse_region_state_expr(
     expr: Any,
     inv_id: str,
@@ -1078,6 +1156,7 @@ def _emit_cross_region_sva_module(
     chart_top_module: str,
     invariants: list[_CrossInvariant],
     region_info: list[tuple[str, str | None]],
+    region_state_indices: dict[str, dict[str, int]] | None = None,
 ) -> str:
     """Emit ``<chart>_top_sva.sv`` — chart-top assertion module.
 
@@ -1190,7 +1269,9 @@ def _emit_cross_region_sva_module(
         "    // are inherited from each region's FSM module via the",
         "    // chart-top wrapper's port wiring; the cross-region module",
         "    // need only re-declare the constants it directly refs.",
-        *_emit_cross_invariant_state_constants(invariants),
+        *_emit_cross_invariant_state_constants(
+            invariants, region_state_indices
+        ),
         "",
         *property_blocks,
         "",
@@ -1221,11 +1302,21 @@ def _format_cross_invariant_domain_comment(
 
 def _emit_cross_invariant_state_constants(
     invariants: list[_CrossInvariant],
+    region_state_indices: dict[str, dict[str, int]] | None = None,
 ) -> list[str]:
     """Emit ``localparam`` declarations for each state constant the
     cross-region properties reference. Width parameterised against
     each region's ``N_STATES_<R>`` so the comparison fits the actual
     one-hot width.
+
+    Wave-4-future (2026-05-24 §15): when ``region_state_indices`` is
+    provided, the bit position for each state is resolved via the
+    per-region state-encoding map (state document-order index, matching
+    SOS-08-C's ``_emit_state_constants``). When ``None`` the emit
+    falls back to the wave-4 v1 placeholder (bit 0 for every state) +
+    a ``// WAVE-4-V1 PLACEHOLDER`` comment marking the constant as
+    template-only — preserves wave-4 v1 behaviour for any caller that
+    has not yet been migrated to thread the encoding map through.
     """
     seen: set[tuple[str, str]] = set()
     lines: list[str] = []
@@ -1241,15 +1332,17 @@ def _emit_cross_invariant_state_constants(
             r_ident = _sanitize_sv_identifier(region)
             param = f"N_STATES_{r_ident.upper()}"
             const = _state_constant_name(state)
-            # The state-constant is the one-hot value for the state's
-            # index in the region's FSM. The exact bit position is
-            # derived inside the per-region FSM module; here we
-            # declare a localparam matching the per-region encoding
-            # convention (state index → bit position; per-region
-            # encoding is owned by SOS-08-C's _one_hot_value).
+            bit_idx = _state_index_for(region, state, region_state_indices)
+            # Annotate the source of the bit-position for reviewers.
+            if region_state_indices is None:
+                source_note = "WAVE-4-V1 PLACEHOLDER — bit position is 0"
+            else:
+                source_note = (
+                    f"bit {bit_idx} per SOS-08-C document-order encoding"
+                )
             lines.append(
                 f"    // State constant `{const}` for region `{region}` — "
-                f"matches SOS-08-C one-hot encoding."
+                f"matches SOS-08-C one-hot encoding ({source_note})."
             )
             lines.append(
                 f"    `ifndef {const}_DEFINED"
@@ -1257,34 +1350,44 @@ def _emit_cross_invariant_state_constants(
             lines.append(
                 f"    `define {const}_DEFINED"
             )
-            # Use a wildcard width since each region's N_STATES differs;
-            # the comparison in the property auto-widens.
+            # Use the region's N_STATES width so the comparison in the
+            # property aligns with the per-region FSM's encoding.
             lines.append(
                 f"    localparam logic [{param}-1:0] {const} = "
-                f"{{{param}{{1'b0}}}} | ({param}'(1) << "
-                f"{_state_index_placeholder(region, state)});"
+                f"{{{param}{{1'b0}}}} | ({param}'(1) << {bit_idx});"
             )
             lines.append(f"    `endif")
     return lines
 
 
-def _state_index_placeholder(region: str, state: str) -> int:
-    """v1 placeholder: the state constants emitted by
-    ``_emit_cross_invariant_state_constants`` need a bit-position. For
-    wave-4 v1 the cross-region SVA module emits a TEMPLATE form — the
-    actual one-hot bit position is owned by SOS-08-C's per-region
-    FSM emitter. The placeholder returns 0; the chart author OR a
-    wave-4-future amendment will thread the per-region state-encoding
-    map through this emitter so the constants match SOS-08-C's emit
-    by-construction.
+def _state_index_for(
+    region: str,
+    state: str,
+    region_state_indices: dict[str, dict[str, int]] | None,
+) -> int:
+    """Look up the one-hot bit position for ``state`` in ``region``.
 
-    This is the wave-4 v1 boundary: the SVA module compiles, the
-    properties have the right shape, but the state-constant values
-    are TEMPLATE-only (they resolve to bit 0 for every state) until
-    the wave-4-future encoding-passthrough amendment lands. Bench
-    validation deferred to wave-4-future.
+    Wave-4-future (2026-05-24 §15): when ``region_state_indices`` is
+    provided, return the document-order index of ``state`` within
+    ``region`` per ``_build_region_state_indices``. When ``None`` —
+    the wave-4 v1 caller path that does not thread the encoding map —
+    fall back to the v1 placeholder behaviour (bit 0).
+
+    The returned bit position MUST match the bit position SOS-08-C's
+    ``_emit_state_constants`` uses inside the per-region FSM module
+    for the same ``state`` — otherwise the SVA comparison
+    ``current_state_<region> == ST_<state>`` never holds.
+
+    Wave-4 v1 callers receive ``None`` and continue to emit TEMPLATE-
+    only state constants. Wave-4-future callers receive a populated
+    map and emit constants that match SOS-08-C by-construction; the
+    cross-region property fires only when the antecedent region is
+    actually in the antecedent state.
     """
-    return 0
+    if region_state_indices is None:
+        return 0
+    region_map = region_state_indices.get(region, {})
+    return region_map.get(state, 0)
 
 
 def _emit_cross_region_bind_directive(
@@ -1505,11 +1608,22 @@ def _render_parallel(
     # (bind directive targeting the chart-top wrapper).
     cross_invariants = _collect_cross_invariants(chart_ir)
     if cross_invariants:
+        # SOS-08-D wave-4-future (2026-05-24 §15): build per-region
+        # state-encoding map matching SOS-08-C's document-order one-hot
+        # encoding; validate every cross-invariant's region.state refs
+        # before emit so a typo surfaces as a chart-vocabulary error
+        # citing INV-S-HDL-D-2 + the cross-invariant id, not as a
+        # silently-mismatched bit position in the SVA property.
+        region_state_indices = _build_region_state_indices(regions)
+        _validate_cross_invariant_state_refs(
+            cross_invariants, region_state_indices
+        )
         top_sva_body = _emit_cross_region_sva_module(
             chart_name=chart_name,
             chart_top_module=chart_top_module,
             invariants=cross_invariants,
             region_info=region_info,
+            region_state_indices=region_state_indices,
         )
         top_bind_body = _emit_cross_region_bind_directive(
             chart_name=chart_name,
