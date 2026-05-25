@@ -498,35 +498,61 @@ endinterface
 """
 
 
-def _emit_driver_class(chart_name: str) -> str:
-    """``sos_driver_<chart>.sv`` — stimulus driver class.
+def _emit_driver_class_base(chart_name: str) -> str:
+    """``sos_<chart>_driver_base.svh`` — stimulus driver BASE class.
 
-    Consumes the JSONL trace file via ``$fopen`` + ``$fgets``, decodes
-    each line's event-poke map, drives ``vif.event_in``, and waits the
-    prescribed number of clock cycles between events. Per §6.1 the
-    driver SHALL NOT inspect DUT outputs.
+    Wave-3-future (2026-05-24 §15): the layered class hierarchy split
+    factors the wave-3 monolithic driver into a base class that owns
+    the run-skeleton (file open, reset, per-line replay loop, settle)
+    and declares per-step virtual hooks; the generated wave-3 body
+    moves into ``_default`` as overrides of those hooks.
+
+    Hooks (all ``virtual``):
+
+    - ``virtual task drive_pre(int step_idx);`` — pre-step hook;
+      default no-op.
+    - ``virtual task drive_step(int step_idx, sos_jsonl_record_t rec);``
+      — the per-step drive itself; default no-op (the wave-3 default
+      lives in ``sos_driver_<chart>``).
+    - ``virtual task drive_post(int step_idx);`` — post-step hook;
+      default no-op.
+
+    Per task spec (§15 2026-05-24 layered-class-hierarchy): users who
+    want to override one method extend ``_base`` themselves; the
+    walker keeps emitting ``_default`` byte-identical to wave-3
+    chart-vocab.
     """
-    cls = driver_class_name(chart_name)
+    cls_base = f"sos_{_normalise_chart_name(chart_name)}_driver_base"
     iface = virtual_if_name(chart_name)
     return _HEADER_PREFIX + f"""//
-// Stimulus driver class for the {chart_name} chart testbench.
+// Stimulus driver BASE class for chart `{chart_name}`.
 //
-// Reads JSONL trace events from ``trace_path`` and drives them onto
-// the virtual interface. Per SOS-08-E §6.1 + INV-S-HDL-E-1 the driver
-// is constrained-random-free — all stimulus comes from the trace file,
-// which is the chart's bounded-reachability vector replay.
+// Wave-3-future (2026-05-24 §15) layered class hierarchy: owns the
+// run-skeleton (file open, reset, per-line replay, settle) and
+// declares virtual per-step hooks. The wave-3-default driver
+// (``sos_driver_{chart_name}``) extends this class and overrides
+// ``drive_step`` with the generated body. User-side overrides extend
+// this class and override one or more hooks without re-implementing
+// the run-skeleton.
 //
-// Per INV-S-HDL-E-3 the driver does NOT inline any ``assert property``;
-// property checking lives exclusively in the bound SVA module.
-//
-// Wave-3-future (2026-05-24 §15): JSONL parsing is sourced from the
-// shared ``sos_jsonl_parser_pkg.svh`` header (single-source for both
-// the driver and the checker); the legacy inline ``parse_int_field``
-// is gone in favour of ``sos_jsonl_parse_int``.
+// Per SOS-08-E §6.1 + INV-S-HDL-E-1 the driver is constrained-random-
+// free; all stimulus comes from the trace file. Per INV-S-HDL-E-3
+// the driver does NOT inline any ``assert property``.
+
+`ifndef SOS_{_normalise_chart_name(chart_name).upper()}_DRIVER_BASE_SVH
+`define SOS_{_normalise_chart_name(chart_name).upper()}_DRIVER_BASE_SVH
 
 `include "sos_jsonl_parser_pkg.svh"
 
-class {cls};
+// Per-step record carried into ``drive_step``. Holds the minimal
+// JSONL event-poke shape decoded by the base run-skeleton.
+typedef struct {{
+    int    event_code;
+    int    cycles_wait;
+    string line;
+}} sos_jsonl_record_t;
+
+virtual class {cls_base};
 
     virtual {iface}.driver_mp vif;
     string                    trace_path;
@@ -538,11 +564,38 @@ class {cls};
         this.vector_idx = 0;
     endfunction
 
-    // Top-level run — opens the trace file, replays each event.
+    // ------------------------------------------------------------
+    // Virtual per-step hooks. Defaults are no-ops; override in a
+    // subclass to inject custom drive logic, logging, or wait
+    // shaping. The wave-3-default ``sos_driver_{chart_name}``
+    // overrides ``drive_step`` with the generated drive body.
+    // ------------------------------------------------------------
+
+    virtual task drive_pre(int step_idx);
+        // Default no-op — override to instrument pre-step state.
+    endtask
+
+    virtual task drive_step(int step_idx, sos_jsonl_record_t rec);
+        // Default no-op — the wave-3-default driver overrides this
+        // hook to drive ``vif.event_in`` and emit the chart-vocab
+        // [DRIVE] log.
+    endtask
+
+    virtual task drive_post(int step_idx);
+        // Default no-op — override to instrument post-step state.
+    endtask
+
+    // ------------------------------------------------------------
+    // Run-skeleton — owned by the base class. Opens the trace file,
+    // walks each line, decodes the minimal JSONL shape, fires
+    // ``drive_pre`` / ``drive_step`` / ``drive_post`` per step.
+    // ------------------------------------------------------------
     task run();
         int    fh;
         string line;
         int    rc;
+        int    parsed;
+        sos_jsonl_record_t rec;
 
         fh = $fopen(trace_path, "r");
         if (fh == 0) begin
@@ -563,54 +616,90 @@ class {cls};
         while (!$feof(fh)) begin
             rc = $fgets(line, fh);
             if (rc == 0) break;
-            // SOS-08-E §5.4: JSONL trace; one event per line. Wave-1
-            // accepts a minimal `{{"event": <int>, "cycles": <int>}}`
-            // shape — full SOS-03 vector schema parse lands in wave-2.
-            drive_one_event(line);
+            // SOS-08-E §5.4: JSONL trace; one event per line.
+            rec.event_code  = 0;
+            rec.cycles_wait = 1;
+            rec.line        = line;
+            parsed = sos_jsonl_parse_int(line, "event", rec.event_code);
+            parsed = sos_jsonl_parse_int(line, "cycles", rec.cycles_wait);
+            if (rec.cycles_wait <= 0) rec.cycles_wait = 1;
+
+            drive_pre(vector_idx);
+            drive_step(vector_idx, rec);
+            drive_post(vector_idx);
         end
 
         $fclose(fh);
 
-        // Settle period — wave-1 fixed at 8 cycles; PCDN-SOS-08-E-???
-        // (wave-2) configurable settle.
+        // Settle period — wave-1 fixed at 8 cycles.
         repeat (8) @(posedge vif.clk);
     endtask
 
-    // Per-event drive — wave-1 stub form. Decodes the minimal JSONL
-    // shape; wave-2 swaps in a full JSON-Lines parser per §5.4.
-    task drive_one_event(string line);
-        int event_code;
-        int cycles_wait;
-        int idx;
-        int parsed;
+endclass
 
-        event_code  = 0;
-        cycles_wait = 1;
+`endif // SOS_{_normalise_chart_name(chart_name).upper()}_DRIVER_BASE_SVH
+"""
 
-        // Extract `"event": N` and `"cycles": N` from the line.
-        // Wave-3-future (2026-05-24 §15): both extractions go through
-        // the shared `sos_jsonl_parse_int` from sos_jsonl_parser_pkg.svh
-        // — no more per-class duplication of the parser body.
-        // INV-S-HDL-E-1 (no constrained-random) preserved — the
-        // shared helper is pure procedural SV.
-        parsed = sos_jsonl_parse_int(line, "event", event_code);
-        parsed = sos_jsonl_parse_int(line, "cycles", cycles_wait);
-        if (cycles_wait <= 0) cycles_wait = 1;
 
-        vif.event_in = event_code[7:0];
+def _emit_driver_class(chart_name: str) -> str:
+    """``sos_driver_<chart>.sv`` — stimulus driver DEFAULT class.
+
+    Wave-3-future (2026-05-24 §15) layered class hierarchy: this class
+    extends ``sos_<chart>_driver_base`` (in the ``_base.svh`` companion
+    file) and overrides ``drive_step`` with the wave-3 generated drive
+    body. Users who want a different drive shape extend ``_base``
+    themselves; the walker keeps this default byte-identical to wave-3
+    chart-vocab for the ``[DRIVE]`` log line.
+
+    Consumes the JSONL trace file via ``$fopen`` + ``$fgets`` (in the
+    base ``run()``), decodes each line's event-poke map, drives
+    ``vif.event_in``, and waits the prescribed number of clock cycles
+    between events. Per §6.1 the driver SHALL NOT inspect DUT outputs.
+    """
+    cls = driver_class_name(chart_name)
+    cls_base = f"sos_{_normalise_chart_name(chart_name)}_driver_base"
+    base_svh = f"sos_{_normalise_chart_name(chart_name)}_driver_base.svh"
+    return _HEADER_PREFIX + f"""//
+// Stimulus driver DEFAULT class for the {chart_name} chart testbench.
+//
+// Wave-3-future (2026-05-24 §15) layered class hierarchy: extends
+// ``{cls_base}`` (declared in ``{base_svh}``) and overrides
+// ``drive_step`` with the wave-3 generated drive body. The base
+// class owns the run-skeleton (file open, reset, per-line replay,
+// settle). Users SHOULD extend the base class to customise the drive
+// behaviour rather than copy-pasting this class.
+//
+// Per SOS-08-E §6.1 + INV-S-HDL-E-1 the driver is constrained-random-
+// free — all stimulus comes from the trace file. Per INV-S-HDL-E-3
+// the driver does NOT inline any ``assert property``; property
+// checking lives exclusively in the bound SVA module.
+//
+// Wave-3-future (2026-05-24 §15): JSONL parsing is sourced from the
+// shared ``sos_jsonl_parser_pkg.svh`` header (single-source for both
+// the driver and the checker); the legacy inline ``parse_int_field``
+// is gone in favour of ``sos_jsonl_parse_int``.
+
+`include "{base_svh}"
+
+class {cls} extends {cls_base};
+
+    function new(virtual {virtual_if_name(chart_name)}.driver_mp vif, string trace_path);
+        super.new(vif, trace_path);
+    endfunction
+
+    // Wave-3-default ``drive_step`` body — the per-event drive shape
+    // emitted by the wave-3 monolithic walker. Drives ``vif.event_in``
+    // for one cycle, then waits ``cycles_wait - 1`` extra cycles.
+    virtual task drive_step(int step_idx, sos_jsonl_record_t rec);
+        vif.event_in = rec.event_code[7:0];
         @(posedge vif.clk);
         vif.event_in = '0;
-        repeat (cycles_wait - 1) @(posedge vif.clk);
+        repeat (rec.cycles_wait - 1) @(posedge vif.clk);
 
         vector_idx = vector_idx + 1;
         $display("[DRIVE] V%0d: event=%0d cycles=%0d  // chart=`{chart_name}`",
-                 vector_idx, event_code, cycles_wait);
+                 vector_idx, rec.event_code, rec.cycles_wait);
     endtask
-
-    // Wave-3-future (2026-05-24 §15): the integer-field extractor
-    // formerly inlined here is now sourced from
-    // sos_jsonl_parser_pkg.svh — driver + checker share one parser
-    // implementation.
 
 endclass
 """
@@ -1120,37 +1209,40 @@ def _render_nested_param_blocks(
     return "\n".join(decl_lines), "\n".join(parse_lines)
 
 
-def _emit_checker_class(
+def _emit_checker_class_base(
     chart_name: str,
     nested_params: list[tuple[str, str, str]] | None = None,
 ) -> str:
-    """``sos_checker_<chart>.sv`` — response checker class.
+    """``sos_<chart>_checker_base.svh`` — response checker BASE class.
 
-    Observes the DUT's ``current_state`` through the virtual interface
-    and compares against the trace's ``expected_state`` field. Failures
-    render in chart vocabulary per §5.5 + INV-S-HDL-E-4.
+    Wave-3-future (2026-05-24 §15) layered class hierarchy: factors
+    the wave-3 monolithic checker into a base class that owns the
+    structural skeleton + per-step virtual hooks. The wave-3-default
+    checker (``sos_checker_<chart>``) extends this class and overrides
+    the hooks with the generated body.
 
-    SOS-08-E wave-3-future (2026-05-24 §15): the checker reads BOTH
-    the wave-1 integer ``expected_state`` field AND a new string-
-    valued ``expected_state_str`` field. When ``expected_state_str``
-    is present, it is resolved via the per-chart state-symbol table
-    (``sos_<chart>_state_id_of``) and takes precedence; the integer
-    field is retained for backwards compatibility with wave-1/2
-    traces. Failure messages name the chart-state STRING when the
-    string field was used — concretising INV-S-HDL-E-4 + INV-SOS-H.
+    Virtual hooks declared here:
 
-    SOS-08-E wave-3-future-remaining (2026-05-24 §15): when
-    ``nested_params`` is non-empty, the checker additionally calls
-    ``sos_jsonl_parse_nested_int`` / ``sos_jsonl_parse_nested_string``
-    per one-level-deep nested ``<param name="outer.inner"/>``
-    declaration. ``nested_params`` is a list of
-    ``(outer, inner, "int" | "string")`` triples (deduplicated; see
-    ``_collect_nested_params``). When the list is empty the emit is
-    byte-identical to the wave-3-future baseline.
+    - ``virtual function bit pre_step(int step_idx);`` — returns 1 by
+      default; returning 0 SHALL skip the per-step parse/compare.
+    - ``virtual function void on_state_transition(int prev_state, int
+      next_state, int trigger_event);`` — default no-op.
+    - ``virtual function void on_invariant_fail(int invariant_id,
+      string message);`` — default emits ``$error(message)``. The
+      chart-vocab message construction lives in the base ``run()``;
+      override hooks SHOULD call ``super.on_invariant_fail(...)``
+      after any custom logging.
+    - ``virtual function void post_step(int step_idx);`` — default
+      no-op.
+
+    The chart-vocab failure-message format strings live in this base
+    class's ``run()`` so the byte-identity regression guard
+    (``test_chart_vocab_message_byte_identical_to_wave3_baseline``)
+    holds across the wave-3 → layered refactor.
     """
-    cls = checker_class_name(chart_name)
-    iface = virtual_if_name(chart_name)
     base = _normalise_chart_name(chart_name)
+    cls_base = f"sos_{base}_checker_base"
+    iface = virtual_if_name(chart_name)
     symbol_fn = f"sos_{base}_state_id_of"
     nested_decls, nested_parse = _render_nested_param_blocks(
         nested_params or [],
@@ -1158,27 +1250,29 @@ def _emit_checker_class(
         parse_indent="            ",
     )
     return _HEADER_PREFIX + f"""//
-// Response checker class for the {chart_name} chart testbench.
+// Response checker BASE class for the {chart_name} chart testbench.
 //
-// Observes the DUT's ``current_state`` output via the virtual interface
-// and compares against ``expected_state`` from the trace JSONL. Per
-// SOS-08-E §5.5 + INV-S-HDL-E-4 every failure renders in chart
+// Wave-3-future (2026-05-24 §15) layered class hierarchy: owns the
+// per-line replay loop, parse/resolve logic, and chart-vocabulary
+// failure-message construction. Declares four virtual hooks
+// (``pre_step`` / ``on_state_transition`` / ``on_invariant_fail`` /
+// ``post_step``); the wave-3-default checker (``{checker_class_name(chart_name)}``)
+// extends this class and overrides them. User-side overrides extend
+// this class and override one or more hooks without re-implementing
+// the run-skeleton.
+//
+// Per SOS-08-E §5.5 + INV-S-HDL-E-4 every failure renders in chart
 // vocabulary with the failing vector index, chart region, and
-// observed-vs-expected values.
-//
-// Per INV-S-HDL-E-3 the checker does NOT inline any ``assert property``;
-// property checking is in the SOS-08-D-emitted SVA bind file.
-//
-// Wave-3-future (2026-05-24 §15): JSONL parsing is sourced from the
-// shared ``sos_jsonl_parser_pkg.svh`` header (single-source for both
-// the driver and the checker). The string-valued ``expected_state_str``
-// field is resolved via the per-chart state-symbol table emitted in
-// ``sos_<chart>_state_symbols.svh``.
+// observed-vs-expected values. Per INV-S-HDL-E-3 the checker does
+// NOT inline any ``assert property``.
+
+`ifndef SOS_{base.upper()}_CHECKER_BASE_SVH
+`define SOS_{base.upper()}_CHECKER_BASE_SVH
 
 `include "sos_jsonl_parser_pkg.svh"
 `include "sos_{base}_state_symbols.svh"
 
-class {cls};
+virtual class {cls_base};
 
     virtual {iface}.checker_mp vif;
     string                     trace_path;
@@ -1192,6 +1286,55 @@ class {cls};
         this.vector_idx = 0;
     endfunction
 
+    // ------------------------------------------------------------
+    // Virtual per-step hooks. Defaults are no-ops (or, for
+    // ``on_invariant_fail``, emit ``$error`` with the constructed
+    // chart-vocab message). Override in a subclass to inject custom
+    // pre/post instrumentation, transition logging, or alternative
+    // failure routing.
+    // ------------------------------------------------------------
+
+    virtual function bit pre_step(int step_idx);
+        // Default: proceed with this step. Override to skip a step
+        // (return 0) or to instrument pre-parse state.
+        return 1'b1;
+    endfunction
+
+    virtual function void on_state_transition(
+        int prev_state,
+        int next_state,
+        int trigger_event
+    );
+        // Default no-op — override to log state transitions.
+    endfunction
+
+    virtual function void on_invariant_fail(
+        int    invariant_id,
+        string message
+    );
+        // Default: emit the chart-vocabulary failure message via
+        // ``$error`` (the chart-vocab content is the same as today's
+        // wave-3 ``$display`` text; severity escalates per the
+        // layered-hierarchy default).
+        $error("%s", message);
+    endfunction
+
+    virtual function void post_step(int step_idx);
+        // Default no-op — override to instrument post-compare state.
+    endfunction
+
+    // ------------------------------------------------------------
+    // Run-skeleton — owned by the base class. Per SOS-08-E §6.2:
+    //   1. Open trace file.
+    //   2. For each line: pre_step -> parse + state-resolution ->
+    //      on_state_transition -> wait cycles -> compare ->
+    //      on_invariant_fail (on mismatch) -> post_step.
+    //
+    // The chart-vocabulary failure-message format strings are
+    // constructed inline below so the byte-identity regression
+    // guard holds (``test_chart_vocab_message_byte_identical_to_
+    // wave3_baseline``).
+    // ------------------------------------------------------------
     task run();
         int    fh;
         string line;
@@ -1202,11 +1345,13 @@ class {cls};
         int    cycles_wait;
         int    parsed_int;
         int    parsed_str;
-        int    bit_idx;{nested_decls}
+        int    bit_idx;
+        bit    do_step;
+        string fail_msg;{nested_decls}
 
         fh = $fopen(trace_path, "r");
         if (fh == 0) begin
-            $display("[FATAL] {cls}: cannot open trace `%s`",
+            $display("[FATAL] {cls_base}: cannot open trace `%s`",
                      trace_path);
             $finish(2);
         end
@@ -1219,6 +1364,9 @@ class {cls};
         while (!$feof(fh)) begin
             rc = $fgets(line, fh);
             if (rc == 0) break;
+
+            do_step = pre_step(vector_idx);
+            if (!do_step) continue;
 
             expected_state          = -1;
             expected_state_str      = "";
@@ -1240,10 +1388,13 @@ class {cls};
                 bit_idx = {symbol_fn}(expected_state_str);
                 if (bit_idx < 0) begin
                     fail_count = fail_count + 1;
-                    $display(
+                    // INV-S-HDL-E-4 chart-vocab message — byte-
+                    // identical to wave-3 monolithic emit.
+                    fail_msg = $sformatf(
                         "[FAIL] vector V%0d: chart `{chart_name}` trace named expected_state_str=\\"%s\\" which is not a known chart-state of `{chart_name}`. INV-S-HDL-E-4 vocabulary violation.",
                         vector_idx + 1, expected_state_str
                     );
+                    on_invariant_fail(1, fail_msg);
                 end else begin
                     expected_state_resolved = 1 << bit_idx;
                 end
@@ -1255,6 +1406,7 @@ class {cls};
             repeat (cycles_wait) @(posedge vif.clk);
 
             vector_idx = vector_idx + 1;
+            on_state_transition(-1, expected_state_resolved, -1);
 
             if (expected_state_resolved >= 0) begin
                 if (vif.current_state != expected_state_resolved[vif.current_state'left:0]) begin
@@ -1264,21 +1416,24 @@ class {cls};
                     // wave-3-future shape), surface that string in the
                     // failure message verbatim.
                     if (parsed_str) begin
-                        $display(
+                        fail_msg = $sformatf(
                             "[FAIL] vector V%0d: chart `{chart_name}` expected state=\\"%s\\" (one-hot=0b%0b) at cycle %0t; observed current_state=0b%0b.",
                             vector_idx, expected_state_str,
                             expected_state_resolved, $time,
                             vif.current_state
                         );
                     end else begin
-                        $display(
+                        fail_msg = $sformatf(
                             "[FAIL] vector V%0d: chart `{chart_name}` produced expected_state=%0d at cycle %0t; observed current_state=%0b.",
                             vector_idx, expected_state, $time,
                             vif.current_state
                         );
                     end
+                    on_invariant_fail(2, fail_msg);
                 end
             end
+
+            post_step(vector_idx);
         end
 
         $fclose(fh);
@@ -1286,6 +1441,97 @@ class {cls};
 
     function int get_fail_count();
         return fail_count;
+    endfunction
+
+endclass
+
+`endif // SOS_{base.upper()}_CHECKER_BASE_SVH
+"""
+
+
+def _emit_checker_class(
+    chart_name: str,
+    nested_params: list[tuple[str, str, str]] | None = None,
+) -> str:
+    """``sos_checker_<chart>.sv`` — response checker DEFAULT class.
+
+    Wave-3-future (2026-05-24 §15) layered class hierarchy: this
+    class extends ``sos_<chart>_checker_base`` (in the ``_base.svh``
+    companion file) and overrides the per-step hooks with the
+    wave-3-default bodies. Users who want a different checker shape
+    extend ``_base`` themselves; the walker keeps this default
+    byte-identical to wave-3 chart-vocab.
+
+    The ``run()`` skeleton lives in ``_base.svh``. ``nested_params``
+    is forwarded to the base emitter (it carries the wave-3-future-
+    remaining nested-payload locals and parse calls). When the list
+    is empty the base emit is byte-identical to the wave-3-future
+    baseline.
+    """
+    cls = checker_class_name(chart_name)
+    base = _normalise_chart_name(chart_name)
+    cls_base = f"sos_{base}_checker_base"
+    base_svh = f"sos_{base}_checker_base.svh"
+    iface = virtual_if_name(chart_name)
+    return _HEADER_PREFIX + f"""//
+// Response checker DEFAULT class for the {chart_name} chart testbench.
+//
+// Wave-3-future (2026-05-24 §15) layered class hierarchy: extends
+// ``{cls_base}`` (declared in ``{base_svh}``) and overrides the
+// per-step hooks with the wave-3 default bodies. The base class
+// owns the run-skeleton, parse/resolve logic, and chart-vocabulary
+// failure-message construction.
+//
+// User-side overrides SHOULD extend the base class rather than
+// copy-paste this class — the walker keeps emitting ``_default``
+// byte-identical to wave-3 chart-vocab for the [FAIL] log lines.
+//
+// Per SOS-08-E §5.5 + INV-S-HDL-E-4 every failure renders in chart
+// vocabulary. Per INV-S-HDL-E-3 the checker does NOT inline any
+// ``assert property``; property checking is in the SOS-08-D-emitted
+// SVA bind file.
+
+`include "{base_svh}"
+
+class {cls} extends {cls_base};
+
+    function new(virtual {iface}.checker_mp vif, string trace_path);
+        super.new(vif, trace_path);
+    endfunction
+
+    // Wave-3-default ``pre_step`` — proceed with every step (no
+    // filtering by default). Subclasses MAY override to skip steps.
+    virtual function bit pre_step(int step_idx);
+        return super.pre_step(step_idx);
+    endfunction
+
+    // Wave-3-default ``on_state_transition`` — no logging. Subclasses
+    // MAY override to instrument transitions.
+    virtual function void on_state_transition(
+        int prev_state,
+        int next_state,
+        int trigger_event
+    );
+        super.on_state_transition(prev_state, next_state, trigger_event);
+    endfunction
+
+    // Wave-3-default ``on_invariant_fail`` — delegate to the base,
+    // which emits ``$error(message)`` with the chart-vocabulary
+    // message constructed in the base ``run()``. User overrides
+    // SHOULD perform any custom logging FIRST, then call
+    // ``super.on_invariant_fail(invariant_id, message)`` to preserve
+    // the chart-vocab failure emission.
+    virtual function void on_invariant_fail(
+        int    invariant_id,
+        string message
+    );
+        super.on_invariant_fail(invariant_id, message);
+    endfunction
+
+    // Wave-3-default ``post_step`` — no-op. Subclasses MAY override
+    // to instrument post-compare state.
+    virtual function void post_step(int step_idx);
+        super.post_step(step_idx);
     endfunction
 
 endclass
@@ -1762,33 +2008,27 @@ endinterface
 """
 
 
-def _emit_checker_class_parallel(
+def _emit_checker_class_base_parallel(
     chart_name: str,
     regions: list[tuple[str, str | None, list[str]]],
     nested_params: list[tuple[str, str, str]] | None = None,
 ) -> str:
-    """``sos_checker_<chart>.sv`` — parallel-chart checker class.
+    """``sos_<chart>_checker_base.svh`` — parallel-chart BASE class.
 
-    Per region, the checker reads ``vif.current_state_<region>`` and
-    compares against the trace's ``expected_state_<region>`` integer
-    field (mirror of the SOS-03 wave-3 schema extension for per-region
-    expected states). Missing per-region fields default to "no
-    assertion this step" (the wave-3 vector author opts which regions
-    to check per step).
+    Wave-3-future (2026-05-24 §15) layered class hierarchy: parallel
+    mirror of ``_emit_checker_class_base``. Owns the per-line replay
+    loop + per-region parse/resolve/compare logic + chart-vocabulary
+    failure-message construction. Declares the four virtual hooks
+    (``pre_step`` / ``on_state_transition`` / ``on_invariant_fail`` /
+    ``post_step``); the wave-3-default checker overrides them.
 
-    Per INV-S-HDL-E-4 every failure renders in chart vocabulary +
-    names the failing region. Per INV-S-HDL-E-3 no inline
-    ``assert property``.
-
-    Wave-3-future-remaining (2026-05-24 §15): mirror of
-    ``_emit_checker_class``'s ``nested_params`` extension — one-level-
-    deep nested ``<param name="outer.inner"/>`` declarations on
-    parallel-chart transitions emit nested-payload parse calls inside
-    the per-step loop. Empty list → baseline byte-identical emit.
+    Per-region chart-vocab format strings are constructed inline so
+    the byte-identity regression guard holds across the wave-3 →
+    layered refactor.
     """
-    cls = checker_class_name(chart_name)
-    iface = virtual_if_name(chart_name)
     base = _normalise_chart_name(chart_name)
+    cls_base = f"sos_{base}_checker_base"
+    iface = virtual_if_name(chart_name)
     symbol_fn = f"sos_{base}_state_id_of"
     region_names = [r[0] for r in regions]
     nested_decls, nested_parse = _render_nested_param_blocks(
@@ -1817,7 +2057,11 @@ def _emit_checker_class_parallel(
         region_decls_lines.append(
             f"        int    bit_idx_{ident};"
         )
-        # Per-region parse block: integer + string + resolution.
+        # Per-region parse block: integer + string + resolution. Chart-
+        # vocab failure messages are constructed in $sformatf and
+        # routed through the on_invariant_fail hook so user-side
+        # subclasses can intercept; the format strings are byte-
+        # identical to the wave-3 monolithic emit.
         region_parse.append(
             f"            expected_state_{ident}          = -1;\n"
             f"            expected_state_{ident}_str      = \"\";\n"
@@ -1835,12 +2079,13 @@ def _emit_checker_class_parallel(
             f"expected_state_{ident}_str);\n"
             f"                if (bit_idx_{ident} < 0) begin\n"
             f"                    fail_count = fail_count + 1;\n"
-            f"                    $display(\n"
+            f"                    fail_msg = $sformatf(\n"
             f"                        \"[FAIL] vector V%0d region "
             f"`{rn}` chart `{chart_name}`: expected_state_{ident}_str=\\\"%s\\\" is not a known chart-state.\",\n"
             f"                        vector_idx + 1, "
             f"expected_state_{ident}_str\n"
             f"                    );\n"
+            f"                    on_invariant_fail(1, fail_msg);\n"
             f"                end else begin\n"
             f"                    expected_state_{ident}_resolved = "
             f"1 << bit_idx_{ident};\n"
@@ -1859,7 +2104,7 @@ def _emit_checker_class_parallel(
             f"                    // INV-S-HDL-E-4: chart-vocabulary "
             f"failure message; region named.\n"
             f"                    if (parsed_str_{ident}) begin\n"
-            f"                        $display(\n"
+            f"                        fail_msg = $sformatf(\n"
             f"                            \"[FAIL] vector V%0d region "
             f"`{rn}` chart `{chart_name}`: expected state=\\\"%s\\\" "
             f"(one-hot=0b%0b) at cycle %0t; observed current_state=0b%0b.\",\n"
@@ -1869,7 +2114,7 @@ def _emit_checker_class_parallel(
             f"vif.current_state_{ident}\n"
             f"                        );\n"
             f"                    end else begin\n"
-            f"                        $display(\n"
+            f"                        fail_msg = $sformatf(\n"
             f"                            \"[FAIL] vector V%0d region "
             f"`{rn}` chart `{chart_name}`: expected_state=%0d at cycle "
             f"%0t; observed current_state=%0b.\",\n"
@@ -1878,6 +2123,7 @@ def _emit_checker_class_parallel(
             f"vif.current_state_{ident}\n"
             f"                        );\n"
             f"                    end\n"
+            f"                    on_invariant_fail(2, fail_msg);\n"
             f"                end\n"
             f"            end"
         )
@@ -1887,22 +2133,26 @@ def _emit_checker_class_parallel(
     region_compare_block = "\n".join(region_reads)
 
     return _HEADER_PREFIX + f"""//
-// Response checker class for the {chart_name} chart (parallel wave-3).
+// Response checker BASE class for chart `{chart_name}` (parallel).
 //
-// Observes each region's ``current_state_<region>`` output via the
-// virtual interface; compares against the trace JSONL's per-region
-// ``expected_state_<region>`` field. Per SOS-08-E wave-3 + INV-S-HDL-
-// E-4 every failure cites the failing region in chart vocabulary.
+// Wave-3-future (2026-05-24 §15) layered class hierarchy: parallel
+// mirror of ``sos_<chart>_checker_base``. Owns the per-line replay
+// loop + per-region parse/resolve/compare logic + chart-vocabulary
+// failure-message construction. The wave-3-default parallel checker
+// (``{checker_class_name(chart_name)}``) extends this class and
+// overrides the per-step hooks.
 //
-// Wave-3-future (2026-05-24 §15): per-region string-valued
-// ``expected_state_<region>_str`` resolved via the per-chart symbol
-// table (``sos_<chart>_state_id_of``). Wave-1/2 integer-only traces
-// keep working unchanged via the backwards-compatible fall-through.
+// Per SOS-08-E wave-3 + INV-S-HDL-E-4 every failure cites the
+// failing region in chart vocabulary. Per INV-S-HDL-E-3 the checker
+// does NOT inline any ``assert property``.
+
+`ifndef SOS_{base.upper()}_CHECKER_BASE_SVH
+`define SOS_{base.upper()}_CHECKER_BASE_SVH
 
 `include "sos_jsonl_parser_pkg.svh"
 `include "sos_{base}_state_symbols.svh"
 
-class {cls};
+virtual class {cls_base};
 
     virtual {iface}.checker_mp vif;
     string                     trace_path;
@@ -1916,17 +2166,46 @@ class {cls};
         this.vector_idx = 0;
     endfunction
 
+    // ------------------------------------------------------------
+    // Virtual per-step hooks. Defaults mirror the single-region
+    // base class: no-op pre/post + transition, ``$error(message)``
+    // on_invariant_fail. Override to customise.
+    // ------------------------------------------------------------
+
+    virtual function bit pre_step(int step_idx);
+        return 1'b1;
+    endfunction
+
+    virtual function void on_state_transition(
+        int prev_state,
+        int next_state,
+        int trigger_event
+    );
+    endfunction
+
+    virtual function void on_invariant_fail(
+        int    invariant_id,
+        string message
+    );
+        $error("%s", message);
+    endfunction
+
+    virtual function void post_step(int step_idx);
+    endfunction
+
     task run();
         int    fh;
         string line;
         int    rc;
 {region_decls}
         int    cycles_wait;
-        int    parsed;{nested_decls}
+        int    parsed;
+        bit    do_step;
+        string fail_msg;{nested_decls}
 
         fh = $fopen(trace_path, "r");
         if (fh == 0) begin
-            $display("[FATAL] {cls}: cannot open trace `%s`",
+            $display("[FATAL] {cls_base}: cannot open trace `%s`",
                      trace_path);
             $finish(2);
         end
@@ -1939,6 +2218,9 @@ class {cls};
             rc = $fgets(line, fh);
             if (rc == 0) break;
 
+            do_step = pre_step(vector_idx);
+            if (!do_step) continue;
+
 {region_parse_block}
             cycles_wait = 1;
             parsed = sos_jsonl_parse_int(line, "cycles", cycles_wait);
@@ -1947,8 +2229,11 @@ class {cls};
             repeat (cycles_wait) @(posedge vif.clk);
 
             vector_idx = vector_idx + 1;
+            on_state_transition(-1, -1, -1);
 
 {region_compare_block}
+
+            post_step(vector_idx);
         end
 
         $fclose(fh);
@@ -1956,6 +2241,84 @@ class {cls};
 
     function int get_fail_count();
         return fail_count;
+    endfunction
+
+endclass
+
+`endif // SOS_{base.upper()}_CHECKER_BASE_SVH
+"""
+
+
+def _emit_checker_class_parallel(
+    chart_name: str,
+    regions: list[tuple[str, str | None, list[str]]],
+    nested_params: list[tuple[str, str, str]] | None = None,
+) -> str:
+    """``sos_checker_<chart>.sv`` — parallel-chart DEFAULT class.
+
+    Wave-3-future (2026-05-24 §15) layered class hierarchy: extends
+    ``sos_<chart>_checker_base`` (parallel form, in the ``_base.svh``
+    companion file) and overrides the per-step hooks with the
+    wave-3-default bodies. The base class owns the run-skeleton +
+    per-region parse/resolve/compare + chart-vocabulary failure-
+    message construction.
+
+    Per INV-S-HDL-E-4 every failure renders in chart vocabulary +
+    names the failing region. Per INV-S-HDL-E-3 no inline
+    ``assert property``.
+
+    ``regions`` and ``nested_params`` are consumed by the base
+    emitter; this default class only wires the constructor + hook
+    overrides.
+    """
+    cls = checker_class_name(chart_name)
+    base = _normalise_chart_name(chart_name)
+    cls_base = f"sos_{base}_checker_base"
+    base_svh = f"sos_{base}_checker_base.svh"
+    iface = virtual_if_name(chart_name)
+    del regions
+    del nested_params
+    return _HEADER_PREFIX + f"""//
+// Response checker DEFAULT class for chart `{chart_name}` (parallel).
+//
+// Wave-3-future (2026-05-24 §15) layered class hierarchy: extends
+// ``{cls_base}`` (declared in ``{base_svh}``) and overrides the
+// per-step hooks with the wave-3-default bodies. The base class
+// owns the run-skeleton, per-region parse/resolve/compare, and
+// chart-vocabulary failure-message construction.
+//
+// User-side overrides SHOULD extend the base class rather than
+// copy-paste this class.
+
+`include "{base_svh}"
+
+class {cls} extends {cls_base};
+
+    function new(virtual {iface}.checker_mp vif, string trace_path);
+        super.new(vif, trace_path);
+    endfunction
+
+    virtual function bit pre_step(int step_idx);
+        return super.pre_step(step_idx);
+    endfunction
+
+    virtual function void on_state_transition(
+        int prev_state,
+        int next_state,
+        int trigger_event
+    );
+        super.on_state_transition(prev_state, next_state, trigger_event);
+    endfunction
+
+    virtual function void on_invariant_fail(
+        int    invariant_id,
+        string message
+    );
+        super.on_invariant_fail(invariant_id, message);
+    endfunction
+
+    virtual function void post_step(int step_idx);
+        super.post_step(step_idx);
     endfunction
 
 endclass
@@ -2404,11 +2767,21 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
     if regions:
         # Parallel-chart emit (wave-3): per-region virtual interface +
         # per-region checker + chart-top-wrapper DUT instantiation.
+        # Wave-3-future (2026-05-24 §15) layered class hierarchy:
+        # ``_checker_base.svh`` + ``_driver_base.svh`` carry the
+        # run-skeleton + virtual hooks; the ``_default`` SV files
+        # extend them. File counts: parallel emit grows from 16 to 18.
         files: dict[str, str] = {
             f"tb/sv/{base}/dut_if_{base}.sv":
                 _emit_virtual_interface_parallel(chart_name, regions),
+            f"tb/sv/{base}/sos_{base}_driver_base.svh":
+                _emit_driver_class_base(chart_name),
             f"tb/sv/{base}/sos_driver_{base}.sv":
                 _emit_driver_class(chart_name),
+            f"tb/sv/{base}/sos_{base}_checker_base.svh":
+                _emit_checker_class_base_parallel(
+                    chart_name, regions, nested_params
+                ),
             f"tb/sv/{base}/sos_checker_{base}.sv":
                 _emit_checker_class_parallel(
                     chart_name, regions, nested_params
@@ -2423,13 +2796,21 @@ def render_target(chart_ir: Any, config: Any = None) -> dict[str, str]:
             f"tb/sv/{base}/run_riviera.tcl": _emit_riviera_tcl(chart_name),
         }
     else:
-        # Single-region emit (wave-1 path unchanged).
+        # Single-region emit. Wave-3-future (2026-05-24 §15) layered
+        # class hierarchy: ``_checker_base.svh`` + ``_driver_base.svh``
+        # carry the run-skeleton + virtual hooks; the ``_default`` SV
+        # files extend them. File counts: single-region grows from 14
+        # to 16.
         n_states = max(len(all_state_ids), 1)
         files = {
             f"tb/sv/{base}/dut_if_{base}.sv":
                 _emit_virtual_interface(chart_name),
+            f"tb/sv/{base}/sos_{base}_driver_base.svh":
+                _emit_driver_class_base(chart_name),
             f"tb/sv/{base}/sos_driver_{base}.sv":
                 _emit_driver_class(chart_name),
+            f"tb/sv/{base}/sos_{base}_checker_base.svh":
+                _emit_checker_class_base(chart_name, nested_params),
             f"tb/sv/{base}/sos_checker_{base}.sv":
                 _emit_checker_class(chart_name, nested_params),
             f"tb/sv/{base}/tb_{base}.sv":

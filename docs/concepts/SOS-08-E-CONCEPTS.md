@@ -739,3 +739,87 @@ For a single-region chart with ``<transition><raise event="tick"><param name="pa
 **Cited PCDNs / invariants**: PCDN-SOS-08-E-001 / -002 / -004 unchanged; INV-S-HDL-E-1..6 preserved; ``<param name="outer.inner"/>`` dot-name convention introduced as the chart-author-facing trigger for the new parser functions.
 
 Status: 🟢 **wave-3-future-remaining nested-JSON parser landed (one level deep)**. Deeper nesting, layered class hierarchy, and multi-clock testbench wiring remain on the wave-3-future track.
+
+### 2026-05-24 — Impl wave-3-future-remaining: layered class hierarchy (Ira)
+
+Closes the **layered class hierarchy** carry-forward from PCDN-SOS-08-E-001 (originally deferred at wave-1 as "follow-on if a customer requests it"). Splits the wave-3 monolithic driver + checker each into a virtual base class (`.svh` header) carrying the run-skeleton + per-step virtual hooks, plus a default class (`.sv`) that extends the base and provides the wave-3-default hook overrides. User-side customisation extends the base header directly; the walker keeps emitting the `_default` `.sv` byte-identical to the wave-3 chart-vocab.
+
+The remaining wave-3-future carry-forwards (**multi-clock testbench wiring**, **deeper-than-one-level nested-payload parsing**) stay deferred.
+
+**Implementation surface**:
+
+- **`_emit_checker_class_base(chart_name, nested_params)`** (new) — emits `sos_<chart>_checker_base.svh`. Declares the virtual base class `sos_<chart>_checker_base` with:
+    * Member fields (`vif`, `trace_path`, `fail_count`, `vector_idx`).
+    * `function new(...)` constructor.
+    * Four virtual hooks: `pre_step(int step_idx) → bit` (default returns 1), `on_state_transition(int prev_state, int next_state, int trigger_event)` (default no-op), `on_invariant_fail(int invariant_id, string message)` (default emits `$error("%s", message)`), `post_step(int step_idx)` (default no-op).
+    * `task run()` — the run-skeleton. Walks each JSONL line; per step calls `pre_step → parse + state-resolution → on_state_transition → wait cycles → compare → on_invariant_fail (on mismatch) → post_step`. Chart-vocabulary failure messages are constructed inline via `$sformatf` using format strings **byte-identical** to the wave-3 monolithic emit; the formatted message is then routed through `on_invariant_fail` so user-side subclasses can intercept.
+    * `function int get_fail_count()`.
+
+- **`_emit_checker_class_base_parallel(chart_name, regions, nested_params)`** (new) — parallel mirror of the single-region base. Owns the same hook set + the per-region parse/resolve/compare logic; per-region failure messages are constructed inline via `$sformatf` and routed through `on_invariant_fail`.
+
+- **`_emit_checker_class`** (refactored) — now emits the *default* class `sos_checker_<chart>` that `extends sos_<chart>_checker_base;`. The default class's body is just the constructor + four hook overrides; each override calls `super.<hook>(...)` so the base-class default chart-vocab emission still happens. `nested_params` is forwarded to the base emitter unchanged.
+
+- **`_emit_checker_class_parallel`** (refactored) — parallel mirror of the default. The `regions` + `nested_params` parameters are consumed by the parallel base emitter; the default class itself is parameter-free hook overrides.
+
+- **`_emit_driver_class_base(chart_name)`** (new) — emits `sos_<chart>_driver_base.svh`. Declares:
+    * The per-step record `typedef struct { int event_code; int cycles_wait; string line; } sos_jsonl_record_t;` — carried into `drive_step`.
+    * The virtual base class `sos_<chart>_driver_base` with member fields, constructor, three virtual hooks (`drive_pre(int step_idx)` / `drive_step(int step_idx, sos_jsonl_record_t rec)` / `drive_post(int step_idx)`), and the `task run()` run-skeleton (file open, reset, per-line JSONL decode into `sos_jsonl_record_t`, fire hooks per step, settle).
+
+- **`_emit_driver_class`** (refactored) — now emits the *default* class `sos_driver_<chart>` that `extends sos_<chart>_driver_base;`. Overrides `drive_step` with the wave-3-default drive body (drives `vif.event_in`, waits `cycles_wait - 1` extra cycles, emits the chart-vocab `[DRIVE]` log).
+
+- **`render_target`** — emits two new files per chart: `sos_<chart>_checker_base.svh` + `sos_<chart>_driver_base.svh`. File counts move from **14 → 16** (single-region) and **16 → 18** (parallel). The base headers are emitted in BOTH dispatch branches (single-region calls `_emit_checker_class_base`; parallel calls `_emit_checker_class_base_parallel`).
+
+**Class-hierarchy convention** (the chart-author-facing contract):
+
+- `sos_<chart>_<role>_base` (virtual class, in `_base.svh`) is the **supported extension point**. Users SHOULD extend this class to customise driver/checker behaviour.
+- `sos_<role>_<chart>` (concrete class, in `<role>_<chart>.sv`) is the **walker-emitted default**. Users SHOULD NOT subclass the default — the walker re-emits it on every codegen run and any user-side edits to that file will be overwritten.
+- `super.<hook>(...)` calls in the default class's overrides preserve the wave-3 chart-vocab failure emission; user-side subclasses overriding the same hook SHOULD also call `super.<hook>(...)` after any custom logging so the chart-vocab failure path remains intact (load-bearing for INV-S-HDL-E-4).
+
+**Emit shape (example)**:
+
+For the single-region `_simple_chart()` fixture (states `idle`, `active`):
+
+```
+tb/sv/demo/
+├── sos_demo_checker_base.svh    ← virtual class sos_demo_checker_base; ...
+├── sos_checker_demo.sv          ← class sos_checker_demo extends sos_demo_checker_base; ...
+├── sos_demo_driver_base.svh     ← virtual class sos_demo_driver_base; ...
+└── sos_driver_demo.sv           ← class sos_driver_demo extends sos_demo_driver_base; ...
+```
+
+The chart-vocabulary `[FAIL] vector V%0d: chart \`demo\` ...` format strings live inside `sos_demo_checker_base.svh`'s `run()` task; the default `sos_checker_demo.sv` carries no `$sformatf` of its own.
+
+**Invariants upheld**:
+
+- **INV-S-HDL-E-1** (no constrained-random) — preserved. The new virtual classes use only standard SV control flow + `string`/`int` arithmetic.
+- **INV-S-HDL-E-2** (no UVM) — preserved. No UVM imports or macros.
+- **INV-S-HDL-E-3** (no inline `assert property` outside bind files) — preserved.
+- **INV-S-HDL-E-4** (chart-vocabulary failure messages) — preserved. The format strings are byte-identical to the wave-3 monolithic emit; regression guard `test_chart_vocab_message_byte_identical_to_wave3_baseline` exists.
+- **INV-S-HDL-E-5** (per-simulator build wrapper) — preserved unchanged.
+- **INV-S-HDL-E-6** (Verilator-subset compliance) — preserved. Virtual classes + `super.<hook>` dispatch are within Verilator's documented subset.
+- **PCDN-SOS-08-E-001** (flat class hierarchy at v1) — **resolved**: the layered hierarchy is now opt-in via the `_base.svh` extension point. The walker always emits the `_default` so flat-hierarchy consumers see no behaviour change; layered consumers extend `_base` themselves.
+
+**Tests added**: 17 new test methods on `TestWave3FutureLayeredClassHierarchy`:
+
+- `test_emits_checker_base_svh` / `test_emits_driver_base_svh` — the new headers are emitted for every chart.
+- `test_checker_base_declares_virtual_hooks` / `test_driver_base_declares_virtual_hooks` — the virtual hook signatures are declared in the base header.
+- `test_default_checker_extends_base` / `test_default_driver_extends_base` — the default classes use the SV `extends` keyword.
+- `test_run_skeleton_lives_in_base` — the `run()` task body lives in the base header, NOT in the default `.sv`.
+- `test_invariant_failure_message_constructed_in_base` — chart-vocab message construction (`$sformatf`) lives in the base.
+- `test_emit_count_single_region_is_sixteen` / `test_emit_count_parallel_is_eighteen` — file counts move to 16/18.
+- `test_chart_vocab_message_byte_identical_to_wave3_baseline` — regression guard: the `$sformatf` format strings are byte-identical to the wave-3 monolithic emit.
+- `test_super_dispatch_in_default_calls_base_invariant_handler` — the default's `on_invariant_fail` calls `super.on_invariant_fail(invariant_id, message)` so chart-vocab failure emission survives user subclassing.
+- `test_emits_parallel_checker_base_svh` / `test_emits_parallel_driver_base_svh` / `test_parallel_default_checker_extends_base` / `test_parallel_run_skeleton_lives_in_base` — parallel-chart mirror of the single-region checks.
+- `test_render_target_layered_emit_clean` — INV-S-HDL-E-1/-2/-3 audit passes on both chart shapes.
+
+**Test suite**: 766/766 passing (749 prior + 17 new wave-3-future-remaining layered-hierarchy; 1 skipped when neither SV syntax tool is installed).
+
+**Wave-3-future remaining boundary** (still deferred):
+
+- **Multi-clock-domain testbench wiring** — per-region `clk_<dom>` / `rst_<dom>` on the chart-top wrapper per SOS-08-C §6.10's multi-clock contract. Wave-2b ratified single-clock parallel as the v1 baseline; this slice inherits that constraint unchanged.
+- **Deeper-than-one-level nested-payload parsing** — `<param name="a.b.c"/>` still raises `UnsupportedChartError`. Lifting requires a real SV-side recursive JSON parser; lands when a chart-author actually needs more than one level of nesting (per the SOS spec-before-code discipline).
+- **Nested-payload-aware failure messages** — unchanged from the prior §15 entry.
+
+**Cited PCDNs / invariants**: PCDN-SOS-08-E-001 **resolved via layered-hierarchy opt-in** (the walker keeps the flat `_default` as the byte-identical wave-3 emit; layered consumers extend `_base`); INV-S-HDL-E-1..6 preserved; §12 gate (a) updated to mark PCDN-SOS-08-E-001 as resolved.
+
+Status: 🟢 **wave-3-future-remaining layered class hierarchy landed**. File shape: 16 files single-region, 18 files parallel. `_base` is the supported extension point; users override by extending it. The walker continues to emit `_default` byte-identical to wave-3 chart-vocab. Multi-clock testbench wiring + deeper-than-one-level nesting remain on the wave-3-future track.

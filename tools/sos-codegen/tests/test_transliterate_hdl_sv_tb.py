@@ -114,14 +114,16 @@ class TestFileSet:
     ratification = 12 total.
     """
 
-    def test_emits_fourteen_files(self):
+    def test_emits_sixteen_files(self):
         files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
         # Six SV files + five build wrappers + verilator stubs +
         # wave-3-future parser package + per-chart state-symbol
-        # table = 14.
-        assert len(files) == 14, (
-            f"SOS-08-E §6 + wave-3 + wave-3-future §15: expected 14 "
-            f"emitted files, got {len(files)}: {sorted(files)}"
+        # table + wave-3-future-remaining layered class hierarchy
+        # base headers (checker_base.svh + driver_base.svh) = 16.
+        assert len(files) == 16, (
+            f"SOS-08-E §6 + wave-3 + wave-3-future + wave-3-future-"
+            f"remaining layered hierarchy §15: expected 16 emitted "
+            f"files, got {len(files)}: {sorted(files)}"
         )
 
     def test_emits_top_module(self):
@@ -275,6 +277,12 @@ class TestDriverClass:
         files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
         return files["tb/sv/demo/sos_driver_demo.sv"]
 
+    def _drv_base(self) -> str:
+        """Driver BASE class (``_base.svh``) — owns the run-skeleton
+        per wave-3-future-remaining layered class hierarchy."""
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        return files["tb/sv/demo/sos_demo_driver_base.svh"]
+
     def test_is_a_class(self):
         drv = self._drv()
         assert "class sos_driver_demo" in drv
@@ -285,26 +293,36 @@ class TestDriverClass:
         assert "function new" in drv
 
     def test_has_run_task(self):
-        assert "task run();" in self._drv()
+        # Wave-3-future-remaining layered hierarchy: the run-skeleton
+        # lives in ``_base.svh``; the ``.sv`` default class only
+        # carries hook overrides.
+        assert "task run();" in self._drv_base()
 
     def test_consumes_trace_via_fopen(self):
-        drv = self._drv()
-        assert "$fopen" in drv, (
-            "SOS-08-E §5.4: driver MUST consume JSONL trace via $fopen."
+        # File I/O moved into the BASE class with the run-skeleton.
+        drv_base = self._drv_base()
+        assert "$fopen" in drv_base, (
+            "SOS-08-E §5.4: driver BASE MUST consume JSONL trace via $fopen."
         )
-        assert "$fgets" in drv
+        assert "$fgets" in drv_base
 
     def test_drives_only_inputs(self):
         # The driver MUST route through the `driver_mp` modport (which
         # has DUT inputs as `output` and outputs as `input`).
         drv = self._drv()
-        assert "driver_mp" in drv, (
-            "SOS-08-E §6.1: driver must use the driver_mp modport (DUT "
-            "inputs are output ports of the modport)."
+        drv_base = self._drv_base()
+        assert "driver_mp" in drv_base, (
+            "SOS-08-E §6.1: driver BASE must declare the driver_mp modport "
+            "(DUT inputs are output ports of the modport)."
         )
+        # The default class inherits the same modport via the base.
+        assert "driver_mp" in drv
 
     def test_emits_drive_log_in_chart_vocabulary(self):
         # INV-S-HDL-E-4: log per event with `[DRIVE] V<n>:` chart-vocab.
+        # The wave-3-default drive-step body still carries the
+        # ``[DRIVE]`` chart-vocab line; the base class only sets up the
+        # run-skeleton.
         assert "[DRIVE]" in self._drv()
 
 
@@ -320,34 +338,46 @@ class TestCheckerClass:
         files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
         return files["tb/sv/demo/sos_checker_demo.sv"]
 
+    def _chk_base(self) -> str:
+        """Checker BASE class (``_base.svh``) — owns the run-skeleton
+        + chart-vocab message construction per wave-3-future-remaining
+        layered class hierarchy."""
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        return files["tb/sv/demo/sos_demo_checker_base.svh"]
+
     def test_is_a_class(self):
         chk = self._chk()
         assert "class sos_checker_demo" in chk
         assert "endclass" in chk
 
     def test_has_run_task(self):
-        assert "task run();" in self._chk()
+        # Wave-3-future-remaining: ``run()`` lives in the base class.
+        assert "task run();" in self._chk_base()
 
     def test_has_fail_count_accessor(self):
-        chk = self._chk()
-        assert "function int get_fail_count" in chk, (
-            "SOS-08-E §6.2: checker MUST expose fail_count to the top-"
-            "level via get_fail_count()."
+        # ``get_fail_count`` is inherited from the base class.
+        chk_base = self._chk_base()
+        assert "function int get_fail_count" in chk_base, (
+            "SOS-08-E §6.2: checker BASE MUST expose fail_count to the "
+            "top-level via get_fail_count()."
         )
 
     def test_failure_message_is_chart_vocabulary(self):
-        chk = self._chk()
+        # Wave-3-future-remaining: chart-vocab message construction
+        # lives in the base class's ``run()`` (byte-identical format
+        # strings to the wave-3 monolithic emit).
+        chk_base = self._chk_base()
         # INV-S-HDL-E-4 + §5.5: `[FAIL] vector V<n>: chart \`<chart>\``.
-        assert "[FAIL] vector" in chk
-        assert "chart `demo`" in chk, (
+        assert "[FAIL] vector" in chk_base
+        assert "chart `demo`" in chk_base, (
             "SOS-08-E §5.5: failure messages MUST cite the chart name in "
             "chart vocabulary."
         )
 
     def test_uses_checker_modport(self):
-        chk = self._chk()
-        assert "checker_mp" in chk, (
-            "SOS-08-E §6.2: checker MUST use the checker_mp modport "
+        chk_base = self._chk_base()
+        assert "checker_mp" in chk_base, (
+            "SOS-08-E §6.2: checker BASE MUST use the checker_mp modport "
             "(observes only — no drives)."
         )
 
@@ -523,10 +553,15 @@ class TestInvariants:
             )
 
     def test_inv_e4_chart_vocabulary_in_checker(self):
-        """INV-S-HDL-E-4: failure messages cite chart name + state/transition."""
-        chk = self._files()["tb/sv/demo/sos_checker_demo.sv"]
-        assert "[FAIL] vector" in chk
-        assert "chart `demo`" in chk
+        """INV-S-HDL-E-4: failure messages cite chart name + state/transition.
+
+        Wave-3-future-remaining (2026-05-24 §15) layered class hierarchy:
+        chart-vocab message construction lives in the BASE checker
+        (``_base.svh``); the default checker delegates via
+        ``super.on_invariant_fail(...)``."""
+        chk_base = self._files()["tb/sv/demo/sos_demo_checker_base.svh"]
+        assert "[FAIL] vector" in chk_base
+        assert "chart `demo`" in chk_base
 
     def test_inv_e5_one_wrapper_per_supported_simulator_wave1(self):
         """INV-S-HDL-E-5: wave-1 ships Verilator wrapper (open-source CI
@@ -826,14 +861,15 @@ class TestWave3ParallelChartEmit:
         return sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
 
     def test_parallel_emit_keeps_same_artifact_count(self):
-        """Parallel charts emit 16 files post wave-3-future:
-        4 SV core + 5 wrappers + 1 stub header + 2 wave-3-future
-        helpers (parser pkg + state-symbol table) + 2 SVA files per
-        region (2 regions = 4) = 16."""
+        """Parallel charts emit 18 files post wave-3-future-remaining
+        layered class hierarchy: 4 SV core + 5 wrappers + 1 stub
+        header + 2 wave-3-future helpers (parser pkg + state-symbol
+        table) + 2 SVA files per region (2 regions = 4) + 2 base
+        headers (checker_base.svh + driver_base.svh) = 18."""
         files = self._files()
-        assert len(files) == 16, (
-            f"Wave-3-future parallel emit expected 16 files; got "
-            f"{len(files)}: {sorted(files)}"
+        assert len(files) == 18, (
+            f"Wave-3-future-remaining parallel emit expected 18 files; "
+            f"got {len(files)}: {sorted(files)}"
         )
 
     def test_parallel_emit_per_region_sva_bind(self):
@@ -875,17 +911,22 @@ class TestWave3ParallelChartEmit:
     def test_parallel_checker_reads_each_region(self):
         """Checker class reads `vif.current_state_<region>` per
         region + parses per-region `expected_state_<region>` field
-        from the trace JSONL."""
-        checker = self._files()["tb/sv/p/sos_checker_p.sv"]
+        from the trace JSONL.
+
+        Wave-3-future-remaining (2026-05-24 §15) layered class
+        hierarchy: per-region parse + compare logic + failure-message
+        construction live in the BASE checker (``_base.svh``); the
+        default checker is just hook overrides."""
+        checker_base = self._files()["tb/sv/p/sos_p_checker_base.svh"]
         # Per-region observable reads.
-        assert "vif.current_state_left" in checker
-        assert "vif.current_state_right" in checker
+        assert "vif.current_state_left" in checker_base
+        assert "vif.current_state_right" in checker_base
         # Per-region field parse calls.
-        assert "expected_state_left" in checker
-        assert "expected_state_right" in checker
+        assert "expected_state_left" in checker_base
+        assert "expected_state_right" in checker_base
         # Per-region failure messages cite the region name.
-        assert "region `left`" in checker
-        assert "region `right`" in checker
+        assert "region `left`" in checker_base
+        assert "region `right`" in checker_base
 
     def test_parallel_top_instantiates_chart_top_wrapper(self):
         """Top-level testbench MUST instantiate the chart-top wrapper
@@ -907,11 +948,16 @@ class TestWave3ParallelChartEmit:
 
     def test_parallel_checker_renders_chart_vocabulary_failure(self):
         """INV-S-HDL-E-4: chart-vocabulary failure message names the
-        region + chart + expected/observed state."""
-        checker = self._files()["tb/sv/p/sos_checker_p.sv"]
-        assert "[FAIL] vector V%0d region" in checker
-        assert "chart `p`" in checker
-        assert "INV-S-HDL-E-4" in checker
+        region + chart + expected/observed state.
+
+        Wave-3-future-remaining (2026-05-24 §15) layered class
+        hierarchy: chart-vocab message construction lives in the
+        BASE checker (``_base.svh``); format strings are byte-
+        identical to the wave-3 monolithic emit."""
+        checker_base = self._files()["tb/sv/p/sos_p_checker_base.svh"]
+        assert "[FAIL] vector V%0d region" in checker_base
+        assert "chart `p`" in checker_base
+        assert "INV-S-HDL-E-4" in checker_base
 
     def test_parallel_emit_audit_clean(self):
         """All emitted parallel-chart files MUST pass the
@@ -930,15 +976,15 @@ class TestWave3ParallelChartEmit:
         assert "tb/sv/p/verilator_stubs.svh" in files
 
     def test_single_region_path_unchanged(self):
-        """Wave-3 keeps the single-region emit path intact — the
-        wave-2 file set + wave-3's added stubs header +
-        wave-3-future helpers (parser pkg + state-symbol table) = 14."""
+        """Wave-3 + wave-3-future + wave-3-future-remaining: the
+        single-region path emit count is 16 — 11 wave-2 files + 1
+        wave-3 stubs header + 2 wave-3-future helpers (parser pkg +
+        state-symbol table) + 2 wave-3-future-remaining layered
+        class hierarchy base headers (checker_base.svh + driver_base.svh)."""
         files = sv_tb.render_target(
             _simple_chart(), {"chart_name": "demo"}
         )
-        # Same 11 wave-2 files + 1 wave-3 stubs header +
-        # 2 wave-3-future helpers = 14.
-        assert len(files) == 14
+        assert len(files) == 16
         assert "tb/sv/demo/verilator_stubs.svh" in files
         # Single-region vif keeps the wave-1 shape.
         vif = files["tb/sv/demo/dut_if_demo.sv"]
@@ -1191,75 +1237,96 @@ class TestWave3FutureStateSymbolTable:
 
 class TestWave3FutureCheckerStringFieldPath:
     """Checker emit consumes string-valued expected_state via the
-    symbol table."""
+    symbol table.
+
+    Wave-3-future-remaining (2026-05-24 §15) layered class hierarchy:
+    the parse/resolve + chart-vocab message construction lives in the
+    BASE checker (``_base.svh``); the default checker only carries
+    hook overrides. These tests read from the base header."""
+
+    def _checker_base(self):
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        return files["tb/sv/demo/sos_demo_checker_base.svh"]
 
     def _checker(self):
         files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
         return files["tb/sv/demo/sos_checker_demo.sv"]
 
     def test_checker_includes_shared_parser_header(self):
-        src = self._checker()
+        # The shared parser header is `\`include`d from the BASE
+        # class header (the default `.sv` re-includes the base, which
+        # transitively gets the parser pkg).
+        src = self._checker_base()
         assert '`include "sos_jsonl_parser_pkg.svh"' in src
 
     def test_checker_includes_state_symbol_header(self):
-        src = self._checker()
+        src = self._checker_base()
         assert '`include "sos_demo_state_symbols.svh"' in src
 
     def test_checker_calls_shared_parse_int(self):
-        src = self._checker()
+        src = self._checker_base()
         assert "sos_jsonl_parse_int(" in src
 
     def test_checker_calls_shared_parse_string(self):
-        src = self._checker()
+        src = self._checker_base()
         assert "sos_jsonl_parse_string(" in src
 
     def test_checker_resolves_string_via_symbol_table(self):
-        src = self._checker()
+        src = self._checker_base()
         assert "sos_demo_state_id_of(expected_state_str)" in src
 
     def test_checker_drops_inline_parse_int(self):
         """Wave-3-future deduplicates: the inline parse_int_field that
         wave-1/2 emit is gone — sourced from the shared header."""
-        src = self._checker()
-        # The shared parser declaration belongs in the header file;
-        # the checker class should NOT declare its own `function int
-        # parse_int_field(...)`.
-        assert "function int parse_int_field(string line" not in src
+        # Check both base + default — neither carries an inline
+        # parse_int_field declaration.
+        assert "function int parse_int_field(string line" not in self._checker_base()
+        assert "function int parse_int_field(string line" not in self._checker()
 
     def test_checker_failure_message_uses_chart_state_string(self):
         """INV-S-HDL-E-4 + INV-SOS-H — when the trace named the state
         by string, the failure message names it back."""
-        src = self._checker()
-        # The wave-3-future failure-message branch quotes the string
-        # value via %s.
+        # Wave-3-future-remaining: format string lives in the base
+        # class's ``run()`` (byte-identical to wave-3 monolithic
+        # emit).
+        src = self._checker_base()
         assert "expected state=\\\"%s\\\"" in src
 
     def test_checker_failure_message_backwards_compatible_int_branch(self):
         """When the trace used the integer field only (wave-1/2 shape),
         the failure message is the legacy `expected_state=%0d` form."""
-        src = self._checker()
+        src = self._checker_base()
         assert "expected_state=%0d at cycle" in src
 
 
 class TestWave3FutureParallelCheckerStringFieldPath:
-    """Per-region string-field path for parallel charts."""
+    """Per-region string-field path for parallel charts.
+
+    Wave-3-future-remaining (2026-05-24 §15) layered class hierarchy:
+    the per-region parse/resolve + chart-vocab message construction
+    lives in the BASE checker (``_base.svh``); these tests read from
+    the base header."""
+
+    def _checker_base(self):
+        files = sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
+        return files["tb/sv/p/sos_p_checker_base.svh"]
 
     def _checker(self):
         files = sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
         return files["tb/sv/p/sos_checker_p.sv"]
 
     def test_parallel_checker_includes_shared_parser_header(self):
-        src = self._checker()
+        src = self._checker_base()
         assert '`include "sos_jsonl_parser_pkg.svh"' in src
 
     def test_parallel_checker_includes_state_symbol_header(self):
-        src = self._checker()
+        src = self._checker_base()
         assert '`include "sos_p_state_symbols.svh"' in src
 
     def test_parallel_checker_per_region_string_field(self):
         """Each region declares its own `expected_state_<region>_str`
         + resolves via the symbol table."""
-        src = self._checker()
+        src = self._checker_base()
         # Region `left`.
         assert "string expected_state_left_str" in src
         assert (
@@ -1276,37 +1343,47 @@ class TestWave3FutureParallelCheckerStringFieldPath:
         )
 
     def test_parallel_checker_per_region_symbol_lookup(self):
-        src = self._checker()
+        src = self._checker_base()
         assert "sos_p_state_id_of(expected_state_left_str)" in src
         assert "sos_p_state_id_of(expected_state_right_str)" in src
 
     def test_parallel_checker_drops_inline_parse_int(self):
         """Parallel checker no longer carries its own copy of the
         integer-field extractor."""
-        src = self._checker()
-        assert "function int parse_int_field(string line" not in src
+        # Neither base nor default carries an inline parse_int_field.
+        assert "function int parse_int_field(string line" not in self._checker_base()
+        assert "function int parse_int_field(string line" not in self._checker()
 
 
 class TestWave3FutureDriverUsesSharedParser:
     """Driver was already using `parse_int_field`; wave-3-future
-    swaps it for `sos_jsonl_parse_int` and removes the inline copy."""
+    swaps it for `sos_jsonl_parse_int` and removes the inline copy.
+
+    Wave-3-future-remaining (2026-05-24 §15) layered class hierarchy:
+    JSONL parse calls live in the BASE driver (``_base.svh``); these
+    tests read from the base header."""
+
+    def _driver_base(self):
+        files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        return files["tb/sv/demo/sos_demo_driver_base.svh"]
 
     def _driver(self):
         files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
         return files["tb/sv/demo/sos_driver_demo.sv"]
 
     def test_driver_includes_shared_parser_header(self):
-        src = self._driver()
+        src = self._driver_base()
         assert '`include "sos_jsonl_parser_pkg.svh"' in src
 
     def test_driver_calls_shared_parse_int(self):
-        src = self._driver()
+        src = self._driver_base()
         assert "sos_jsonl_parse_int(line, \"event\"" in src
         assert "sos_jsonl_parse_int(line, \"cycles\"" in src
 
     def test_driver_drops_inline_parse_int(self):
-        src = self._driver()
-        assert "function int parse_int_field(string line" not in src
+        # Neither base nor default carries an inline parse_int_field.
+        assert "function int parse_int_field(string line" not in self._driver_base()
+        assert "function int parse_int_field(string line" not in self._driver()
 
 
 class TestWave3FutureInvariantsPreserved:
@@ -1543,30 +1620,39 @@ class TestWave3FutureNestedJsonParser:
         """Deliverable 2: when the chart declares
         ``<param name="payload.value"/>`` on a transition's
         ``<raise>``, the checker class emits a call to
-        ``sos_jsonl_parse_nested_int``."""
+        ``sos_jsonl_parse_nested_int``.
+
+        Wave-3-future-remaining (2026-05-24 §15) layered class
+        hierarchy: nested-param parse calls live in the BASE
+        checker (``_base.svh``) alongside the rest of the run-
+        skeleton."""
         files = sv_tb.render_target(
             _chart_with_nested_param(),
             {"chart_name": "demo"},
         )
-        checker = files["tb/sv/demo/sos_checker_demo.sv"]
-        assert "sos_jsonl_parse_nested_int(" in checker
+        checker_base = files["tb/sv/demo/sos_demo_checker_base.svh"]
+        assert "sos_jsonl_parse_nested_int(" in checker_base
         # The call MUST pass the outer/inner pair as literal strings.
-        assert '"payload", "value"' in checker
+        assert '"payload", "value"' in checker_base
         # And declare a local variable for the parsed nested value so
         # subsequent emit extensions can read it.
-        assert "nested_payload_value" in checker
+        assert "nested_payload_value" in checker_base
 
     def test_checker_class_parallel_consumes_nested_param(self):
         """Deliverable 3: the parallel-region checker mirrors the same
         nested-param emit logic — a nested ``<param>`` on any region's
-        transition emits a parse call inside the per-step loop."""
+        transition emits a parse call inside the per-step loop.
+
+        Wave-3-future-remaining (2026-05-24 §15) layered class
+        hierarchy: the parse call lands in the parallel BASE checker
+        (``_base.svh``)."""
         files = sv_tb.render_target(
             _parallel_chart_with_nested_param(),
             {"chart_name": "p"},
         )
-        checker = files["tb/sv/p/sos_checker_p.sv"]
-        assert "sos_jsonl_parse_nested_int(" in checker
-        assert '"payload", "value"' in checker
+        checker_base = files["tb/sv/p/sos_p_checker_base.svh"]
+        assert "sos_jsonl_parse_nested_int(" in checker_base
+        assert '"payload", "value"' in checker_base
 
     def test_two_level_dotted_param_raises_actionable_error(self):
         """Deliverable 2 (error path): a ``<param name="a.b.c"/>`` with
@@ -1588,13 +1674,15 @@ class TestWave3FutureNestedJsonParser:
         ``sos_checker_<chart>.sv`` shape as the wave-3-future baseline
         — nothing else moves.
 
-        The parser pkg gains the two new functions but the wave-3-future
-        ``sos_jsonl_parse_int`` and ``sos_jsonl_parse_string`` blocks
-        are byte-identical to the wave-3-future emit. The checker SV
-        body has NO nested-param decls or parse calls."""
+        Wave-3-future-remaining (2026-05-24 §15) layered class
+        hierarchy: the checker BASE class (``_base.svh``) holds the
+        run-skeleton; both the base AND the default ``.sv`` MUST
+        carry no nested-param state for a chart with no nested
+        ``<param>``."""
         files = sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
         pkg = files["tb/sv/demo/sos_jsonl_parser_pkg.svh"]
         checker = files["tb/sv/demo/sos_checker_demo.sv"]
+        checker_base = files["tb/sv/demo/sos_demo_checker_base.svh"]
         # The two new functions MUST be present.
         assert "sos_jsonl_parse_nested_int" in pkg
         assert "sos_jsonl_parse_nested_string" in pkg
@@ -1602,12 +1690,14 @@ class TestWave3FutureNestedJsonParser:
         # unchanged.
         assert "function automatic int sos_jsonl_parse_int(" in pkg
         assert "function automatic int sos_jsonl_parse_string(" in pkg
-        # The checker carries NO nested-param state — no decl, no
-        # parse call, no failure message branch.
-        assert "sos_jsonl_parse_nested_int" not in checker
-        assert "sos_jsonl_parse_nested_string" not in checker
-        assert "nested_payload" not in checker
-        assert "Wave-3-future-remaining" not in checker
+        # Neither the base header NOR the default `.sv` carries any
+        # nested-param state — no decl, no parse call, no comment
+        # marker — for a chart with no nested params.
+        for src in (checker, checker_base):
+            assert "sos_jsonl_parse_nested_int" not in src
+            assert "sos_jsonl_parse_nested_string" not in src
+            assert "nested_payload" not in src
+            assert "Wave-3-future-remaining" not in src
 
     def test_render_target_does_not_regress_invariants(self):
         """The wave-3-future-remaining emit MUST keep INV-S-HDL-E-1..3
@@ -1676,3 +1766,189 @@ class TestWave3FutureNestedJsonParser:
                     f"verible-verilog-syntax rejected parser pkg:\n"
                     f"{result.stderr}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Wave-3-future remaining: layered class hierarchy.
+# Closes the PCDN-SOS-08-E-001 "layered class hierarchy" carry-forward
+# from §15 2026-05-24. Splits the wave-3 monolithic checker + driver
+# into ``_base.svh`` (run-skeleton + virtual hooks + chart-vocab
+# message construction) and ``_default.sv`` (extends-base + hook
+# overrides). Users override by extending the base; the walker keeps
+# emitting ``_default`` byte-identical to wave-3 chart-vocab.
+#
+# @spec docs/concepts/SOS-08-E-CONCEPTS.md §15 (2026-05-24 wave-3-future
+#       remaining — layered class hierarchy)
+# ---------------------------------------------------------------------------
+
+
+class TestWave3FutureLayeredClassHierarchy:
+    """Layered class hierarchy refactor: ``_checker_base.svh`` +
+    ``_driver_base.svh`` headers + extending ``_default`` ``.sv``
+    classes. Closes one wave-3-future carry-forward; multi-clock
+    testbench wiring + deeper-than-one-level nesting remain
+    deferred."""
+
+    def _files(self) -> dict:
+        return sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+
+    def _files_parallel(self) -> dict:
+        return sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
+
+    def test_emits_checker_base_svh(self):
+        """Deliverable: a ``sos_<chart>_checker_base.svh`` header is
+        emitted alongside the default ``.sv`` for every chart."""
+        files = self._files()
+        assert "tb/sv/demo/sos_demo_checker_base.svh" in files
+
+    def test_emits_driver_base_svh(self):
+        """Deliverable: a ``sos_<chart>_driver_base.svh`` header is
+        emitted alongside the default ``.sv`` for every chart."""
+        files = self._files()
+        assert "tb/sv/demo/sos_demo_driver_base.svh" in files
+
+    def test_checker_base_declares_virtual_hooks(self):
+        """The base header declares all four virtual hooks:
+        ``pre_step`` / ``on_state_transition`` / ``on_invariant_fail``
+        / ``post_step``."""
+        src = self._files()["tb/sv/demo/sos_demo_checker_base.svh"]
+        assert "virtual function bit pre_step(int step_idx)" in src
+        assert "virtual function void on_state_transition" in src
+        assert "virtual function void on_invariant_fail" in src
+        assert "virtual function void post_step(int step_idx)" in src
+
+    def test_driver_base_declares_virtual_hooks(self):
+        """The driver base header declares the per-step hooks:
+        ``drive_pre`` / ``drive_step`` / ``drive_post``."""
+        src = self._files()["tb/sv/demo/sos_demo_driver_base.svh"]
+        assert "virtual task drive_pre(int step_idx)" in src
+        assert "virtual task drive_step(int step_idx" in src
+        # Signature carries the per-step JSONL record type.
+        assert "sos_jsonl_record_t rec" in src
+        assert "virtual task drive_post(int step_idx)" in src
+
+    def test_default_checker_extends_base(self):
+        """The default ``sos_checker_<chart>.sv`` extends the base
+        class via the SV ``extends`` keyword."""
+        src = self._files()["tb/sv/demo/sos_checker_demo.sv"]
+        assert "class sos_checker_demo extends sos_demo_checker_base" in src
+
+    def test_default_driver_extends_base(self):
+        """The default ``sos_driver_<chart>.sv`` extends the base
+        class via the SV ``extends`` keyword."""
+        src = self._files()["tb/sv/demo/sos_driver_demo.sv"]
+        assert "class sos_driver_demo extends sos_demo_driver_base" in src
+
+    def test_run_skeleton_lives_in_base(self):
+        """The ``run()`` task body lives in the base header, NOT in
+        the default ``.sv``. The default class only carries hook
+        overrides (constructor + virtual function bodies)."""
+        files = self._files()
+        base = files["tb/sv/demo/sos_demo_checker_base.svh"]
+        default = files["tb/sv/demo/sos_checker_demo.sv"]
+        assert "task run();" in base
+        assert "task run();" not in default
+
+    def test_invariant_failure_message_constructed_in_base(self):
+        """The chart-vocabulary failure-message construction (the
+        ``$sformatf`` call with the ``[FAIL] vector V%0d:`` format)
+        lives in the base header. The default class delegates via
+        ``super.on_invariant_fail`` only."""
+        files = self._files()
+        base = files["tb/sv/demo/sos_demo_checker_base.svh"]
+        default = files["tb/sv/demo/sos_checker_demo.sv"]
+        assert "$sformatf(" in base
+        assert "[FAIL] vector" in base
+        # Default's on_invariant_fail just calls super; no $sformatf
+        # of its own.
+        assert "$sformatf(" not in default
+        assert "super.on_invariant_fail" in default
+
+    def test_emit_count_single_region_is_sixteen(self):
+        """Single-region emit count: 14 → 16 (adds ``_checker_base.svh``
+        + ``_driver_base.svh``)."""
+        files = self._files()
+        assert len(files) == 16, (
+            f"single-region emit expected 16 files; got {len(files)}: "
+            f"{sorted(files)}"
+        )
+
+    def test_emit_count_parallel_is_eighteen(self):
+        """Parallel emit count: 16 → 18 (adds ``_checker_base.svh``
+        + ``_driver_base.svh``)."""
+        files = self._files_parallel()
+        assert len(files) == 18, (
+            f"parallel emit expected 18 files; got {len(files)}: "
+            f"{sorted(files)}"
+        )
+
+    def test_chart_vocab_message_byte_identical_to_wave3_baseline(self):
+        """Regression guard: the ``$sformatf`` format strings (chart-
+        vocabulary failure messages) are byte-for-byte identical to
+        the wave-3 monolithic emit. The wave-3 → layered refactor
+        only relocates these strings into the base header; the
+        format-string content is unchanged."""
+        src = self._files()["tb/sv/demo/sos_demo_checker_base.svh"]
+        # Unknown-state-string failure (wave-3 byte-identical).
+        assert (
+            "[FAIL] vector V%0d: chart `demo` trace named "
+            "expected_state_str=\\\"%s\\\" which is not a known "
+            "chart-state of `demo`. INV-S-HDL-E-4 vocabulary "
+            "violation."
+            in src
+        )
+        # String-resolved comparison mismatch (wave-3 byte-identical).
+        assert (
+            "[FAIL] vector V%0d: chart `demo` expected state=\\\"%s\\\" "
+            "(one-hot=0b%0b) at cycle %0t; observed current_state=0b%0b."
+            in src
+        )
+        # Integer-only comparison mismatch (wave-3 byte-identical).
+        assert (
+            "[FAIL] vector V%0d: chart `demo` produced expected_state=%0d "
+            "at cycle %0t; observed current_state=%0b."
+            in src
+        )
+
+    def test_super_dispatch_in_default_calls_base_invariant_handler(self):
+        """The default ``on_invariant_fail`` MUST call
+        ``super.on_invariant_fail(invariant_id, message)`` so a user
+        subclassing the base + overriding the hook can still get the
+        wave-3-default chart-vocab failure emission via super-dispatch."""
+        default = self._files()["tb/sv/demo/sos_checker_demo.sv"]
+        assert (
+            "super.on_invariant_fail(invariant_id, message);"
+            in default
+        )
+
+    # ------------------------------------------------------------
+    # Parallel-region mirror — the same layered split applies on the
+    # parallel chart emit path.
+    # ------------------------------------------------------------
+
+    def test_emits_parallel_checker_base_svh(self):
+        files = self._files_parallel()
+        assert "tb/sv/p/sos_p_checker_base.svh" in files
+
+    def test_emits_parallel_driver_base_svh(self):
+        files = self._files_parallel()
+        assert "tb/sv/p/sos_p_driver_base.svh" in files
+
+    def test_parallel_default_checker_extends_base(self):
+        src = self._files_parallel()["tb/sv/p/sos_checker_p.sv"]
+        assert "class sos_checker_p extends sos_p_checker_base" in src
+
+    def test_parallel_run_skeleton_lives_in_base(self):
+        files = self._files_parallel()
+        base = files["tb/sv/p/sos_p_checker_base.svh"]
+        default = files["tb/sv/p/sos_checker_p.sv"]
+        assert "task run();" in base
+        assert "task run();" not in default
+
+    def test_render_target_layered_emit_clean(self):
+        """End-to-end: the layered emit MUST pass the INV-S-HDL-E-1/
+        -2/-3 audit on both single-region and parallel chart shapes."""
+        # render_target's _audit_all runs over every emitted file; no
+        # exception means the audit passed.
+        sv_tb.render_target(_simple_chart(), {"chart_name": "demo"})
+        sv_tb.render_target(_parallel_chart(), {"chart_name": "p"})
