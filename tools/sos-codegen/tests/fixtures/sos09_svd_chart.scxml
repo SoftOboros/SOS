@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-09-B SVD emitter fixture: six channels covering all four kinds
+  (status / command / queue / shared), with bit_layout on two of them
+  (status + command) and sos:irq on a status channel.
+
+  The UUIDs are RFC 4122 v4 strings generated once and baked in as
+  literals to keep the fixture deterministic across runs.
+
+  Per SOS-09-A §5.1, allowed parent contexts are <state> and <parallel>
+  (the spec also names <region>, but <region> is iState-only — scjson
+  drops it). This fixture exercises both.
+
+  Chart-root <scxml> carries sos:mpu_background="kernel_default" — the
+  default — explicitly, for round-trip coverage.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="STATUS_CH"
+       other_attributes='{"sos:mpu_background": "kernel_default"}'>
+
+  <!--
+    Channel 1: status / hw→sw / sos:irq + bit_layout including a
+    clear-on-read field (drives readAction=clear emission on the
+    register).
+  -->
+  <state id="STATUS_CH"
+         other_attributes='{
+           "sos:id": "11111111-1111-4111-8111-111111111111",
+           "sos:name": "rx_status",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:zone": "privileged",
+           "sos:width": 32,
+           "sos:irq": "rx_irq",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "ready", "start_bit": 0, "width": 1, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0},
+               {"name": "count", "start_bit": 1, "width": 7, "access": "RO", "side_effect": null, "reset_value": 0},
+               {"name": "reserved_hi", "start_bit": 8, "width": 24, "access": "reserved", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="go" target="COMMAND_CH"/>
+  </state>
+
+  <!--
+    Channel 2: command / sw→hw / bit_layout with WO field + non-zero
+    reset_value (exercises resetValue OR-reduction).
+  -->
+  <state id="COMMAND_CH"
+         other_attributes='{
+           "sos:id": "22222222-2222-4222-8222-222222222222",
+           "sos:name": "tx_command",
+           "sos:kind": "command",
+           "sos:dir": "sw→hw",
+           "sos:width": 32,
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "start", "start_bit": 0, "width": 1, "access": "WO", "side_effect": "side-effect-on-write", "reset_value": 0},
+               {"name": "mode", "start_bit": 4, "width": 4, "access": "RW", "side_effect": null, "reset_value": 3},
+               {"name": "payload", "start_bit": 16, "width": 16, "access": "RW", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="done" target="QUEUE_REGION"/>
+  </state>
+
+  <!--
+    Channel 3: queue / bidirectional / no bit_layout / width=16 (drives
+    address-offset rounding-up-to-4-byte alignment).
+  -->
+  <parallel id="QUEUE_REGION"
+            other_attributes='{
+              "sos:id": "33333333-3333-4333-8333-333333333333",
+              "sos:name": "io_queue",
+              "sos:kind": "queue",
+              "sos:dir": "bidirectional",
+              "sos:width": 16
+            }'>
+    <!--
+      Channel 4: shared / bidirectional / no bit_layout / explicit mutex.
+    -->
+    <state id="SHARED_LEAF"
+           other_attributes='{
+             "sos:id": "44444444-4444-4444-8444-444444444444",
+             "sos:name": "shared_block",
+             "sos:kind": "shared",
+             "sos:dir": "bidirectional",
+             "sos:mutex": "shared_lock"
+           }'/>
+
+    <!--
+      Channel 5: status / hw→sw / sos:irq / no bit_layout. Drives
+      sequential-IRQ-value assignment (this is the second irq-bearing
+      channel in walk order, so its <interrupt><value> = 1).
+    -->
+    <state id="SECOND_STATUS_CH"
+           other_attributes='{
+             "sos:id": "55555555-5555-4555-8555-555555555555",
+             "sos:name": "fault_status",
+             "sos:kind": "status",
+             "sos:dir": "hw→sw",
+             "sos:irq": "fault_irq"
+           }'/>
+
+    <!--
+      Channel 6: queue / sw→hw / no bit_layout / queue-with-dir variant.
+    -->
+    <state id="QUEUE_LEAF"
+           other_attributes='{
+             "sos:id": "66666666-6666-4666-8666-666666666666",
+             "sos:name": "audit_log",
+             "sos:kind": "queue",
+             "sos:dir": "sw→hw"
+           }'/>
+  </parallel>
+
+</scxml>
