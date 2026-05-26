@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-10A in-process emitter fixture: minimal 3-piece orchestrator
+  exercising the two in-process boundaries the emitter cares about:
+
+    - rust ↔ rust (zero-copy direct dispatch)
+    - rust ↔ c    (FFI bridge with #[repr(C)] payload)
+
+  A trailing rust → rust transition uses `kind="shared-memory"` to
+  prove the emitter SKIPS non-in-process transitions per its scope
+  (other media have their own emitters; SOS-10 §6.1 only).
+
+  The chart's `sos:id` UUID drives deterministic event-id derivation
+  (INV-SOS-G mirror). Per SOS-10-CONCEPTS §5.1 the orchestrator's
+  piece-internal datamodel is per-piece-private; this fixture has none
+  on purpose.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="alpha"
+       other_attributes='{"sos:id": "ee000000-0000-4000-8000-000000000010"}'>
+
+  <state id="alpha"
+         other_attributes='{"sos:lang": "rust"}'>
+    <transition event="evt.alpha_to_beta" target="beta">
+      <sos:medium kind="in-process"/>
+    </transition>
+    <transition event="evt.alpha_to_gamma" target="gamma">
+      <sos:medium kind="in-process"/>
+    </transition>
+  </state>
+
+  <state id="beta"
+         other_attributes='{"sos:lang": "rust"}'>
+    <transition event="evt.beta_to_gamma" target="gamma">
+      <sos:medium kind="shared-memory"/>
+    </transition>
+  </state>
+
+  <state id="gamma"
+         other_attributes='{"sos:lang": "c"}'>
+    <transition event="evt.gamma_to_alpha" target="alpha">
+      <sos:medium kind="in-process"/>
+    </transition>
+  </state>
+
+</scxml>
