@@ -91,7 +91,7 @@ Frozen-enumeration registration policy: **Standards Action** (extending the pare
 
 ### 5.2 Permitted `sos:`-prefixed key set
 
-A SOS-09 channel annotation is the set of `sos:`-prefixed keys inside the `other_attributes` JSON map on a single permitted parent context. The **ten** permitted keys are (per PCDN-SOS-09-A-003 ratification 2026-05-25 — `sos:id` shape changed from SV-identifier to UUID, and `sos:name` added as a new required key):
+A SOS-09 channel annotation is the set of `sos:`-prefixed keys inside the `other_attributes` JSON map on a single permitted parent context. The **twelve** permitted keys are (per PCDN-SOS-09-A-003 ratification 2026-05-25 — `sos:id` shape changed from SV-identifier to UUID, and `sos:name` added as a new required key; and per the **PCDN-SOS-09-007 follow-on amendment 2026-05-26** — `sos:channel_group` and `sos:privilege_region` added as optional axes per the umbrella's "channel-group as two axes" resolution; see §15 entry dated 2026-05-26):
 
 | Key | Required? | Type | Allowed values |
 |---|---|---|---|
@@ -105,14 +105,16 @@ A SOS-09 channel annotation is the set of `sos:`-prefixed keys inside the `other
 | `sos:bit_layout` | optional | inline JSON block | per PCDN-SOS-09-A-001 ratification 2026-05-25: an inline `other_attributes` JSON map declaring the layout. Block schema is the tuple `(field-name / start-bit / width / access / side-effect / reset-value)` per field |
 | `sos:irq` | optional | string | logical IRQ name (mapped per-target by SOS-09-B emitter per SOS-09 PCDN-004); only valid when `sos:kind="status"` AND `sos:dir="hw→sw"` |
 | `sos:mutex` | optional | string | mutex name (instantiated as a `sos_mutex` per SOS-08-A §6.5; SOS-09 §5.3); only valid when `sos:kind="shared"` |
+| `sos:channel_group` | optional | SV identifier (string) | `[a-zA-Z_][a-zA-Z0-9_]*`; names the Rust borrow scope / shared `RegisterBlock` boundary the channel belongs to (SOS-09-D consumer). Default-from-inheritance: when absent, the channel inherits from the enclosing parallel/compound state's `sos:channel_group` declaration, or `"default"` if no ancestor declares. Inheritance is consumer-side (SOS-09-D) — the parser surfaces raw `Optional[str]`. Origin: PCDN-SOS-09-007 ratification 2026-05-26 ("channel-group as two axes"). |
+| `sos:privilege_region` | optional | SV identifier (string) | `[a-zA-Z_][a-zA-Z0-9_]*`; names the HDL MPU privilege region / access-violation aggregation domain the channel belongs to (SOS-09-E consumer). Default-from-inheritance: when absent, the channel inherits from the enclosing parallel/compound state's `sos:privilege_region` declaration, or `"default"` if no ancestor declares. Inheritance is consumer-side (SOS-09-E) — the parser surfaces raw `Optional[str]`. Origin: PCDN-SOS-09-007 ratification 2026-05-26 ("channel-group as two axes"). |
 
 **Identity vs name split (per PCDN-SOS-09-A-003 ratification 2026-05-25).** `sos:id` is the cross-doc source-of-uniqueness-truth: a UUID per RFC 4122 in canonical hyphenated form. The UUID is identity-only; downstream emitters MUST NOT use it as an emitted symbol name. `sos:name` is the human-readable / emission-facing handle: SV-identifier-shaped, unique within the composed scope path (NOT chart-wide — two charts MAY independently declare `sos:name="rx_path"`; the composed path differentiates them as e.g. `<outer>.<inner>.rx_path` in the final emit). The composed-name hierarchy provides emission uniqueness; the UUID owns identity.
 
 The `sos:kind` enum values (`status`, `command`, `queue`, `shared`) are **mirrored** from SOS-09 §5.1 without modification; this sub-phase does NOT introduce additional kind values. Per SOS-09 §5.1 frozen-enumeration registration policy (Standards Action), extending the kind set requires a §16 amendment to `SOS-09-CONCEPTS.md`, not to this doc.
 
-The ten-key set above is frozen at v1 (per ratifications of PCDN-SOS-09-A-001 / -003). Adding an eleventh permitted SOS-semantic key requires a §16 amendment to this doc (Standards Action — see below).
+The twelve-key set above is frozen at v1 (per ratifications of PCDN-SOS-09-A-001 / -003 and the PCDN-SOS-09-007 follow-on amendment 2026-05-26). Adding a thirteenth permitted SOS-semantic key requires a §16 amendment to this doc (Standards Action — see below).
 
-Frozen-enumeration registration policy: **Standards Action** for the ten-key set (extending the set changes the chart-author surface and the downstream emitter contract).
+Frozen-enumeration registration policy: **Standards Action** for the twelve-key set (extending the set changes the chart-author surface and the downstream emitter contract).
 
 ### 5.3 Parsing rule
 
@@ -192,7 +194,7 @@ Per INV-SOS-E, the row addition policy is the same as SOS-07 §7: **Specificatio
 This sub-phase freezes the following enumerations (each declared in §5 with its registration policy):
 
 - §5.1 Allowed annotation parent contexts — `{ <region>, <state>, <parallel> }` — **Standards Action**.
-- §5.2 Permitted `sos:`-prefixed key set — `{ sos:id, sos:name, sos:kind, sos:dir, sos:zone, sos:atomicity, sos:width, sos:bit_layout, sos:irq, sos:mutex }` (ten keys, post-PCDN-SOS-09-A-003 ratification 2026-05-25) — **Standards Action**.
+- §5.2 Permitted `sos:`-prefixed key set — `{ sos:id, sos:name, sos:kind, sos:dir, sos:zone, sos:atomicity, sos:width, sos:bit_layout, sos:irq, sos:mutex, sos:channel_group, sos:privilege_region }` (twelve keys, post-PCDN-SOS-09-007 follow-on amendment 2026-05-26; previously ten keys post-PCDN-SOS-09-A-003 ratification 2026-05-25) — **Standards Action**.
 - §5.2 Per-key allowed-value sets (`kind`, `dir`, `zone`, `atomicity`) — **mirror** from SOS-09 §5.1 / §5.2 / §5.3 / §5.4 (no local mutation rights).
 - §5.4 Validation-rule set (nine rules) — **Standards Action**.
 
@@ -342,3 +344,32 @@ All four PCDNs walked and resolved in a ratification session 2026-05-25:
 **New chart-level annotation keys introduced.** `sos:name` (required, SV-identifier, unique within composed scope path).
 
 Status: 🟢 **ratified**. SOS-09-A's chart-annotation surface is now stable; downstream sub-phases (SOS-09-B, SOS-09-C, SOS-09-D, SOS-09-E, SOS-09-F, SOS-09-G) MAY proceed against the frozen key-set and validation rules. The SOS-09 implementation work (chart-loader parse + validate; emitter inputs) is unblocked, subject to the PCDN-SOS-09-A-002 implementation prerequisite noted above.
+
+### 2026-05-26 — §5.2 ten-key → twelve-key expansion (PCDN-SOS-09-007 follow-on) (Ira)
+
+**Originating decision.** The SOS-09 umbrella ratified umbrella-level PCDN-SOS-09-007 as option (b) "channel-group as two axes" — the underlying need (Rust borrow scope boundaries) and the underlying need (HDL MPU access-violation aggregation domains) are two semantically distinct axes that the chart MUST be able to declare independently. The umbrella's `SOS-09-CONCEPTS.md` §15.7 (dated 2026-05-26) captures the ratification and names the two new keys; this entry operationalises that decision in SOS-09-A's chart-annotation surface.
+
+Per the parent `CLAUDE.md` "Spec-Before-Code Planning Discipline / Execution discipline" clause: "Touching a frozen enum value or an invariant requires a §15 amendment **first**, in a separate PR. No behaviour PR rides on an unamended invariant." This entry is that amendment-first PR; downstream SOS-09-D (Rust HAL emission) and SOS-09-E (HDL register-file RTL) implementation work dispatches against the amended twelve-key set.
+
+**Spec amendments landing with this entry.**
+
+- **§5.2 ten-key set → twelve-key set.** The permitted `sos:`-prefixed key set grows from ten to twelve with the addition of two new OPTIONAL channel-annotation keys:
+  - **`sos:channel_group`** — SV identifier (string); names the Rust borrow scope / shared `RegisterBlock` boundary the channel belongs to (SOS-09-D consumer). Default-from-inheritance: when absent, inherits from the enclosing parallel/compound state's `sos:channel_group` declaration, or `"default"` if no ancestor declares. Inheritance walk is a consumer-side concern (SOS-09-D); the parser surfaces raw `Optional[str]`.
+  - **`sos:privilege_region`** — SV identifier (string); names the HDL MPU privilege region / access-violation aggregation domain the channel belongs to (SOS-09-E consumer). Default-from-inheritance: when absent, inherits from the enclosing parallel/compound state's `sos:privilege_region` declaration, or `"default"` if no ancestor declares. Inheritance walk is a consumer-side concern (SOS-09-E); the parser surfaces raw `Optional[str]`.
+  - Both keys are **OPTIONAL** on a channel; both keys MUST validate as SV identifiers per §5.4(7) when present (the same identifier shape that already governs `sos:name` — both will round-trip into emitted Rust module / HDL signal names downstream).
+- **§5.4 validation rules.** Rule (7) implicitly extends to validate `sos:channel_group` and `sos:privilege_region` as SV identifiers when present. No new numbered rule is added; the existing SV-identifier validator already covers the new keys' value-shape requirement.
+- **§9 frozen enumerations recap.** Key-set listing updated to enumerate the twelve keys.
+- **Required-key count unchanged.** The four required keys remain `sos:id`, `sos:name`, `sos:kind`, `sos:dir`. The new keys are both OPTIONAL; absence triggers the inheritance walk (consumer-side).
+- **Inheritance walk explicitly NOT implemented by the parser.** The parser (`tools/sos-codegen/sos09_annotations.py`) surfaces both keys as `Optional[str]`. The consumer (SOS-09-D for Rust borrow scope, SOS-09-E for HDL MPU region) walks the SCXML ancestor chain to resolve `None` to the inherited value (or `"default"` fallback). This split keeps the parser stateless and the inheritance semantic in one place per consumer.
+
+**Implementing commits.**
+
+- This commit (`SOS09A-AMEND: extend §5.2 to twelve-key set (PCDN-SOS-09-007 follow-on)`) — amends `docs/concepts/SOS-09-A-CONCEPTS.md` §5.2 / §9 and lands the parser + test extensions in `tools/sos-codegen/sos09_annotations.py` and `tools/sos-codegen/tests/test_sos09_annotations.py`.
+
+**Cross-references.**
+
+- Umbrella ratification: `SOS-09-CONCEPTS.md` §15.7 (dated 2026-05-26) — the originating ratification of PCDN-SOS-09-007.
+- Spec-before-code discipline: parent `CLAUDE.md` "Execution discipline" — amendment-first PR pattern.
+- Downstream consumers: SOS-09-D (Rust borrow scope / shared `RegisterBlock`), SOS-09-E (HDL MPU privilege region / access-violation aggregation). Both consumers walk inheritance on the parser-surfaced `Optional[str]`; neither re-implements key parsing.
+
+Status: 🟢 **ratified**. The twelve-key set is now stable. SOS-09-D and SOS-09-E implementation work proceeds against the amended set.

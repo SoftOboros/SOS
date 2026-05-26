@@ -7,7 +7,10 @@ that the downstream SOS-09-B / -C / -D / -E / -F / -G emitters consume.
 
 This module IS the input contract every later SOS-09 sub-phase reads. It
 implements §5.3 (parsing rule) and §5.4 (validation rules 1-9) of
-`docs/concepts/SOS-09-A-CONCEPTS.md`, ratified 2026-05-25.
+`docs/concepts/SOS-09-A-CONCEPTS.md`, ratified 2026-05-25, with the
+PCDN-SOS-09-007 follow-on amendment 2026-05-26 that extends §5.2 from
+ten keys to twelve keys (added `sos:channel_group` and
+`sos:privilege_region`).
 
 Authority: `docs/concepts/SOS-09-A-CONCEPTS.md` (this sub-phase, normative);
 `docs/concepts/SOS-09-CONCEPTS.md` (umbrella; §5.1-§5.4 enums mirrored);
@@ -80,7 +83,8 @@ ALLOWED_BIT_FIELD_SIDE_EFFECTS: frozenset[str] = frozenset(
     {"clear-on-read", "side-effect-on-write"}
 )
 
-# §5.2: the ten permitted SOS-09-A keys (post-PCDN-A-003).
+# §5.2: the twelve permitted SOS-09-A keys (post-PCDN-SOS-09-007 follow-on
+# amendment 2026-05-26: added `sos:channel_group` and `sos:privilege_region`).
 PERMITTED_SOS_KEYS: frozenset[str] = frozenset(
     {
         "sos:id",
@@ -93,6 +97,8 @@ PERMITTED_SOS_KEYS: frozenset[str] = frozenset(
         "sos:bit_layout",
         "sos:irq",
         "sos:mutex",
+        "sos:channel_group",
+        "sos:privilege_region",
     }
 )
 
@@ -191,10 +197,16 @@ class BitLayout:
 class ChannelAnnotation:
     """A single SOS-09 channel declaration extracted from a chart parent.
 
-    Per SOS-09-A §5.2 ten-key set (ratified 2026-05-25). The four required
-    keys (`sos:id`, `sos:name`, `sos:kind`, `sos:dir`) populate the
-    first four fields; optional keys populate the rest with default
-    inference per §5.2 / umbrella §5.3.
+    Per SOS-09-A §5.2 twelve-key set (PCDN-SOS-09-007 follow-on amendment
+    2026-05-26 — added `sos:channel_group` and `sos:privilege_region`). The
+    four required keys (`sos:id`, `sos:name`, `sos:kind`, `sos:dir`)
+    populate the first four fields; optional keys populate the rest with
+    default inference per §5.2 / umbrella §5.3. The new `channel_group` /
+    `privilege_region` fields surface raw `Optional[str]`; the inheritance
+    walk (defaulting absence to the enclosing parallel/compound state's
+    declared value, or `"default"` if no ancestor declares) is a CONSUMER
+    concern — SOS-09-D (Rust HAL emission) and SOS-09-E (HDL register-file
+    RTL) implement it, not this parser.
     """
 
     id: str  # sos:id - RFC 4122 UUID (canonical hyphenated form)
@@ -208,6 +220,15 @@ class ChannelAnnotation:
     irq: Optional[str] = None
     mutex: Optional[str] = None
     mpu_attr: Optional[str] = None  # SOS-09-G §5.2 per-channel override
+    # PCDN-SOS-09-007 follow-on amendment 2026-05-26: channel-group as two
+    # axes. `channel_group` names the Rust borrow scope / shared
+    # `RegisterBlock` boundary; `privilege_region` names the HDL MPU
+    # privilege region / access-violation aggregation domain. Both
+    # OPTIONAL on a channel; absence surfaces as None here (consumer
+    # walks the SCXML ancestor chain for the inheritance default, or
+    # falls back to `"default"`).
+    channel_group: Optional[str] = None
+    privilege_region: Optional[str] = None
     # Best-effort dotted path to the SCXML parent (state id chain); useful
     # for error reporting and downstream "composed scope path" naming.
     element_path: str = ""
@@ -653,6 +674,27 @@ def _build_channel(
             width=width_val,
         )
 
+    # PCDN-SOS-09-007 follow-on amendment 2026-05-26: `sos:channel_group`
+    # and `sos:privilege_region`. Both OPTIONAL on a channel; absence
+    # surfaces as None (inheritance walk is a consumer-side concern).
+    # When present, both MUST be SV identifiers per §5.4(7) — they emit as
+    # Rust module / RTL signal names downstream.
+    channel_group: Optional[str] = None
+    if "sos:channel_group" in sos_attrs:
+        channel_group = _validate_sv_identifier(
+            sos_attrs["sos:channel_group"],
+            element_path=element_path,
+            key="sos:channel_group",
+        )
+
+    privilege_region: Optional[str] = None
+    if "sos:privilege_region" in sos_attrs:
+        privilege_region = _validate_sv_identifier(
+            sos_attrs["sos:privilege_region"],
+            element_path=element_path,
+            key="sos:privilege_region",
+        )
+
     return ChannelAnnotation(
         id=channel_id,
         name=channel_name,
@@ -665,6 +707,8 @@ def _build_channel(
         irq=irq,
         mutex=mutex,
         mpu_attr=mpu_attr,
+        channel_group=channel_group,
+        privilege_region=privilege_region,
         element_path=element_path,
         extras=extras,
     )

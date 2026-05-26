@@ -704,3 +704,84 @@ def test_error_carries_element_path_and_rule():
     assert exc.value.element_path == "STATE_X"
     assert exc.value.rule == "§5.4(3)"
     assert exc.value.key == "sos:kind"
+
+
+# ---------------------------------------------------------------------------
+# PCDN-SOS-09-007 follow-on amendment 2026-05-26: §5.2 ten-key -> twelve-key
+# (added sos:channel_group + sos:privilege_region; both optional, both
+# SV-identifier-shaped; the inheritance walk is a consumer concern, NOT
+# implemented in this parser — absence surfaces as None).
+# ---------------------------------------------------------------------------
+
+
+def test_channel_group_and_privilege_region_present_parse():
+    """Happy path: both new keys present with valid SV-identifiers parse."""
+    attrs = {
+        **_minimal_status(),
+        "sos:channel_group": "rx_group",
+        "sos:privilege_region": "kernel_region",
+    }
+    chart = _chart([_state("S1", attrs)])
+    anns = parse_chart_annotations(chart)
+    assert len(anns.channels) == 1
+    ch = anns.channels[0]
+    assert ch.channel_group == "rx_group"
+    assert ch.privilege_region == "kernel_region"
+
+
+def test_channel_group_and_privilege_region_absent_yields_none():
+    """Happy path: both keys absent -> both fields are None.
+
+    The inheritance walk (default-from-enclosing-parallel/compound-state
+    declaration; ultimate fallback `"default"`) is a consumer-side concern
+    per PCDN-SOS-09-007. The parser surfaces raw Optional[str].
+    """
+    chart = _chart([_state("S1", _minimal_status())])
+    anns = parse_chart_annotations(chart)
+    assert len(anns.channels) == 1
+    ch = anns.channels[0]
+    assert ch.channel_group is None
+    assert ch.privilege_region is None
+
+
+def test_channel_group_invalid_sv_identifier_raises():
+    """Error path: sos:channel_group with invalid SV-identifier shape -> §5.4(7)."""
+    attrs = {**_minimal_status(), "sos:channel_group": "rx-group"}  # hyphen illegal
+    chart = _chart([_state("S1", attrs)])
+    with pytest.raises(Sos09AnnotationError, match="§5.4\\(7\\)") as exc:
+        parse_chart_annotations(chart)
+    assert exc.value.key == "sos:channel_group"
+
+
+def test_privilege_region_invalid_sv_identifier_raises():
+    """Error path: sos:privilege_region with invalid SV-identifier shape -> §5.4(7)."""
+    attrs = {**_minimal_status(), "sos:privilege_region": "1bad"}  # leading digit
+    chart = _chart([_state("S1", attrs)])
+    with pytest.raises(Sos09AnnotationError, match="§5.4\\(7\\)") as exc:
+        parse_chart_annotations(chart)
+    assert exc.value.key == "sos:privilege_region"
+
+
+def test_channel_group_dot_in_identifier_raises():
+    """Error path: dot is not allowed in SV-identifier (sos:channel_group)."""
+    attrs = {**_minimal_status(), "sos:channel_group": "rx.group"}
+    chart = _chart([_state("S1", attrs)])
+    with pytest.raises(Sos09AnnotationError, match="§5.4\\(7\\)"):
+        parse_chart_annotations(chart)
+
+
+def test_privilege_region_whitespace_raises():
+    """Error path: whitespace in SV-identifier (sos:privilege_region)."""
+    attrs = {**_minimal_status(), "sos:privilege_region": "kernel region"}
+    chart = _chart([_state("S1", attrs)])
+    with pytest.raises(Sos09AnnotationError, match="§5.4\\(7\\)"):
+        parse_chart_annotations(chart)
+
+
+def test_only_channel_group_present_privilege_region_none():
+    """One key present, the other absent — both surface independently."""
+    attrs = {**_minimal_status(), "sos:channel_group": "rx_group"}
+    chart = _chart([_state("S1", attrs)])
+    ch = parse_chart_annotations(chart).channels[0]
+    assert ch.channel_group == "rx_group"
+    assert ch.privilege_region is None
