@@ -257,10 +257,10 @@ A conforming SOS-10 ratification satisfies:
 
 - (a) ✅ PCDN-SOS-10-001 through 008 resolved — see §15 2026-05-23 ratification entry.
 - (b) ⏸ The MCU + FPGA + gateway worked example (§9) instantiated as a buildable demonstration on the bench substrate (Lattice ECP5 + STM32H747I-DISCO; the gateway runs on a host Linux machine connected via LAN).
-- (c) ⏸ Each of the 4 media has at least one cross-piece event tested end-to-end via cocotb-equivalent harness.
+- (c) ⏸ Each of the 4 media has at least one cross-piece event tested end-to-end via cocotb-equivalent harness. (Wave-16 landed unit-test coverage on 3 of 4 emitters; cocotb-equivalent end-to-end harness still pending. `network` emitter not yet implemented — deferred to a follow-on wave.)
 - (d) ⏸ Cross-piece bounded-reachability vectors emitted; INV-SOS-H rendered failures in chart vocabulary verified manually on a deliberate broken-protocol case.
-- (e) ⏸ SOS-09 + SOS-12 cited correctly with no semantic duplication; SOS-10 strictly composes them.
-- (f) ⏸ INV-S-ORCH-1 through 6 cited correctly in the implementation phase that follows this ratification.
+- (e) ✅ SOS-09 + SOS-12 cited correctly with no semantic duplication; SOS-10 strictly composes them. (Wave-16: the `mmio` emitter generates SOS-09 channel annotations as inputs to the SOS-09 emitter family rather than re-emitting any SOS-09 artifact; the `in-process` and `shared-memory` emitters cite their primitive layers explicitly and emit `@spec` blocks naming the source-of-truth phases.)
+- (f) ✅ INV-S-ORCH-1 through 6 cited correctly in the implementation phase. (Wave-16: every emitted artifact carries an `@spec` comment block citing §6.x of this doc + the relevant INV-S-ORCH-N invariants + INV-SOS-A.)
 
 (j) and onward are implementation gates ratifying when implementation lands.
 
@@ -326,3 +326,26 @@ All eight PCDNs from §13 resolved with recommendations accepted.
 - INV-S-ORCH-4 wording extended: "wire format derived from protobuf (PCDN-002); chart never authors wire-format-specific fields".
 
 **Status**: 🟢 **ratified**. Implementation of the orchestrator emit path in `tools/sos-codegen/` is now unblocked. The §9 worked example becomes a buildable demonstration target. SOS-13 verified-strip story extends naturally across all 4 media because protobuf-derived wire format is dischargeable in the same way as in-process function-pointer dispatch.
+
+### 2026-05-26 — Wave-16 implementation (3 of 4 media + annotations parser)
+
+Implementation wave landed across four parallel agents + one sequential pre-step:
+
+- **SOS10-ANNOT** (`c929a6e`, cherry-picked as `650af0a`): `tools/sos-codegen/sos10_annotations.py` — orchestrator-chart annotation parser mirroring SOS-09 precedent. Parses `<sos:medium>` sub-elements (with nested `<sos:transport>`, `<sos:timeout>`, `<sos:idempotent>`), `sos:lang` attributes on `<state>`, and per-transition `sos:idempotent` overrides. Frozen-enum validation on medium kind (§5.2) and transport name (PCDN-002). +13 tests.
+- **SOS10A** (`46e5fb4` / `fcb68bb`): in-process medium emitter — Rust↔Rust direct function-pointer dispatch tables, C↔C `void(*)(const sos_event_t *)`, Rust↔C FFI bridges with `extern "C"` shims + `#[repr(C)]` payloads. Event-ID deterministic from `SHA-256(chart_sos_id|event_name)[:4]`. +13 tests.
+- **SOS10B** (`f5dbe6f` / `ef2eaa2`): shared-memory medium emitter — POSIX SHM with C11 atomic head/tail ring (`<stdatomic.h>`), Rust producer/consumer behind `posix_shm` Cargo feature, C producer/consumer with acquire/release atomics, RTOS-mapping informational `TODO(SOS-10-rtos)` block. Ring capacity defaults to 256, override via `ring_capacity` attribute on `<sos:medium>`. +24 tests.
+- **SOS10C** (`0bac861` / `3091f7f`): mmio medium emitter — synthesizes SOS-09 channel annotations as inputs to the SOS-09 emitter family. Four mapping modes (notification → command; request_response → command+status pair; streaming → queue; shared_surface → shared) chosen via `mmio_kind` extras hint. Pipe-back to `sos09_annotations.parse_chart_annotations` validates synthesized output round-trips cleanly. +11 tests.
+- **SOS10D** (`42baf12` / `87fbe3c`): scjson 0.4.0 smoke tests + emitter `@spec` roadmap annotations — 4 capability-gated import-and-call smoke tests confirming `help_text`, XInclude preserve, `<send>` attribute surface, `<invoke>` attribute surface are all accessible via the bundled scjson Python binding. `@spec` roadmap-annotation blocks added to six existing emitters citing SOS-09 §16 and SOS-ROADMAP-07-PLUS §12 (scjson 0.4.0 features remain roadmap-tracked, NOT current-scope). +4 tests.
+
+**§12 acceptance gate transitions**:
+- (e) ⏸ → ✅ — SOS-09 + SOS-12 cited; no semantic duplication. The `mmio` emitter is the load-bearing example: it generates SOS-09 channel-annotation JSON rather than re-emitting any SOS-09 artifact.
+- (f) ⏸ → ✅ — every emitted artifact carries an `@spec` comment block citing §6.x + INV-S-ORCH-N + INV-SOS-A.
+
+**Gates still ⏸ (deferred to follow-on waves)**:
+- (b) MCU + FPGA + gateway worked example as a buildable bench demonstration (Lattice ECP5 + STM32H747I-DISCO bench substrate + LAN-connected gateway).
+- (c) End-to-end cocotb-equivalent harness for all 4 media (unit tests landed; integration harness pending; `network` emitter not yet implemented).
+- (d) Cross-piece bounded-reachability vector emission + INV-SOS-H chart-vocabulary failure rendering on a deliberate broken-protocol case.
+
+**Network emitter deferred** to a follow-on wave. Substantial scope: protobuf .proto generation + gRPC service stubs (server + client) + AMQP message schemas + wire-format derivation per INV-S-ORCH-4 + timeout/idempotency annotation handling. Splitting it from this wave keeps in-process / shared-memory / mmio thin and tractable.
+
+Test suite delta (full SOS-codegen suite): 2181 → 2246 passing (+65), 2 skipped (Yosys + iverilog, environmental, unchanged).
