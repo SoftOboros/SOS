@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-09-C C HAL emitter fixture: six channels covering all four kinds
+  (status / command / queue / shared), one with a clear-on-read field
+  to exercise _consume emission, one with sos:channel_group set to a
+  non-default group, and one with sos:zone="unprivileged" to confirm
+  the MPU extern still emits for unprivileged regions (zone always
+  surfaces post-parse).
+
+  Mirrors the SOS-09-B SVD-fixture shape so the two emit paths can
+  cross-validate address-layout determinism (SOS-09-C composes B's
+  cumulative offset chain).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="STATUS_CH"
+       other_attributes='{"sos:mpu_background": "kernel_default"}'>
+
+  <!-- Channel 1: status / hw->sw / clear-on-read bit_layout -> _consume. -->
+  <state id="STATUS_CH"
+         other_attributes='{
+           "sos:id": "11111111-1111-4111-8111-111111111111",
+           "sos:name": "rx_status",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:zone": "privileged",
+           "sos:width": 32,
+           "sos:irq": "rx_irq",
+           "sos:channel_group": "rx",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "ready", "start_bit": 0, "width": 1, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0},
+               {"name": "count", "start_bit": 1, "width": 7, "access": "RO", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="go" target="COMMAND_CH"/>
+  </state>
+
+  <!-- Channel 2: command / sw->hw / bit_layout -> _fire + per-field setters. -->
+  <state id="COMMAND_CH"
+         other_attributes='{
+           "sos:id": "22222222-2222-4222-8222-222222222222",
+           "sos:name": "tx_command",
+           "sos:kind": "command",
+           "sos:dir": "sw→hw",
+           "sos:width": 32,
+           "sos:channel_group": "tx",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "start", "start_bit": 0, "width": 1, "access": "WO", "side_effect": "side-effect-on-write", "reset_value": 0},
+               {"name": "mode", "start_bit": 4, "width": 4, "access": "RW", "side_effect": null, "reset_value": 3}
+             ]
+           }
+         }'>
+    <transition event="done" target="QUEUE_REGION"/>
+  </state>
+
+  <!-- Channel 3: queue / bidirectional / no bit_layout / width=16. -->
+  <parallel id="QUEUE_REGION"
+            other_attributes='{
+              "sos:id": "33333333-3333-4333-8333-333333333333",
+              "sos:name": "io_queue",
+              "sos:kind": "queue",
+              "sos:dir": "bidirectional",
+              "sos:width": 16
+            }'>
+    <!-- Channel 4: shared / bidirectional / mutex. -->
+    <state id="SHARED_LEAF"
+           other_attributes='{
+             "sos:id": "44444444-4444-4444-8444-444444444444",
+             "sos:name": "shared_block",
+             "sos:kind": "shared",
+             "sos:dir": "bidirectional",
+             "sos:mutex": "shared_lock"
+           }'/>
+
+    <!-- Channel 5: status / hw->sw / unprivileged zone. -->
+    <state id="UNPRIV_STATUS_CH"
+           other_attributes='{
+             "sos:id": "55555555-5555-4555-8555-555555555555",
+             "sos:name": "fault_status",
+             "sos:kind": "status",
+             "sos:dir": "hw→sw",
+             "sos:zone": "unprivileged"
+           }'/>
+
+    <!-- Channel 6: queue / sw->hw / no bit_layout. -->
+    <state id="QUEUE_LEAF"
+           other_attributes='{
+             "sos:id": "66666666-6666-4666-8666-666666666666",
+             "sos:name": "audit_log",
+             "sos:kind": "queue",
+             "sos:dir": "sw→hw"
+           }'/>
+  </parallel>
+
+</scxml>
