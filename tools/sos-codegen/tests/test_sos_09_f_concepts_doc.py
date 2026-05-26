@@ -23,7 +23,7 @@
 This module verifies the SOS-09-F-CONCEPTS.md doc is structurally sound:
 
   - Required sections §0..§16 present.
-  - Status banner is 🟡 DRAFT 2026-05-26.
+  - Status banner is 🟢 RATIFIED 2026-05-26.
   - §5 names all six vector families.
   - §5 declares the `MembraneVector` four-method protocol.
   - §5 declares the `MV-<UUID>-<family>-<seq>` traceability key shape.
@@ -31,10 +31,11 @@ This module verifies the SOS-09-F-CONCEPTS.md doc is structurally sound:
   - §5 declares the failure-message vocabulary with the chart-trace UUID.
   - §5 declares the atomicity cocotb coroutine pair model.
   - §6 declares INV-S-MEM-F-1 through INV-S-MEM-F-6 (all six).
-  - §15 files five PCDNs PCDN-SOS-09-F-001..005 with 🟡 PENDING status.
+  - §15 files five PCDNs PCDN-SOS-09-F-001..005 with 🟢 RATIFIED status
+    and accepted-option letters per the 2026-05-26 walkthrough.
   - §8 cites cocotb (`derive`), SOS-03 (`adapt`), SOS-08-D (`compose`),
     SOS-09-A/B/E/G as upstream relationships.
-  - §16 awaits ratification (empty resolution log, dated draft entry).
+  - §16 carries the 2026-05-26 ratification entry naming all five PCDNs.
   - The doc cites RFC 4122 + UUID + sos:id + sos:name (traceability shape).
   - All six vector families enumerated textually.
   - cocotb textually present.
@@ -106,18 +107,18 @@ class TestDocExists:
             "as 'Membrane vectors'."
         )
 
-    def test_status_draft_banner(self, doc_text: str) -> None:
-        # The doc is a DRAFT awaiting PCDN walkthrough — must carry
-        # the 🟡 DRAFT status badge at top of file.
+    def test_status_ratified_banner(self, doc_text: str) -> None:
+        # The doc has completed PCDN walkthrough — must carry the
+        # 🟢 RATIFIED status badge at top of file.
         head = doc_text.split("## 0.", 1)[0]
-        assert "🟡" in head, (
-            "Doc top-of-file MUST carry a 🟡 status marker (draft)."
+        assert "🟢" in head, (
+            "Doc top-of-file MUST carry a 🟢 status marker (ratified)."
         )
-        assert "DRAFT" in head, (
-            "Doc top-of-file MUST carry a DRAFT status banner."
+        assert "RATIFIED" in head, (
+            "Doc top-of-file MUST carry a RATIFIED status banner."
         )
         assert "2026-05-26" in head, (
-            "Doc top-of-file MUST carry the 2026-05-26 draft date."
+            "Doc top-of-file MUST carry the 2026-05-26 ratification date."
         )
 
 
@@ -619,21 +620,51 @@ class TestSection15PCDNs:
             f"§15 MUST file {pcdn_id}."
         )
 
-    def test_pcdns_carry_pending_status(self, doc_text: str) -> None:
+    def test_pcdns_carry_ratified_status(self, doc_text: str) -> None:
         section15 = _section_slice(doc_text, 15)
-        pending_count = section15.count("🟡")
+        ratified_count = section15.count("🟢")
         pcdn_ids = set(re.findall(r"PCDN-SOS-09-F-\d{3}", section15))
-        assert pending_count >= len(pcdn_ids), (
-            f"Every PCDN MUST carry a 🟡 PENDING status marker; "
-            f"found {pending_count} 🟡 markers for {len(pcdn_ids)} PCDNs."
+        assert ratified_count >= len(pcdn_ids), (
+            f"Every PCDN MUST carry a 🟢 RATIFIED status marker; "
+            f"found {ratified_count} 🟢 markers for {len(pcdn_ids)} PCDNs."
         )
 
-    def test_pcdns_carry_pending_date(self, doc_text: str) -> None:
+    def test_pcdns_carry_ratified_date(self, doc_text: str) -> None:
         section15 = _section_slice(doc_text, 15)
-        # The pending walkthrough is marked with the 2026-05-26 date.
-        assert "PENDING USER WALKTHROUGH 2026-05-26" in section15, (
-            "§15 PCDNs MUST carry the `PENDING USER WALKTHROUGH "
-            "2026-05-26` status marker."
+        # The ratification line carries the 2026-05-26 date.
+        assert "RATIFIED 2026-05-26" in section15, (
+            "§15 PCDNs MUST carry the `RATIFIED 2026-05-26` status "
+            "marker post-walkthrough."
+        )
+
+    @pytest.mark.parametrize(
+        "pcdn_id,option_letter",
+        [
+            ("PCDN-SOS-09-F-001", "a"),  # chart-UUID-derived deterministic seed
+            ("PCDN-SOS-09-F-002", "a"),  # cocotb coroutine pair
+            ("PCDN-SOS-09-F-003", "a"),  # fatal error on un-rejected access
+            ("PCDN-SOS-09-F-004", "b"),  # explicit --regen-id flag
+            ("PCDN-SOS-09-F-005", "a"),  # cocotb's native pytest-XUnit output
+        ],
+    )
+    def test_pcdn_carries_accepted_option_letter(
+        self, doc_text: str, pcdn_id: str, option_letter: str
+    ) -> None:
+        # Each PCDN's resolution line carries the chosen-option letter
+        # per the 2026-05-26 walkthrough.
+        section15 = _section_slice(doc_text, 15)
+        pattern = re.compile(
+            rf"{re.escape(pcdn_id)}.*?(?=PCDN-SOS-09-F-\d{{3}}|## |\Z)",
+            re.DOTALL,
+        )
+        match = pattern.search(section15)
+        assert match is not None, (
+            f"{pcdn_id} block MUST be locatable in §15."
+        )
+        block = match.group(0)
+        assert f"option ({option_letter})" in block, (
+            f"{pcdn_id} MUST carry `option ({option_letter})` as its "
+            f"accepted-option letter in the 2026-05-26 ratification line."
         )
 
     def test_pcdns_carry_recommendation(self, doc_text: str) -> None:
@@ -653,44 +684,49 @@ class TestSection15PCDNs:
 
 
 class TestSection16Ratification:
-    """§16 awaits ratification (empty resolution log)."""
+    """§16 carries the 2026-05-26 ratification entry."""
 
     def test_section_16_present(self, doc_text: str) -> None:
         section16 = _section_slice(doc_text, 16)
         assert len(section16) > 50, (
-            "§16 MUST be present with at least the draft-entry text."
+            "§16 MUST be present with at least the ratification-entry text."
         )
 
-    def test_awaits_ratification_noted(self, doc_text: str) -> None:
+    def test_ratification_noted(self, doc_text: str) -> None:
         section16 = _section_slice(doc_text, 16)
         assert (
-            "awaiting" in section16.lower()
-            or "awaits ratification" in section16.lower()
+            "RATIFIED 2026-05-26" in section16
+            or "Ratified" in section16
         ), (
-            "§16 MUST note that the doc awaits ratification."
+            "§16 MUST note that the doc is RATIFIED 2026-05-26."
         )
 
     def test_initial_draft_entry_dated(self, doc_text: str) -> None:
         section16 = _section_slice(doc_text, 16)
         assert "2026-05-26" in section16, (
-            "§16 MUST carry a 2026-05-26 dated initial-draft entry."
+            "§16 MUST carry a 2026-05-26 dated entry."
         )
 
-    def test_no_ratified_table_yet(self, doc_text: str) -> None:
-        # Before PCDN walkthrough, no PCDN should be marked ratified
-        # (no 🟢 in section 16 ratification table — the head of file
-        # 🟡 marker is in the status banner, not section 16).
+    def test_ratification_cites_all_five_pcdns(self, doc_text: str) -> None:
+        # The 2026-05-26 ratification entry MUST name all five PCDNs.
         section16 = _section_slice(doc_text, 16)
-        # Look for explicit "ratified" status against a PCDN-F-* id;
-        # if the user has not walked through, no such pairing exists.
-        ratified_pcdn = re.search(
-            r"PCDN-SOS-09-F-\d{3}[^\n]*ratified",
-            section16,
-            re.IGNORECASE,
-        )
-        assert ratified_pcdn is None, (
-            "§16 MUST NOT mark any PCDN as ratified before user "
-            "walkthrough; found ratified PCDN-F-* in §16."
+        for n in range(1, 6):
+            pcdn_id = f"PCDN-SOS-09-F-{n:03d}"
+            assert pcdn_id in section16, (
+                f"§16 ratification entry MUST cite {pcdn_id}."
+            )
+
+    def test_ratification_names_structural_translation_regime(
+        self, doc_text: str
+    ) -> None:
+        # The 2026-05-26 ratification entry adopts the structural-
+        # translation regime (chart-driven membrane-vector emission).
+        section16 = _section_slice(doc_text, 16)
+        assert "structural-translation" in section16.lower() or (
+            "structural translation" in section16.lower()
+        ), (
+            "§16 ratification entry MUST name the structural-translation "
+            "regime as the adopted vector-emission discipline."
         )
 
 

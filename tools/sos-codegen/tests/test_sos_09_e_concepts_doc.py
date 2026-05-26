@@ -19,15 +19,16 @@
        Phase document shape" — §0..§16 section layout precedent.
 
 This module verifies that the SOS-09-E-CONCEPTS.md doc is structurally
-sound at the DRAFT stage (pre-PCDN-walkthrough):
+sound at the RATIFIED stage (post-PCDN-walkthrough 2026-05-26):
 
-  - Status banner is 🟡 DRAFT 2026-05-26.
+  - Status banner is 🟢 RATIFIED 2026-05-26.
   - Required sections (§0..§16) present.
   - §5 names 7 frozen decisions (§5.1..§5.7) with explicit registration
     policies.
   - §6 declares 6 INV-S-MEM-E-* invariants.
-  - §15 files 6 PCDNs PCDN-SOS-09-E-001..006 with 🟡 PENDING status.
-  - §16 awaits ratification.
+  - §15 files 6 PCDNs PCDN-SOS-09-E-001..006 with 🟢 RATIFIED status and
+    accepted-option letters per the 2026-05-26 walkthrough resolutions.
+  - §16 carries the 2026-05-26 ratification entry naming all six PCDNs.
   - §8 cites IEEE Std 1076-2008 (VHDL), IEEE Std 1800-2017 (SV),
     AMBA AXI4-Lite, AMBA APB as `derive` relationships.
   - §8 cites SOS-08-A primitives as `mirror`.
@@ -88,19 +89,20 @@ class TestDocPresence:
             "the HDL register-file RTL emission path."
         )
 
-    def test_draft_status_marker(self, concepts_text: str) -> None:
-        # Pre-PCDN-walkthrough, the top-of-file status MUST be 🟡 DRAFT.
+    def test_ratified_status_marker(self, concepts_text: str) -> None:
+        # Post-PCDN-walkthrough, the top-of-file status MUST be
+        # 🟢 RATIFIED 2026-05-26.
         first_block = concepts_text[:500]
-        assert "🟡" in first_block, (
-            "Top-of-file MUST carry a 🟡 DRAFT status marker at the "
-            "pre-PCDN-walkthrough stage."
+        assert "🟢" in first_block, (
+            "Top-of-file MUST carry a 🟢 RATIFIED status marker at the "
+            "post-PCDN-walkthrough stage."
         )
-        assert "DRAFT" in first_block, (
-            "Top-of-file MUST carry an explicit DRAFT marker."
+        assert "RATIFIED" in first_block, (
+            "Top-of-file MUST carry an explicit RATIFIED marker."
         )
         assert "2026-05-26" in first_block, (
-            "Top-of-file status banner MUST carry the draft date "
-            "2026-05-26."
+            "Top-of-file status banner MUST carry the ratification "
+            "date 2026-05-26."
         )
 
 
@@ -528,14 +530,45 @@ class TestSection15PCDNs:
             "PCDN-SOS-09-E-006 (write-side-effect timing) MUST be filed."
         )
 
-    def test_pcdns_carry_pending_status(self, section_15: str) -> None:
-        # Each PCDN carries a 🟡 PENDING marker per the DRAFT-stage shape.
-        pending_count = section_15.count("PENDING")
+    def test_pcdns_carry_ratified_status(self, section_15: str) -> None:
+        # Each PCDN carries a 🟢 RATIFIED marker per the post-walkthrough
+        # 2026-05-26 stage.
+        ratified_count = section_15.count("RATIFIED 2026-05-26")
         pcdn_ids = set(re.findall(r"PCDN-SOS-09-E-\d{3}", section_15))
-        assert pending_count >= len(pcdn_ids), (
-            f"Every PCDN SHOULD carry a 🟡 PENDING status marker at "
-            f"draft stage; found {pending_count} PENDING markers for "
-            f"{len(pcdn_ids)} PCDNs."
+        assert ratified_count >= len(pcdn_ids), (
+            f"Every PCDN MUST carry a 🟢 RATIFIED 2026-05-26 status "
+            f"marker post-walkthrough; found {ratified_count} RATIFIED "
+            f"markers for {len(pcdn_ids)} PCDNs."
+        )
+
+    @pytest.mark.parametrize(
+        "pcdn_id,option_letter",
+        [
+            ("PCDN-SOS-09-E-001", "a"),  # AXI4-Lite default
+            ("PCDN-SOS-09-E-002", "a"),  # read as 0
+            ("PCDN-SOS-09-E-003", "a"),  # one strobe-latch per channel-group
+            ("PCDN-SOS-09-E-004", "a"),  # chart-declared via <sos:clock_domains>
+            ("PCDN-SOS-09-E-005", "a"),  # single template parameterised over bus
+            ("PCDN-SOS-09-E-006", "b"),  # registered fire strobe
+        ],
+    )
+    def test_pcdn_carries_accepted_option_letter(
+        self, section_15: str, pcdn_id: str, option_letter: str
+    ) -> None:
+        # Each PCDN's resolution line carries the chosen-option letter
+        # per the 2026-05-26 walkthrough.
+        pattern = re.compile(
+            rf"{re.escape(pcdn_id)}.*?(?=PCDN-SOS-09-E-\d{{3}}|## |\Z)",
+            re.DOTALL,
+        )
+        match = pattern.search(section_15)
+        assert match is not None, (
+            f"{pcdn_id} block MUST be locatable in §15."
+        )
+        block = match.group(0)
+        assert f"option ({option_letter})" in block, (
+            f"{pcdn_id} MUST carry `option ({option_letter})` as its "
+            f"accepted-option letter in the 2026-05-26 ratification line."
         )
 
     def test_pcdns_carry_recommendation(self, section_15: str) -> None:
@@ -568,36 +601,45 @@ def section_16(concepts_text: str) -> str:
 
 
 class TestSection16ChangeLog:
-    """§16 carries the initial-draft entry and awaits ratification."""
+    """§16 carries the initial-draft entry and the 2026-05-26 ratification."""
 
     def test_change_log_has_initial_draft_entry(
         self, section_16: str
     ) -> None:
         assert "2026-05-26" in section_16, (
-            "§16 MUST carry a 2026-05-26 dated initial-draft entry."
+            "§16 MUST carry a 2026-05-26 dated entry."
         )
         assert "Initial draft" in section_16, (
             "§16 MUST carry an 'Initial draft' entry."
         )
 
-    def test_change_log_awaits_ratification(self, section_16: str) -> None:
-        # Pre-PCDN-walkthrough, the §16 entry MUST close with a
-        # 🟡 DRAFT status — there is no 🟢 ratified entry yet.
-        assert "🟡" in section_16, (
-            "§16 MUST carry the 🟡 draft status marker."
+    def test_change_log_carries_ratification(self, section_16: str) -> None:
+        # Post-PCDN-walkthrough, the §16 entry MUST carry a 🟢 RATIFIED
+        # 2026-05-26 marker.
+        assert "🟢" in section_16, (
+            "§16 MUST carry the 🟢 ratified status marker."
         )
-        assert "awaiting PCDN walkthrough" in section_16, (
-            "§16 MUST state that the doc awaits PCDN walkthrough."
+        assert "RATIFIED 2026-05-26" in section_16, (
+            "§16 MUST state that the doc is RATIFIED 2026-05-26."
         )
 
-    def test_change_log_no_premature_ratification(
+    def test_change_log_ratification_present(
         self, section_16: str
     ) -> None:
-        # Pre-PCDN-walkthrough, there is no 'Ratified' entry.
-        assert "Ratified" not in section_16, (
-            "§16 MUST NOT carry a 'Ratified' entry at the draft "
-            "stage; ratification happens after PCDN walkthrough."
+        # Post-PCDN-walkthrough, §16 MUST carry a 'Ratified' entry.
+        assert "Ratified" in section_16 or "RATIFIED" in section_16, (
+            "§16 MUST carry a 'Ratified' entry post-walkthrough."
         )
+
+    def test_change_log_cites_all_six_pcdns(
+        self, section_16: str
+    ) -> None:
+        # The 2026-05-26 ratification entry SHOULD name all six PCDNs.
+        for n in range(1, 7):
+            pcdn_id = f"PCDN-SOS-09-E-{n:03d}"
+            assert pcdn_id in section_16, (
+                f"§16 ratification entry MUST cite {pcdn_id}."
+            )
 
 
 # ---------------------------------------------------------------------------
