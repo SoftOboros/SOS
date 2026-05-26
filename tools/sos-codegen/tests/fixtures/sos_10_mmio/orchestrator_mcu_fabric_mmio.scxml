@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-10 mmio-medium emitter fixture: minimal 2-piece orchestrator chart.
+
+  - mcu (rust, software) sends an mmio cross-piece event `start_capture`
+    to fabric (vhdl, hardware). Direction is sw->hw.
+  - fabric also has a streaming-back mmio transition `audio.frame` whose
+    chart-annotation form would carry a `mmio_kind="streaming"` extras
+    hint if the SOS-10 parser surfaced it. This fixture intentionally
+    does NOT exercise the extras hint (the chart-side surface for the
+    hint is a future SOS-10 sub-phase); the test module covers the hint
+    path via dict-built chart_ast values directly.
+
+  Used by tools/sos-codegen/tests/test_mmio_emit.py.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="mcu">
+
+  <state id="mcu"
+         other_attributes='{"sos:lang": "rust"}'>
+    <transition event="start_capture" target="fabric">
+      <sos:medium kind="mmio"/>
+    </transition>
+  </state>
+
+  <state id="fabric"
+         other_attributes='{"sos:lang": "vhdl"}'>
+    <transition event="audio.frame" target="mcu">
+      <sos:medium kind="mmio"/>
+    </transition>
+  </state>
+
+</scxml>
