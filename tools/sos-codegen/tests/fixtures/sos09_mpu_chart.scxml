@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-09-G MPU emitter fixture.
+
+  Exercises the kind/zone matrix the MPU emitter spans (per
+  `docs/concepts/SOS-09-G-CONCEPTS.md` §5.2 narrowed-scope ratification
+  2026-05-25):
+
+    - A privileged STATUS channel        (device-nGnRnE, priv-rw-unpriv-none)
+    - An unprivileged COMMAND channel    (device-nGnRnE, priv-rw-unpriv-rw)
+    - A privileged SHARED channel        (normal-wb-wa,  priv-rw-unpriv-none)
+    - An unprivileged QUEUE channel      (device-nGnRnE, priv-rw-unpriv-rw)
+    - An override channel carrying       (device-nGnRnE explicit override on
+      `sos:mpu_attr="device_ngnrne"`      a status channel that would already
+                                          have defaulted to device-nGnRnE —
+                                          the override path is exercised
+                                          regardless of mapping value)
+
+  UUIDs are baked literal so the fixture is byte-deterministic.
+
+  Chart-root `sos:mpu_background="kernel_default"` is implicit (absent
+  key); test_transliterate_mpu.py exercises both the absent-default and
+  the explicit-strict cases via chart-dict construction.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="STATUS_STATE">
+
+  <!-- (1) privileged status channel -->
+  <state id="STATUS_STATE"
+         other_attributes='{
+           "sos:id": "6a000000-0000-4000-8000-000000000001",
+           "sos:name": "priv_status",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:zone": "privileged",
+           "sos:width": 32,
+           "sos:irq": "status_irq"
+         }'>
+    <transition event="go" target="COMMAND_STATE"/>
+  </state>
+
+  <!-- (2) unprivileged command channel -->
+  <state id="COMMAND_STATE"
+         other_attributes='{
+           "sos:id": "6a000000-0000-4000-8000-000000000002",
+           "sos:name": "unpriv_command",
+           "sos:kind": "command",
+           "sos:dir": "sw→hw",
+           "sos:zone": "unprivileged",
+           "sos:width": 16
+         }'>
+    <transition event="next" target="QUEUE_PAR"/>
+  </state>
+
+  <!-- (3) unprivileged queue channel + (4) privileged shared channel -->
+  <parallel id="QUEUE_PAR"
+            other_attributes='{
+              "sos:id": "6a000000-0000-4000-8000-000000000003",
+              "sos:name": "unpriv_queue",
+              "sos:kind": "queue",
+              "sos:dir": "bidirectional",
+              "sos:zone": "unprivileged",
+              "sos:width": 8
+            }'>
+    <state id="SHARED_STATE"
+           other_attributes='{
+             "sos:id": "6a000000-0000-4000-8000-000000000004",
+             "sos:name": "priv_shared",
+             "sos:kind": "shared",
+             "sos:dir": "bidirectional",
+             "sos:zone": "privileged",
+             "sos:width": 32,
+             "sos:mutex": "shared_lock"
+           }'/>
+
+    <!-- (5) override channel: command with explicit sos:mpu_attr override
+         to non_cacheable — exercises the override-flip path. -->
+    <state id="OVERRIDE_STATE"
+           other_attributes='{
+             "sos:id": "6a000000-0000-4000-8000-000000000005",
+             "sos:name": "override_command",
+             "sos:kind": "command",
+             "sos:dir": "sw→hw",
+             "sos:zone": "privileged",
+             "sos:width": 32,
+             "sos:mpu_attr": "non_cacheable"
+           }'/>
+  </parallel>
+
+</scxml>
