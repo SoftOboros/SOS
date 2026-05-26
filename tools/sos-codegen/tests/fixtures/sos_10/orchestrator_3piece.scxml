@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-10 orchestrator chart smoke fixture: minimal 3-piece skeletal mirror
+  of the §9 worked example (MCU + FPGA + gateway).
+
+  Each top-level <state> is one piece with a `sos:lang` attribute; each
+  cross-piece transition carries a <sos:medium> sub-element declaring the
+  medium. One transition per medium kind (mmio, shared-memory, network/
+  gRPC). The gateway state intentionally omits `sos:lang` to exercise the
+  PCDN-SOS-10-001/-003 default ("rust"). The "mcu -> fabric" transition
+  carries a per-transition `sos:idempotent="false"` attribute that
+  overrides the medium-level setting.
+
+  Per SOS-10-CONCEPTS §5.1, the orchestrator's piece-internal datamodel
+  is per-piece-private; this fixture has none on purpose (the parser does
+  not look at datamodel).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="mcu">
+
+  <state id="mcu"
+         other_attributes='{"sos:lang": "rust", "position_x": 10}'>
+    <transition event="audio.start" target="fabric"
+                other_attributes='{"sos:idempotent": "false"}'>
+      <sos:medium kind="mmio"/>
+    </transition>
+  </state>
+
+  <state id="fabric"
+         other_attributes='{"sos:lang": "vhdl"}'>
+    <transition event="audio.status" target="gateway">
+      <sos:medium kind="shared-memory">
+        <sos:timeout ms="2000"/>
+      </sos:medium>
+    </transition>
+  </state>
+
+  <state id="gateway">
+    <transition event="analytics.publish" target="mcu">
+      <sos:medium kind="network">
+        <sos:transport name="gRPC"/>
+        <sos:timeout ms="5000"/>
+        <sos:idempotent value="true"/>
+      </sos:medium>
+    </transition>
+  </state>
+
+</scxml>
