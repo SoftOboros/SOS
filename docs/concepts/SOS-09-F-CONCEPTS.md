@@ -374,15 +374,15 @@ This sub-phase does NOT:
 
 A conforming SOS-09-F ratification satisfies:
 
-- (a) ⏸ The SOS-09-F concepts doc is present at `docs/concepts/SOS-09-F-CONCEPTS.md` with the §0..§16 section shape per the parent CLAUDE.md "Phase document shape".
-- (b) ⏸ PCDN-SOS-09-F-001 through 005 resolved (§15).
-- (c) ⏸ The chart-to-vector emission walker is present at `tools/sos-codegen/vectors_emit.py` (forthcoming) and enumerates the chart's `sos:`-prefixed channel annotations via SOS-09-A's read surface.
-- (d) ⏸ Vector family coverage per kind: for each channel kind (`status`, `command`, `queue`, `shared`), the emitter produces at least one vector of every family applicable per the §5.1 table.
-- (e) ⏸ The emitted vector identifier matches the §5.3 traceability-key format `MV-<UUID>-<family>-<seq>` with the UUID being the chart-declared `sos:id` (RFC 4122 canonical hyphenated form per PCDN-SOS-09-A-003 ratification 2026-05-25).
-- (f) ⏸ Harness type-1 (cocotb with Python CPU stub) is implemented and emits the seven primitives of §5.4 (`bus.read`, `bus.write`, `wait_irq`, `concurrent_writer`, `install_mpu`, `set_zone`, `seed`).
-- (g) ⏸ The harness emits a JUnit XML report at `build/vectors/<chart_id>/junit.xml` (per INV-S-MEM-2, build output) consumable by the canonical pytest-XUnit shape per PCDN-SOS-09-F-005.
-- (h) ⏸ Failure-message vocabulary matches the §5.6 shape: every failure names channel `sos:name`, channel `kind`, channel `zone`, family, stimulus, expected, observed, and the `sos:id` UUID. Raw-address-only failures are an emitter error per INV-S-MEM-F-2.
-- (i) ⏸ Protection-vector access-violation observation: every protection vector that succeeds (channel rejected the unauthorised access) observes the SOS-09-E per-channel-group strobe-latch firing (INV-S-MEM-F-5; INV-S-MEM-E-5). Silent rejection is a test failure per PCDN-SOS-09-F-003.
+- (a) ✅ The SOS-09-F concepts doc is present at `docs/concepts/SOS-09-F-CONCEPTS.md` with the §0..§16 section shape per the parent CLAUDE.md "Phase document shape".
+- (b) ✅ PCDN-SOS-09-F-001 through 005 resolved (§15) — ratified 2026-05-26.
+- (c) ✅ The chart-to-vector emission walker is present at `tools/sos-codegen/vectors_emit.py` and enumerates the chart's `sos:`-prefixed channel annotations via SOS-09-A's read surface (`plan_chart` / `plan_channel`).
+- (d) ✅ Vector family coverage per kind: for each channel kind (`status`, `command`, `queue`, `shared`), the emitter produces at least one vector of every family applicable per the §5.1 table (mirrored in `vectors.base.FAMILIES_BY_KIND` + per-channel-attribute gating in `vectors_emit._applicable_families`).
+- (e) ✅ The emitted vector identifier matches the §5.3 traceability-key format `MV-<UUID>-<family>-<seq>` with the UUID being the chart-declared `sos:id` (RFC 4122 canonical hyphenated form per PCDN-SOS-09-A-003 ratification 2026-05-25). Asserted in `tests/test_vectors_emit.py::TestGateETraceKeyFormat`.
+- (f) ✅ Harness type-1 (cocotb with Python CPU stub) is implemented at `tools/sos-codegen/vectors/harness.py` and exposes the seven primitives of §5.4 (`bus.read`, `bus.write`, `wait_irq`, `concurrent_writer`, `install_mpu`, `set_zone`, `seed`).
+- (g) ✅ The harness emits a JUnit XML report at `build/vectors/<chart_id>/junit.xml` (per INV-S-MEM-2, build output) consumable by the canonical pytest-XUnit shape per PCDN-SOS-09-F-005. Emitted by `vectors_emit.run_vectors`.
+- (h) ✅ Failure-message vocabulary matches the §5.6 shape: every failure names channel `sos:name`, channel `kind`, channel `zone`, family, stimulus, expected, observed, and the `sos:id` UUID. Raw-address-only failures are an emitter error per INV-S-MEM-F-2 (`vectors.base.render_failure_message` refuses empty `channel_name`, non-UUID `channel_id`, and empty `stimulus`).
+- (i) ⏸ Protection-vector access-violation observation: every protection vector that succeeds (channel rejected the unauthorised access) observes the SOS-09-E per-channel-group strobe-latch firing (INV-S-MEM-F-5; INV-S-MEM-E-5). Silent rejection is a test failure per PCDN-SOS-09-F-003. **Wave-1 status:** the harness's in-process strobe-latch counter (`PythonCpuStubHarness.access_violation_count`) satisfies the invariant against the Python-stub path; the cocotb-path check moves to reading the per-channel-group HDL strobe-latch from `sos_regfile.{vhd,sv}.j2` once SOS-09-E is cherry-picked. The TODO marker in `vectors/harness.py` cites SOS-09-E delivery. Gate flips ✅ on SOS-09-E template cherry-pick.
 
 (a) is the doc-presence gate; (b) is the ratification gate; (c)–(i) are implementation gates that flip from ⏸ to ✅ as the implementation lands.
 
@@ -430,6 +430,33 @@ These open questions move this doc from 🟡 drafted to 🟢 ratified. PCDN-SOS-
 - **PCDN-SOS-09-F-005 — JUnit XML schema variant: Jenkins-XUnit vs Surefire vs cocotb's native pytest output.** 🟢 **RATIFIED 2026-05-26 — accepted option (a) cocotb's native pytest-XUnit output.** Options: (a) cocotb's native pytest output — cocotb already emits the canonical pytest-XUnit shape; CI consumers (Jenkins, GitLab CI, GitHub Actions test reporter) already parse it; (b) Jenkins-XUnit — slight variant with additional Jenkins-specific attributes; (c) Surefire — Maven/Java lineage; widest historical compatibility but oldest schema. **Recommendation**: option (a) cocotb's native pytest output at v1. Lowest implementation cost; cocotb emits it without an additional schema-translation layer; CI consumers already parse it. The Jenkins-XUnit and Surefire variants would require a translation layer that has no other purpose in the SOS-09-F path. Registration policy: **Specification Required** (the schema variant is a CI-boundary mechanic; flipping it later is cheap if a downstream consumer demands a specific variant).
 
 ## 16. Ratification log
+
+### 2026-05-26 — SOS09F1 implementation (Claude / Ira)
+
+Membrane-vector emitter implementation landed under commit subject
+`SOS09F1: implement membrane vectors emitter (gates c-i)`. Files added:
+
+- `tools/sos-codegen/vectors_emit.py` — chart-to-vector emission walker + CLI (`--regen-id` flag per PCDN-SOS-09-F-004; chart-UUID-derived deterministic seed per PCDN-SOS-09-F-001; pytest-XUnit JUnit XML per PCDN-SOS-09-F-005).
+- `tools/sos-codegen/vectors/__init__.py` — package exports.
+- `tools/sos-codegen/vectors/base.py` — `VectorFamily` (six-family Standards-Action enum), `FAMILIES_BY_KIND` (§5.1 table), `MembraneVector` (four-method protocol), `VectorStep`, `ChannelVectorPlan`, `trace_key` (§5.3), `derive_seed` (PCDN-SOS-09-F-001), `render_failure_message` (§5.6 vocabulary; refuses raw-address-only messages per INV-S-MEM-F-2).
+- `tools/sos-codegen/vectors/harness.py` — `PythonCpuStubHarness` exposing the seven §5.4 primitives (`bus.read`, `bus.write`, `wait_irq`, `concurrent_writer`, `install_mpu`, `set_zone`, `seed`); mutex serialisation surface for the atomicity family; per-channel-group access-violation strobe-latch surface (TODO marker references SOS-09-E delivery for the cocotb-path strobe-latch read).
+- `tools/sos-codegen/vectors/families/{initial_value,write_then_read,side_effect,clear_on_read,atomicity,protection}.py` — six `MembraneVector` subclasses; each exports `generate(plan, seq) -> list[VectorStep]` per §5.2 + `vector_class`.
+- `tools/sos-codegen/tests/test_vectors_emit.py` — 48 tests covering gates (c)–(i): emission walker (c), family-per-kind coverage (d), trace-key shape (e), seven primitives (f), JUnit XML emission (g), failure-vocabulary shape including deliberate-failure capture (h), protection-vector strobe-latch observation (i — gated on Python-stub path pending SOS-09-E HDL template).
+- `tools/sos-codegen/tests/fixtures/sos_09_f/sos09f_worked_example.scxml` — chart fixture covering all six families across the four channel kinds.
+
+§12 gate status post-implementation:
+
+- (a) ✅ — concepts doc present, §0..§16 shape.
+- (b) ✅ — five PCDNs ratified 2026-05-26.
+- (c) ✅ — `vectors_emit.plan_chart` walks SOS-09-A annotations.
+- (d) ✅ — `FAMILIES_BY_KIND` + per-attribute gating produces every applicable family per the §5.1 table.
+- (e) ✅ — `trace_key` formatter + emitted JUnit testcase names match the `MV-<UUID>-<family>-<seq>` regex.
+- (f) ✅ — `PythonCpuStubHarness` exposes the seven §5.4 primitives.
+- (g) ✅ — `run_vectors` emits `build/vectors/<chart_id>/junit.xml` per pytest-XUnit shape.
+- (h) ✅ — `render_failure_message` refuses raw-address-only messages and emits the §5.6 chart-vocabulary shape; deliberate-failure capture in tests confirms the regex match.
+- (i) ⏸ — protection vector observes the access-violation event AND the strobe-latch delta via the Python-stub path; the cocotb-path bridge to `sos_regfile.{vhd,sv}.j2` strobe-latch register is pending SOS-09-E HDL template cherry-pick (TODO marker at `vectors/harness.py:access_violation_count`).
+
+INV-S-MEM-F-1 through F-6 all satisfied against the Python-stub path; F-5's HDL-path binding is the remaining work item for the cocotb cherry-pick.
 
 ### 2026-05-26 — Ratified (Ira + Claude walkthrough)
 

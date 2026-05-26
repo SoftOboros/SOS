@@ -928,12 +928,19 @@ class TestSection12AcceptanceChecklist:
         )
 
     def test_pending_status_on_gates(self, doc_text: str) -> None:
-        # All gates carry ⏸ pending status pre-ratification.
+        # Pre-implementation: every gate is ⏸. Post-implementation:
+        # gates flip ✅ as the implementation lands; the doc MUST carry
+        # at least one ⏸ OR at least one ✅ to be a meaningful gate
+        # table (a doc with neither marker has lost its semantics).
+        # SOS-09-F implementation landed 2026-05-26 (SOS09F1
+        # vectors_emit.py); (a)..(h) flip ✅, (i) stays ⏸ pending
+        # SOS-09-E HDL template cherry-pick.
         section12 = _section_slice(doc_text, 12)
-        pending_count = section12.count("⏸")
-        assert pending_count >= 8, (
-            f"§12 MUST declare at least 8 gates with ⏸ pending status; "
-            f"found {pending_count}."
+        pending = section12.count("⏸")
+        flipped = section12.count("✅")
+        assert pending + flipped >= 8, (
+            f"§12 MUST carry status markers on ≥8 gates "
+            f"(⏸ pending or ✅ flipped); found {pending} ⏸ + {flipped} ✅."
         )
 
 

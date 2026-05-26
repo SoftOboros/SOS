@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-09-F worked-example fixture: one channel of each kind exercising
+  every applicable vector family per §5.1. The chart drives test_vectors_emit
+  through the full family-per-kind coverage matrix:
+
+    - rx_status: status channel + clear-on-read bit_layout
+      → initial_value, clear_on_read, protection, atomicity (mutex-required)
+    - tx_command: command channel + side-effect-on-write + IRQ
+      → initial_value, write_then_read, side_effect, protection, atomicity
+    - io_queue: queue channel
+      → initial_value, write_then_read, side_effect, protection, atomicity
+    - shared_block: shared channel + explicit mutex
+      → initial_value, write_then_read, side_effect, atomicity, protection
+
+  Per SOS-09-A §5.1, allowed parent contexts are <state> and <parallel>.
+
+  Per PCDN-SOS-09-001 amended 2026-05-25: sos: keys are JSON-key strings
+  inside other_attributes JSON, not XML namespace declarations.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="STATUS_CH"
+       other_attributes='{"sos:mpu_background": "strict"}'>
+
+  <!-- status channel with clear-on-read + IRQ + privileged zone. -->
+  <state id="STATUS_CH"
+         other_attributes='{
+           "sos:id": "11111111-1111-4111-8111-111111111111",
+           "sos:name": "rx_status",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:zone": "privileged",
+           "sos:atomicity": "mutex-required",
+           "sos:width": 32,
+           "sos:irq": "rx_irq",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "ready", "start_bit": 0, "width": 1, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0},
+               {"name": "count", "start_bit": 1, "width": 7, "access": "RO", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="go" target="COMMAND_CH"/>
+  </state>
+
+  <!-- command channel: side-effect-on-write + IRQ -->
+  <state id="COMMAND_CH"
+         other_attributes='{
+           "sos:id": "22222222-2222-4222-8222-222222222222",
+           "sos:name": "tx_command",
+           "sos:kind": "command",
+           "sos:dir": "sw→hw",
+           "sos:zone": "privileged",
+           "sos:width": 32,
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "start", "start_bit": 0, "width": 1, "access": "WO", "side_effect": "side-effect-on-write", "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="done" target="QUEUE_REGION"/>
+  </state>
+
+  <!-- queue channel + shared channel in parallel region -->
+  <parallel id="QUEUE_REGION"
+            other_attributes='{
+              "sos:id": "33333333-3333-4333-8333-333333333333",
+              "sos:name": "io_queue",
+              "sos:kind": "queue",
+              "sos:dir": "bidirectional",
+              "sos:zone": "privileged",
+              "sos:width": 32
+            }'>
+    <state id="SHARED_LEAF"
+           other_attributes='{
+             "sos:id": "44444444-4444-4444-8444-444444444444",
+             "sos:name": "shared_block",
+             "sos:kind": "shared",
+             "sos:dir": "bidirectional",
+             "sos:zone": "privileged",
+             "sos:mutex": "shared_lock",
+             "sos:width": 32
+           }'/>
+  </parallel>
+
+</scxml>
