@@ -310,7 +310,81 @@ For the avoidance of doubt, this document **does not**:
 
 The roadmap exists to surface the planning conversation in writable form, so that future phase ratifications have a place to point back to when explaining their motivation. It is **a starting frame**, not a commitment.
 
-## 12. Change log
+## 12. scjson 0.4.0 feature integration (roadmap)
+
+**Status: 🟡 informative — roadmap entries only. None of the per-feature uptake described below is currently in scope for any ratified SOS phase.**
+
+**Umbrella context.** The vendored `scjson` family (parent-repo submodule `ops/packer/submodules/scjson/`, submodule HEAD `74e83da` as of 2026-05-26; Python + JavaScript bindings both at 0.4.0) has landed six features across the 0.3.x → 0.4.0 cycle that materially expand the chart-author preservation surface and the document-composition surface scjson can carry round-trip. This section enumerates them as roadmap candidates for future SOS phase ratifications. Per the umbrella discipline, every per-feature uptake lands as its own normative §15 / §16 amendment in the affected phase doc with its own ratification cycle.
+
+**Common framing across all six.** Each feature lives on the scjson side of the chart-author → AST → backend pipeline. SOS-side uptake of any feature requires:
+
+- **Template work** in `tools/sos-codegen/` to thread the new field / behaviour through every backend's emit path.
+- **Codegen walker work** to populate the field correctly when traversing `ChartAst` (including the hierarchical / multi-file cases for XInclude).
+- **Verification across language bindings** — Python + JavaScript land at scjson 0.4.0; the **Rust binding does not exist** at scjson 0.4.0 and would need to be authored if/when the Rust port of any SOS backend wants direct scjson consumption (today's Rust backend consumes the Python-emitted intermediate forms via `tools/sos-codegen/`).
+- **Validation pipeline** — round-trip fidelity tests across all bindings; the current scjson conformance suite asserts fixture parity at the format level, but SOS-side template-output equivalence is a separate gate.
+
+No calendar windows are promised. The six subsections below are scope notes, not delivery schedules.
+
+### 12.1 `help_text: list[str]` — chart-author prose preservation
+
+**What scjson provides.** First-class field on 26 SCXML element models per CONV-E (scjson commits `9008639` / `e1e3d1f`). Carries author-supplied prose distinct from `other_attributes`. Round-trips through XML ↔ JSON deterministically. Empty list when the element has no prose.
+
+**What SOS would do with it.** Mechanize `help_text` content into the emitted source surface of every backend that has a doc-comment vocabulary: Rust `///` doc-comments on emitted FSM functions / state enums / event types (SOS-04, SOS-09-D); C `/** */` block comments on equivalent declarations (SOS-05, SOS-09-C); HDL inline comments on emitted VHDL / SystemVerilog modules and processes (SOS-08-C, SOS-09-E); SVD `<description>` elements on register definitions (SOS-09-B); SystemRDL `desc` properties (SOS-09-B). Net effect: chart-author intent travels from authoring surface to emitted artifact without a manual rewrite step.
+
+**What's missing on the SOS side before integration.** (a) Template surface in `tools/sos-codegen/` — none of the existing templates consume `help_text` today; each backend's emit needs a doc-comment threading pass. (b) Walker work — the `ChartAst` walker for each backend needs to discover and forward `help_text` per element. (c) Verification — round-trip-then-emit equivalence tests across Python and JavaScript scjson bindings, plus emit-shape tests per backend. (d) The Rust scjson binding does not exist; SOS's Rust backend stays Python-mediated until/unless that ships.
+
+### 12.2 SCXML comment promotion → `help_text`
+
+**What scjson provides.** XML `<!-- ... -->` comments preserved into `help_text` via an 8-rule deterministic attachment algorithm per CONV-F (scjson commits `096f7e3` / `afbb3ac`). Python implementation via `comment_promotion.py` (lxml); JavaScript via fast-xml-parser. Cross-language fixture parity is asserted by the scjson conformance suite, so the same chart produces the same promoted comment shape regardless of binding.
+
+**What SOS would do with it.** Pair with §12.1 above: chart-author XML comments become Rust `///` / C `/** */` doc-comments on the emitted source by construction. The deterministic 8-rule attachment means chart authors can rely on comment placement (above an element, inside a `<state>` body, on a `<transition>`, etc.) propagating through the build, which is the load-bearing property for a doc-comment-first workflow.
+
+**What's missing on the SOS side before integration.** Same axes as §12.1 (the two features are consumed together). Additionally: documentation needs to be authored on the chart-author surface (iState) explaining the 8-rule attachment semantics so chart authors know where to place comments to get predictable emit-side placement. The current `docs/REFERENCE.md` does not document this.
+
+### 12.3 XInclude support (`xinclude="preserve"` / `xinclude="resolve"`)
+
+**What scjson provides.** Per CONV-H (scjson commit `5af10c0`), the scjson parser accepts an `xinclude` parameter with values `preserve` (default; `<xi:include>` elements are retained in `other_element` so the AST round-trips losslessly) and `resolve` (the parser preprocesses the XML to inline referenced fragments before AST construction). An optional `xinclude_base_url` parameter lets the resolver resolve relative `href` paths against a non-default base.
+
+**What SOS would do with it.** Enable cross-file chart factoring: chart authors place common sub-chart fragments in shared files (e.g. a sem.scxml / mailbox.scxml / power.scxml library) and `<xi:include>` them into application charts. The wave-2 walker for PCDN-G-wave1-004 (SOS-08-G nested-chart `chart_path` walking) consumes `xinclude="resolve"`-preprocessed `ChartAst.raw_scjson` and the hierarchical path-building loop sees the resolved nesting transparently — no SOS-side `xi:include`-aware branch needed. Beyond SOS-08-G, the same mechanism enables chart-library factoring for SOS-12 (recursive chart dispatch): a sub-chart referenced by 4 application charts lives in one file.
+
+**What's missing on the SOS side before integration.** (a) Decision on which scjson mode the wave-2 walker consumes — `resolve` is simpler for the walker but loses round-trip fidelity to the on-disk multi-file layout; `preserve` keeps the multi-file layout but requires the walker to handle `<xi:include>` elements explicitly. (b) Chart-authoring conventions for the included-file layout (where files live, naming, how iState's authoring surface presents them). (c) Verification — round-trip fidelity tests for both modes; template-emit equivalence between resolved and preserved input shapes. (d) Validation that `xinclude_base_url` interacts predictably with build-system path resolution (Cargo / CMake / Python build).
+
+### 12.4 `<send>` full attribute and sub-element surface
+
+**What scjson provides.** All W3C SCXML `<send>` attributes preserved through round-trip: `src`, `srcexpr`, `target`, `targetexpr`, `type_value`, `typeexpr`, `event`, `eventexpr`, `namelist`, `autoforward`, `delay`, `delayexpr`. Plus `content` and `param` sub-elements. Sufficient for the full W3C `<send>` vocabulary.
+
+**What SOS would do with it.** The bootstrap kernel chart (`rtos_kernel.scxml`) uses `<send>` minimally; future application charts (per SOS-10 multi-language orchestration) need the full surface to express cross-piece message dispatch with delays, expression-evaluated targets, and parameterized payloads. The SOS-10 orchestrator chart model (transitions referencing cross-piece events with explicit medium) maps directly onto `<send target="..." type="..." delayexpr="...">` — without the full surface, application chart authors are constrained to a subset that does not exercise the methodology's claimed expressiveness.
+
+**What's missing on the SOS side before integration.** (a) Emit work in `tools/sos-codegen/` — the Rust / C / HDL backends today emit only the minimal `<send event="...">` shape; full attribute surface emission requires per-attribute codegen branches. (b) Datamodel evaluation — `delayexpr`, `targetexpr`, etc. require the runtime to evaluate expressions in the SCXML datamodel context at dispatch time; the bootstrap kernel uses a stub datamodel and the production datamodel work is its own follow-on initiative. (c) Verification — vector emission for charts that use the full surface; bounded-reachability analysis treatment of expression-evaluated targets.
+
+### 12.5 `<invoke>` full attribute and sub-element surface
+
+**What scjson provides.** Full `<invoke>` attribute set plus `finalize`, `content`, `param` sub-elements per the scjson 0.4.0 model. `<invoke>` is the W3C SCXML mechanism for embedded external state machines — the parent chart invokes a child process / service / sub-machine and listens for its events.
+
+**What SOS would do with it.** SOS-10 (multi-language orchestration) and SOS-12 (recursive chart dispatch) both need `<invoke>` to express "this state activates an external chart-driven piece for its duration". The SOS-12 sub-chart contract model (`extract_region_to_subchart` / `inline_subchart` MCP tools) maps onto `<invoke>` semantics; the SOS-10 orchestrator's "this state hands off to a per-piece chart" pattern is the same shape with a different medium for the invoked target.
+
+**What's missing on the SOS side before integration.** Largest engineering surface of the six features. (a) The chart-to-FSM emission (SOS-08-C) currently treats every state as a leaf FSM state; `<invoke>` requires a hierarchical lifetime model (start / running / finalize). (b) The cross-piece dispatch medium taxonomy from SOS-10 §4 maps onto `<invoke type="...">` values; the type-value vocabulary is its own ratification. (c) The `finalize` semantics interact with the bounded-vector emission (an invoke's child-machine emit-events propagate back into the parent's vector set, expanding the joint reachability bound). (d) Verification across the medium taxonomy.
+
+### 12.6 `other_attributes` registry (formalized CONV-G surface)
+
+**What scjson provides.** Per CONV-G (scjson commit `2280480`), a formalized extension-attribute schema that names the contract `other_attributes` rides within: keys are strings, values are strings, the registry documents which conventions (iState's `position_x` / `position_y`; SOS-09's `sos:`-prefixed-key convention per the 2026-05-25 PCDN-SOS-09-001 amendment; any future namespaced extension) use the surface. Round-trip semantics are formal: a `dict[str, str]` in JSON ↔ XML attribute-list in SCXML, with no value mutation.
+
+**What SOS would do with it.** Codify the SOS-09 `sos:`-prefixed-key convention as a registered entry in the scjson `other_attributes` registry, so the scjson conformance suite can assert SOS-side keys round-trip correctly across bindings without a separate SOS-side validation pass. Also: future SOS-09 sub-phases that add new annotation keys (per the PCDN-SOS-09-007 standards-action policy on the `sos:` prefix) register the additions in the same registry, giving cross-binding verification for free.
+
+**What's missing on the SOS side before integration.** (a) Registry submission flow — what does it look like to register the `sos:` prefix and the eight `sos:*` keys with the scjson project? This is upstream coordination work, not SOS-side template work. (b) Verification — the scjson conformance suite needs SOS-side fixture contributions to assert the SOS keys round-trip; that is currently informal. (c) Documentation — SOS-09-A's annotation-key authoritative listing would cross-reference the scjson registry entry, requiring a §15 amendment to SOS-09-A when the registry submission lands.
+
+### 12.7 Cross-references
+
+- `docs/concepts/SOS-09-CONCEPTS.md` §16 (2026-05-26 "scjson 0.4.0 feature surface" entry) — umbrella inventory of the six features at the SOS-09 phase level.
+- `docs/concepts/SOS-08-G-CONCEPTS.md` §15 (2026-05-26 entry) — XInclude (§12.3 above) named as a tractable input shape for the still-deferred PCDN-G-wave1-004 wave-2 walker.
+- `docs/concepts/SOS-06-A-EVALUATION.md` §3.1 + EOQ-007 follow-on note (both updated 2026-05-26) — `help_text` + comment promotion (§12.1 / §12.2 above) named as future inputs to the not-yet-authored `scjson-gen-c` / `scjson-gen-rust` codegen siblings.
+- scjson commits cited: `9008639` / `e1e3d1f` (CONV-E `help_text`); `096f7e3` / `afbb3ac` (CONV-F comment promotion); `5af10c0` (CONV-H XInclude); `2280480` (CONV-G `other_attributes` registry).
+
+### 12.8 Honest framing
+
+Every feature in §12.1 through §12.6 is **available upstream**. Every one is **not yet consumed by any SOS backend**. The verification work across language bindings is non-trivial. The validation pipeline (round-trip fidelity tests across all bindings) needs investment. The current `tools/sos-codegen/` template surface does not consume any of the six features today. The Rust scjson binding does not exist. **None of this is promised** for any specific calendar window — it is roadmap-tracked institutional acknowledgment, surfaced here so future phase ratifications have a place to point back to when scoping uptake.
+
+## 13. Change log
 
 ### 2026-05-22 — Initial draft (Ira)
 
@@ -369,3 +443,14 @@ Status: 🟢 **EOQ-resolved; SOS-07 cycle unblocked**. Per-phase concept docs (S
 With SOS-07 ratified, the SOS-08, SOS-09, SOS-10, SOS-11, SOS-12, SOS-13 cycles are unblocked individually. Each is still its own multi-week-to-multi-month effort; SOS-07's job was to clear the ratification-layer prerequisites so each subsequent phase can be authored without re-arguing the rename or the cross-phase invariants.
 
 Status: 🟢 **SOS-07 RATIFIED**. Roadmap closes out as "informative reference"; subsequent ratifications live in their own per-phase concept docs.
+
+### 2026-05-26 — scjson 0.4.0 feature surface added as §12 (Ira)
+
+- Added new §12 ("scjson 0.4.0 feature integration (roadmap)") enumerating the six features landed in the vendored scjson 0.3.x → 0.4.0 cycle (per scjson submodule HEAD `74e83da`, parent-repo path `ops/packer/submodules/scjson/`).
+- Six subsections cover `help_text` per CONV-E (§12.1), comment promotion per CONV-F (§12.2), XInclude per CONV-H (§12.3), full `<send>` surface (§12.4), full `<invoke>` surface (§12.5), and the formalized `other_attributes` registry per CONV-G (§12.6).
+- Per-feature subsections name what scjson provides, what SOS would do with it, and what's missing on the SOS side before integration (template work, walker work, cross-binding verification, validation pipeline).
+- Honest-framing footer (§12.8): none of the six features is currently consumed by any SOS backend; the Rust scjson binding does not exist; no calendar windows are promised.
+- Existing §12 ("Change log") renumbered to §13. No external citations of the old §12 exist in-tree, so the renumber is safe.
+- Companion §16 / §15 entries land in `SOS-09-CONCEPTS.md` (umbrella inventory), `SOS-08-G-CONCEPTS.md` (XInclude tractability for PCDN-G-wave1-004), and `SOS-06-A-EVALUATION.md` (CONV-E / CONV-F as future inputs to the not-yet-authored `scjson-gen-c` / `scjson-gen-rust` codegen siblings).
+
+Status: 🟡 **roadmap acknowledgment only**. No phase scope changes. The roadmap remains informative; per-feature uptake lands as per-phase §15 / §16 amendments through the standard ratification cycle.
