@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-10 §9 worked-example orchestrator chart (skeleton).
+
+  Purpose
+  =======
+  This chart is the §12 gate (b) starting artifact for the SOS-10 worked
+  example: an audio-streaming system composed of three pieces (MCU + FPGA
+  + gateway) that together exercise all four media of the SOS-10 frozen
+  enumeration (§5.2: in-process, shared-memory, mmio, network).
+
+  The chart is a SKELETON, not a runnable system at v1. Its sole gate is
+  "the text exists, parses cleanly through
+  tools/sos-codegen/sos10_annotations.parse_orchestrator_annotations, and
+  triggers the four emitters cleanly when wave-18 lands the integration
+  harness". Per-piece chart dispatch (<sos:dispatch ref="…"/>) is
+  intentionally omitted — the sub-charts mcu.scxml / fabric.scxml /
+  gateway.scxml are out of scope for this gate.
+
+  Pieces (per SOS-10-CONCEPTS §9)
+  -------------------------------
+  - mcu (sos:lang="rust"): Cortex-M7 firmware in Rust per SOS-04. Owns the
+    user-facing controls, audio codec configuration, and the cross-piece
+    events for "stream start/stop/pause".
+  - fabric (sos:lang="vhdl"): FPGA fabric in VHDL per SOS-08 on Lattice
+    ECP5 (per EOQ-004). Owns the real-time audio pipeline; receives MCU
+    commands; emits status events to the gateway.
+  - gateway (sos:lang="rust"): Microservice in Rust per PCDN-SOS-10-001.
+    Owns the network-facing API; receives FPGA status; emits aggregated
+    analytics to a remote dashboard.
+
+  Media exercised (one cross-piece transition per medium, plus a second
+  network transition to cover both transport names from PCDN-SOS-10-002)
+  -----------------------------------------------------------------------
+  - in-process     : mcu  ->  mcu     event=local_status_update
+  - shared-memory  : mcu  ->  gateway event=stream_metrics_burst
+  - mmio           : mcu  ->  fabric  event=start_capture
+  - network/AMQP   : fabric -> gateway event=analytics_event
+  - network/gRPC   : gateway -> mcu    event=dashboard_command
+
+  Chart identity
+  --------------
+  sos:id is the chart's RFC-4122 v4 UUID:
+      7f3e8a2c-1b5d-4f6a-9e3c-2d8b7a1f4e5d
+  (version nibble '4' at offset 14; variant nibble '9' at offset 19.)
+
+  Authority
+  ---------
+  SOS-10-CONCEPTS.md §9 (worked example), §5.1 (orchestrator chart shape),
+  §5.2 (medium enum, Standards Action), §6.1–§6.4 (per-medium contracts),
+  PCDN-SOS-10-001 / -002 / -003 / -004 / -005 / -006 (all ratified
+  2026-05-23). The annotation grammar this chart conforms to is the one
+  parsed by tools/sos-codegen/sos10_annotations.py.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="mcu"
+       other_attributes='{"sos:id": "7f3e8a2c-1b5d-4f6a-9e3c-2d8b7a1f4e5d"}'>
+
+  <!--
+    Piece A — MCU. Cortex-M7 firmware in Rust per SOS-04. Internal state
+    machine tracks the user-facing stream control loop (idle / active /
+    error). The MCU is the orchestrator's initial piece; user input
+    arrives here first and drives downstream commands to the fabric.
+  -->
+  <state id="mcu"
+         other_attributes='{"sos:lang": "rust"}'>
+
+    <!-- Internal MCU sub-states (informative — not consumed by the
+         SOS-10 annotation parser, which only walks top-level pieces and
+         the transitions hanging off them). -->
+    <state id="mcu_idle"/>
+    <state id="mcu_active"/>
+    <state id="mcu_error"/>
+
+    <!--
+      in-process: MCU self-loop carrying a local status refresh event.
+      Per §6.1 the in-process medium is the no-network, no-shared-memory,
+      no-mmio case: source and target compile into the same OS process
+      and the cross-piece event becomes a direct function call. A
+      self-loop on the top-level piece is the simplest legal shape that
+      exercises the in-process emitter; it stands in for "two pieces
+      that the orchestrator has colocated in the same process".
+    -->
+    <transition event="local_status_update" target="mcu">
+      <sos:medium kind="in-process"/>
+    </transition>
+
+    <!--
+      mmio: MCU -> FPGA fabric. Per §6.3 the mmio emitter synthesizes
+      SOS-09 channel annotations (the SOS-09 channel-category mapping
+      consumes the orchestrator's declared sender/receiver pieces +
+      payload type and emits the membrane channel artifact). The chart
+      side carries only the medium declaration; channel composition is
+      the emitter's responsibility.
+    -->
+    <transition event="start_capture" target="fabric">
+      <sos:medium kind="mmio"/>
+    </transition>
+
+    <!--
+      shared-memory: MCU -> gateway. The MCU bursts stream metrics into a
+      ring buffer the gateway drains. Per §6.2 the shared-memory emitter
+      composes a POSIX SHM segment + a futex; the chart carries only the
+      medium declaration plus a 2 s timeout (PCDN-SOS-10-006 default
+      override) for the consumer's wait operation.
+    -->
+    <transition event="stream_metrics_burst" target="gateway">
+      <sos:medium kind="shared-memory">
+        <sos:timeout ms="2000"/>
+      </sos:medium>
+    </transition>
+
+  </state>
+
+  <!--
+    Piece B — Fabric. FPGA fabric in VHDL per SOS-08 (Lattice ECP5 per
+    EOQ-004). Owns the real-time audio pipeline. Internal sub-states
+    track the DSP loop's run / halted / fault disposition.
+  -->
+  <state id="fabric"
+         other_attributes='{"sos:lang": "vhdl"}'>
+
+    <state id="fabric_halted"/>
+    <state id="fabric_running"/>
+    <state id="fabric_fault"/>
+
+    <!--
+      network / AMQP: fabric -> gateway. Per §6.4 + PCDN-SOS-10-002, AMQP
+      is the secondary transport at v1 (gRPC primary). The fabric emits
+      durable analytics events to the gateway via a queue. The 10 s
+      timeout overrides the AMQP default. The medium-level
+      <sos:idempotent value="true"/> declares the event safe to retry
+      under the at-least-once delivery semantics AMQP provides.
+    -->
+    <transition event="analytics_event" target="gateway">
+      <sos:medium kind="network">
+        <sos:transport name="AMQP"/>
+        <sos:timeout ms="10000"/>
+        <sos:idempotent value="true"/>
+      </sos:medium>
+    </transition>
+
+  </state>
+
+  <!--
+    Piece C — Gateway. Microservice in Rust per PCDN-SOS-10-001. Owns
+    the network-facing API and the connection back to the remote
+    dashboard. Internal sub-states track the connection lifecycle.
+  -->
+  <state id="gateway"
+         other_attributes='{"sos:lang": "rust"}'>
+
+    <state id="gateway_disconnected"/>
+    <state id="gateway_connected"/>
+    <state id="gateway_degraded"/>
+
+    <!--
+      network / gRPC: gateway -> MCU. Per §6.4 + PCDN-SOS-10-002 gRPC is
+      the primary transport at v1. The dashboard issues commands that
+      flow gateway -> MCU; the 5 s timeout matches the gRPC default
+      (PCDN-SOS-10-006). gRPC's request/response semantics give this
+      transition a natural exactly-once disposition without an explicit
+      idempotent marker.
+    -->
+    <transition event="dashboard_command" target="mcu">
+      <sos:medium kind="network">
+        <sos:transport name="gRPC"/>
+        <sos:timeout ms="5000"/>
+      </sos:medium>
+    </transition>
+
+  </state>
+
+</scxml>
