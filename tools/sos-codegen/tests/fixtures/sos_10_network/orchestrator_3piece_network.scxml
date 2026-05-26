@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-10 `network` medium fixture: minimal 3-piece chart for the
+  protobuf IDL emitter (`protobuf_emit.py`).
+
+  Three pieces with at least one network transition per transport:
+    - `client` (rust): sends `evt.start` to `gateway` over gRPC; payload
+      type `uint32`. Sends `evt.report` to `broker` over AMQP with no
+      explicit payload type (default `bytes`).
+    - `gateway` (rust): sends `evt.broadcast` to `broker` over AMQP;
+      payload type `string`.
+    - `broker` (rust): does not send cross-piece events (target only).
+
+  A trailing in-process transition (`client -> gateway` evt.sync) proves
+  the protobuf emitter SKIPS non-network media. Each cross-piece event
+  exercises a different (src, dst, transport) combination so the emitter
+  walks every code path: request/response message pairs, payload-type
+  mapping, AMQP routing aggregation, and the empty-service degenerate.
+
+  Authority: SOS-10-CONCEPTS.md §5.2 + §6.4; PCDN-SOS-10-002 (protobuf
+  canonical IDL); INV-S-ORCH-1..6.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="client"
+       other_attributes='{"sos:id": "fe000000-0000-4000-8000-000000000017"}'>
+
+  <state id="client"
+         other_attributes='{"sos:lang": "rust"}'>
+    <transition event="evt.start" target="gateway">
+      <sos:medium kind="network" payload_type="uint32">
+        <sos:transport name="gRPC"/>
+        <sos:timeout ms="3000"/>
+      </sos:medium>
+    </transition>
+    <transition event="evt.report" target="broker">
+      <sos:medium kind="network">
+        <sos:transport name="AMQP"/>
+      </sos:medium>
+    </transition>
+    <transition event="evt.sync" target="gateway">
+      <sos:medium kind="in-process"/>
+    </transition>
+  </state>
+
+  <state id="gateway"
+         other_attributes='{"sos:lang": "rust"}'>
+    <transition event="evt.broadcast" target="broker">
+      <sos:medium kind="network" payload_type="string">
+        <sos:transport name="AMQP"/>
+      </sos:medium>
+    </transition>
+  </state>
+
+  <state id="broker"
+         other_attributes='{"sos:lang": "rust"}'>
+  </state>
+
+</scxml>
