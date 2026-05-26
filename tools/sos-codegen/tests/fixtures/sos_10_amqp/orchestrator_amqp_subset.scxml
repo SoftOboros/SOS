@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-10 `network` medium AMQP-subset fixture: minimal 2-piece chart
+  for the AMQP message-handler emitter (`amqp_emit.py`). Independent of
+  the gRPC sibling's reused 3-piece fixture so the test corpora can
+  evolve separately.
+
+  Two pieces with one AMQP transition gateway -> mcu:
+    - `gateway` (rust): sends `evt.announce` to `mcu` over AMQP; payload
+      type `string`.
+    - `mcu` (rust): pure-receive piece (no outgoing AMQP).
+
+  Authority: SOS-10-CONCEPTS.md §5.2 + §6.4; PCDN-SOS-10-002 (protobuf
+  canonical IDL); PCDN-SOS-10-006 (AMQP timeout default 10000ms);
+  INV-S-ORCH-1..6.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="gateway"
+       other_attributes='{"sos:id": "fa000000-0000-4000-8000-000000000017"}'>
+
+  <state id="gateway"
+         other_attributes='{"sos:lang": "rust"}'>
+    <transition event="evt.announce" target="mcu">
+      <sos:medium kind="network" payload_type="string">
+        <sos:transport name="AMQP"/>
+      </sos:medium>
+    </transition>
+  </state>
+
+  <state id="mcu"
+         other_attributes='{"sos:lang": "rust"}'>
+  </state>
+
+</scxml>
