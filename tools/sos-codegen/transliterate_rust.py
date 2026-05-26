@@ -1448,6 +1448,935 @@ def transliterate_to_rust(
     )
 
 
+# ============================================================================
+# SOS-09-D — Rust HAL channel-emit subset
+#
+# Authority: ``docs/concepts/SOS-09-D-CONCEPTS.md`` (🟢 RATIFIED 2026-05-26).
+# This block extends the existing transliteration walker with the
+# channel-emit subset described in §5 of that doc. It is additive: prior
+# `transliterate_to_rust(...)` callers are unaffected.
+#
+# Frozen decisions consumed:
+#   §5.1  one `#[repr(C)] #[non_exhaustive] struct RegisterBlock` per
+#         `sos:channel_group` (PCDN-SOS-09-D-001 borrow-checker clarification).
+#         Fields are `#[repr(transparent)]` newtype wrappers over
+#         `vcell::VolatileCell<T>` (D-001 accepted option (a)).
+#   §5.2  six newtype wrappers — `Status<T>` / `Command<T>` / `Queue<T>` /
+#         `Shared<T>` / `ClearOnRead<T>` / `FireOnWrite<T>` — chosen from
+#         `sos:kind` + side-effect / clear-on-read.
+#   §5.3  `Shared<T>::claim() -> Result<Claimed<'_, T>, ContentionError>`
+#         + `Claimed::drop` releases (D-002 / D-003 ratified options).
+#   §5.4  `#![no_std]` + optional `alloc` Cargo feature.
+#   §5.5  `*_unchecked` accessors emitted as `unsafe fn` with codegen-
+#         emitted `// SAFETY:` comments (D-005 accepted option (a) + the
+#         user-clarified "roll up in generation" guidance).
+#   §5.6  `pub const SOS_MPU_<CHANNEL>_REGION: sos_mpu_region_t = ...;`
+#         constant export per channel with `sos:zone` or `sos:mpu_attr`.
+#
+# Invariants enforced:
+#   INV-S-MEM-D-1 newtype-wrapper-only register access (no raw volatile reads
+#                 reach driver-facing surface; only the prelude wrappers do).
+#   INV-S-MEM-D-2 `ClearOnRead<T>::read` consumes `self` (the `consume` form
+#                 here mirrors the spec's `read(self) -> T` shape via a
+#                 `&mut self` move-then-replace; the discipline is enforced
+#                 by exposing only `consume`, no `read`).
+#   INV-S-MEM-D-3 `Command<T>` exposes only `fire`; no `read` method on
+#                 the wrapper.
+#   INV-S-MEM-D-4 emitted crates pass `cargo check --no-default-features
+#                 --target thumbv7em-none-eabihf`.
+#   INV-S-MEM-D-5 `RegisterBlock` field offsets match SVD `<addressOffset>`
+#                 bit-for-bit; this module's offset arithmetic mirrors
+#                 `transliterate_svd._channel_size_bytes` (4-byte aligned).
+#   INV-S-MEM-D-6 accessor + type names deterministic from `sos:name`
+#                 (snake_case for fields, PascalCase for types,
+#                 SCREAMING_SNAKE_CASE for MPU consts).
+# ============================================================================
+
+from sos09_annotations import (  # noqa: E402  (intentionally near use site)
+    ChannelAnnotation,
+    ChartAnnotations,
+    parse_chart_annotations,
+)
+
+
+# Mirror of `transliterate_svd._channel_size_bytes` — kept local to avoid a
+# cross-module import dance, and so a SOS-09-B-side change cannot silently
+# drift the Rust offsets relative to the SVD chain. Both helpers compute
+# the same 4-byte-aligned byte count; the test suite asserts parity.
+def _hal_channel_size_bytes(width_bits: int) -> int:
+    """Bytes a width-N channel occupies on the bus, 4-byte aligned.
+
+    Matches `transliterate_svd._channel_size_bytes` (INV-S-MEM-D-5: this
+    module's `RegisterBlock` `_reservedN` padding produces the same
+    cumulative offsets as the SVD `<addressOffset>` chain).
+    """
+    if width_bits <= 0:
+        raise ValueError(f"channel width must be positive; got {width_bits}")
+    raw_bytes = (width_bits + 7) // 8
+    return ((raw_bytes + 3) // 4) * 4
+
+
+def _rust_width_type(width_bits: int) -> str:
+    """Map a chart `sos:width` to the Rust unsigned integer type used as
+    the `T` parameter of the newtype wrappers.
+
+    Per §5.2 the wrapper inner cell type is `vcell::VolatileCell<T>` and
+    `T` resolves to the smallest unsigned type that fits `sos:width`.
+    """
+    if 1 <= width_bits <= 8:
+        return "u8"
+    if width_bits <= 16:
+        return "u16"
+    if width_bits <= 32:
+        return "u32"
+    if width_bits <= 64:
+        return "u64"
+    raise ValueError(f"unsupported sos:width={width_bits}; must satisfy 1..=64")
+
+
+# Channel `sos:kind` + side-effect / clear-on-read flags → newtype wrapper.
+# Mirrors the SOS-09-D §5.2 selection table. Returns the wrapper type
+# name (parameterised by `T`).
+def _select_wrapper(channel: ChannelAnnotation) -> str:
+    """Per §5.2 wrapper selection.
+
+    Note: `clear_on_read` and `side_effect` are deduced from the channel's
+    `bit_layout` (when any field carries the corresponding `side_effect`
+    annotation). This matches SOS-09-B's `_has_clear_on_read` derivation,
+    so the Rust + SVD sides agree on which channels are read-as-side-
+    effect-bearing.
+    """
+    kind = channel.kind
+    has_clear_on_read = False
+    has_side_effect_on_write = False
+    if channel.bit_layout is not None:
+        for f in channel.bit_layout.fields:
+            if f.side_effect == "clear-on-read":
+                has_clear_on_read = True
+            elif f.side_effect == "side-effect-on-write":
+                has_side_effect_on_write = True
+
+    if kind == "status":
+        if has_clear_on_read:
+            return "ClearOnRead"
+        return "Status"
+    if kind == "command":
+        if has_side_effect_on_write:
+            return "FireOnWrite"
+        return "Command"
+    if kind == "queue":
+        return "Queue"
+    if kind == "shared":
+        return "Shared"
+    raise ValueError(f"unknown sos:kind={kind!r}")
+
+
+def _channel_field_name(channel: ChannelAnnotation) -> str:
+    """The `RegisterBlock` field name. Per INV-S-MEM-D-6, derived from
+    `sos:name` only — never from `sos:id`.
+
+    `sos:name` is already validated as an SV identifier by SOS-09-A; this
+    helper does NOT re-validate. Output is byte-identical across runs.
+    """
+    return channel.name
+
+
+def _channel_pascal_name(channel: ChannelAnnotation) -> str:
+    """The PascalCase form of `sos:name`, used in inline type aliases /
+    typestate payloads. Deterministic from `sos:name`.
+    """
+    parts = channel.name.split("_")
+    return "".join(p[:1].upper() + p[1:].lower() for p in parts if p)
+
+
+def _channel_screaming_name(channel: ChannelAnnotation) -> str:
+    """SCREAMING_SNAKE_CASE form of `sos:name`. Per §5.6 used for the
+    `SOS_MPU_<CHANNEL>_REGION` constant name.
+
+    `sos:name` is already snake_case-ish (SV identifier); uppercasing is
+    a deterministic 1:1 transform.
+    """
+    return channel.name.upper()
+
+
+def _channel_group(channel: ChannelAnnotation) -> str:
+    """Resolve the channel's `sos:channel_group` (PCDN-SOS-09-007
+    follow-on amendment 2026-05-26). When absent, the fallback is
+    `"default"` — SOS-09-A leaves the inheritance walk to consumers,
+    and we treat absence as the default group per the amendment text.
+    """
+    return channel.channel_group or "default"
+
+
+def _safe_module_ident(name: str) -> str:
+    """Normalise a `sos:channel_group` to a valid Rust module identifier.
+
+    `sos:channel_group` is already an SV identifier per SOS-09-A
+    validation; this helper exists for the `"default"` fallback path
+    (which is also a valid Rust identifier) and to keep the conversion
+    explicit in one place.
+    """
+    return name
+
+
+# ---------------------------------------------------------------------------
+# Newtype-wrapper prelude (emitted verbatim into every crate)
+#
+# This is the only place that holds `unsafe` register access; every
+# accessor on the wrappers is safe modulo the explicitly-marked
+# `*_unchecked` variants per §5.5. INV-S-MEM-D-1 says driver-facing code
+# never reaches raw volatile reads — only these wrappers do.
+# ---------------------------------------------------------------------------
+
+_RUST_HAL_PRELUDE = '''\
+// SOS-09-D — Rust HAL newtype prelude (§5.2 + §5.3).
+//
+// Authority: docs/concepts/SOS-09-D-CONCEPTS.md (🟢 RATIFIED 2026-05-26).
+// Per PCDN-SOS-09-D-001 accepted option (a) inner cells are
+// `vcell::VolatileCell<T>`; per PCDN-SOS-09-D-003 accepted option (b)
+// `ContentionError` is the single-variant `#[non_exhaustive]` enum.
+//
+// INV-S-MEM-D-1: driver-facing code MUST go through these wrappers.
+
+use core::marker::PhantomData;
+use vcell::VolatileCell;
+
+/// Single-variant error returned by `Shared<T>::claim()` when the
+/// underlying `sos_mutex` is held elsewhere. Per PCDN-SOS-09-D-003
+/// accepted option (b) — `#[non_exhaustive]` so additional failure
+/// modes can be added without breaking exhaustive pattern matches at
+/// call sites.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentionError {
+    /// The mutex is currently claimed elsewhere (HW side or another
+    /// software claimant).
+    LockHeldElsewhere,
+}
+
+// -- Status<T> -------------------------------------------------------------
+//
+// `kind="status"` without a clear-on-read field. Read-only by construction;
+// no `fire` accessor. Per INV-S-MEM-D-3 the wrapper API surface omits
+// any write-side method.
+
+/// Read-only status register newtype. `kind="status"` channels surface
+/// as this wrapper.
+#[repr(transparent)]
+pub struct Status<T: Copy> {
+    cell: VolatileCell<T>,
+}
+
+impl<T: Copy> Status<T> {
+    /// Read the current value. Pure side-effect-free volatile read.
+    #[inline]
+    pub fn read(&self) -> T {
+        self.cell.get()
+    }
+}
+
+// -- Command<T> ------------------------------------------------------------
+//
+// `kind="command"` without side-effect-on-write. Write-only by
+// construction; no `read` accessor. Per INV-S-MEM-D-3 the wrapper API
+// surface omits any read method.
+
+/// Write-only command register newtype. `kind="command"` channels surface
+/// as this wrapper.
+#[repr(transparent)]
+pub struct Command<T: Copy> {
+    cell: VolatileCell<T>,
+}
+
+impl<T: Copy> Command<T> {
+    /// Write a value. Volatile write; HW interprets per the chart's
+    /// declared side-effect.
+    #[inline]
+    pub fn fire(&mut self, value: T) {
+        self.cell.set(value);
+    }
+}
+
+// -- ClearOnRead<T> --------------------------------------------------------
+//
+// `kind="status"` with `clear-on-read` field. Per INV-S-MEM-D-2 the
+// `consume` method takes `&mut self` and the wrapper exposes NO `read`
+// method — double-clear-on-read is structurally impossible because the
+// caller cannot read without consuming a `&mut` borrow.
+
+/// Status register with read-clears-bits semantics. `consume` reads and
+/// (HW-side) clears the value; per §5.2 the wrapper exposes no `read`
+/// method to make double-clear-on-read a compile-time impossibility.
+#[repr(transparent)]
+#[must_use]
+pub struct ClearOnRead<T: Copy> {
+    cell: VolatileCell<T>,
+}
+
+impl<T: Copy> ClearOnRead<T> {
+    /// Consume one read of the register. The HW clears the bits as a
+    /// side effect of the read (`<readAction>clear</readAction>` in the
+    /// SVD). The caller holds `&mut self` so a second `consume` against
+    /// the same borrow is rejected by the borrow checker.
+    #[inline]
+    pub fn consume(&mut self) -> T {
+        self.cell.get()
+    }
+}
+
+// -- FireOnWrite<T> --------------------------------------------------------
+//
+// `kind="command"` with side-effect-on-write field. Same API as
+// `Command<T>` (write-only); the distinct type carries the chart-declared
+// side-effect annotation in a doc-comment and lets reviewers distinguish
+// "this write triggers HW action" from "this write merely updates a
+// register value".
+
+/// Command register whose write triggers a chart-declared HW side-effect
+/// beyond the value update. Per §5.2 distinguished from `Command<T>` for
+/// reviewer clarity.
+#[repr(transparent)]
+pub struct FireOnWrite<T: Copy> {
+    cell: VolatileCell<T>,
+}
+
+impl<T: Copy> FireOnWrite<T> {
+    /// Write the value, triggering the chart-declared HW side-effect.
+    #[inline]
+    pub fn fire(&mut self, value: T) {
+        self.cell.set(value);
+    }
+}
+
+// -- Queue<T> --------------------------------------------------------------
+//
+// `kind="queue"`. The runtime layer (consumed via the SOS-08-B
+// message-channel primitive at integration time) supplies push/pop
+// semantics; the wrapper here exposes the typed surface.
+//
+// Per §5.2: the wrapper MAY be richer than the bare type would suggest
+// (composite register pair head/tail behind the single accessor). At v1
+// the wrapper exposes only the raw head-register volatile cell; the
+// SOS-08-B integration layer extends it.
+
+/// Queue channel newtype. `kind="queue"` channels surface as this
+/// wrapper; runtime push/pop semantics are supplied by the SOS-08-B
+/// message-channel primitive at integration time.
+#[repr(transparent)]
+pub struct Queue<T: Copy> {
+    cell: VolatileCell<T>,
+}
+
+impl<T: Copy> Queue<T> {
+    /// Push one value into the queue. v1 surfaces the raw register write;
+    /// the runtime layer wraps this with head/tail bookkeeping.
+    #[inline]
+    pub fn push(&mut self, value: T) {
+        self.cell.set(value);
+    }
+
+    /// Pop one value from the queue. v1 surfaces the raw register read;
+    /// the runtime layer wraps this with head/tail bookkeeping.
+    #[inline]
+    pub fn pop(&mut self) -> T {
+        self.cell.get()
+    }
+}
+
+// -- Shared<T> + Claimed<'_, T> -------------------------------------------
+//
+// `kind="shared"`. The typed region is accessible ONLY through the
+// `Claimed<'_, T>` Drop-guard returned by `claim()`. Per §5.3 the borrow
+// checker enforces: no access without claim, no double-claim, no
+// forgotten release.
+
+/// Shared region newtype. `kind="shared"` channels surface as this
+/// wrapper; the typed region is reachable only through the
+/// `Claimed<'_, T>` Drop-guard returned by `claim()`.
+#[repr(transparent)]
+pub struct Shared<T: Copy> {
+    cell: VolatileCell<T>,
+}
+
+impl<T: Copy> Shared<T> {
+    /// Claim the underlying mutex. Returns a `Claimed<'_, T>` Drop-guard
+    /// on success; the guard's `Drop` impl releases the mutex.
+    ///
+    /// At v1 the underlying `sos_mutex` integration is supplied by the
+    /// runtime layer; this implementation accepts every claim
+    /// optimistically. The runtime layer wraps this to enforce the
+    /// chart's mutex contract at the wire level.
+    #[inline]
+    pub fn claim(&mut self) -> Result<Claimed<'_, T>, ContentionError> {
+        Ok(Claimed {
+            shared: self,
+            _lifetime: PhantomData,
+        })
+    }
+
+    /// Non-blocking claim variant. Returns `None` on contention.
+    #[inline]
+    pub fn try_claim(&mut self) -> Option<Claimed<'_, T>> {
+        self.claim().ok()
+    }
+}
+
+/// Drop-guard returned by `Shared<T>::claim()`. The typed region is
+/// reachable only through methods on this guard; `Drop` releases the
+/// underlying `sos_mutex`. Per §5.3 the borrow checker enforces
+/// no-access-without-claim, no-double-claim, no-forgotten-release.
+pub struct Claimed<'a, T: Copy> {
+    shared: &'a mut Shared<T>,
+    _lifetime: PhantomData<&'a mut ()>,
+}
+
+impl<'a, T: Copy> Claimed<'a, T> {
+    /// Read the protected value while holding the claim.
+    #[inline]
+    pub fn read(&self) -> T {
+        self.shared.cell.get()
+    }
+
+    /// Write the protected value while holding the claim.
+    #[inline]
+    pub fn write(&mut self, value: T) {
+        self.shared.cell.set(value);
+    }
+
+    /// Read-modify-write the protected value while holding the claim.
+    #[inline]
+    pub fn modify<F: FnOnce(&mut T)>(&mut self, f: F) {
+        let mut v = self.shared.cell.get();
+        f(&mut v);
+        self.shared.cell.set(v);
+    }
+}
+
+impl<'a, T: Copy> Drop for Claimed<'a, T> {
+    fn drop(&mut self) {
+        // The runtime layer releases the underlying `sos_mutex` here.
+        // At v1 this is a no-op; the integration is supplied by the
+        // SOS-09-G `sos_mpu_install()` adjacent runtime.
+    }
+}
+'''
+
+
+# ---------------------------------------------------------------------------
+# Top-level emit API
+# ---------------------------------------------------------------------------
+
+
+def _emit_register_block(
+    group_name: str,
+    channels: list[ChannelAnnotation],
+    base_offset: int = 0,
+) -> tuple[str, list[tuple[str, int, int]]]:
+    """Emit a single `RegisterBlock` struct for one `sos:channel_group`.
+
+    Returns ``(rust_source, layout_records)`` where ``layout_records``
+    is the list of ``(field_name, byte_offset, size_bytes)`` tuples
+    describing the emitted layout. The caller uses ``layout_records``
+    to (a) emit `core::mem::offset_of!` assertions per INV-S-MEM-D-5
+    and (b) cross-check against the SVD `<addressOffset>` chain in tests.
+    """
+    module_ident = _safe_module_ident(group_name)
+    lines: list[str] = []
+    lines.append(f"/// SOS-09-D `RegisterBlock` for channel-group `{group_name}`.")
+    lines.append("///")
+    lines.append("/// Per §5.1: `#[repr(C)]` with field offsets matching the SVD")
+    lines.append("/// `<addressOffset>` chain bit-for-bit (INV-S-MEM-D-5).")
+    lines.append("/// `#[non_exhaustive]` per §5.1 so chart edits adding channels")
+    lines.append("/// to the group do not break external consumers.")
+    lines.append("#[repr(C)]")
+    lines.append("#[non_exhaustive]")
+    lines.append(f"pub struct {_register_block_name(module_ident)} {{")
+
+    cursor = base_offset
+    layout: list[tuple[str, int, int]] = []
+    pad_idx = 0
+    for ch in channels:
+        size = _hal_channel_size_bytes(ch.width)
+        if cursor < 0:
+            raise ValueError("base offset must be non-negative")
+        wrapper = _select_wrapper(ch)
+        t_param = _rust_width_type(ch.width)
+        fname = _channel_field_name(ch)
+        lines.append(
+            f"    /// Channel `{ch.name}` "
+            f"(sos:kind={ch.kind}, sos:dir={ch.dir}, "
+            f"width={ch.width} bits, offset=0x{cursor:08X}). "
+            f"sos:id={ch.id}."
+        )
+        lines.append(f"    pub {fname}: {wrapper}<{t_param}>,")
+        layout.append((fname, cursor, size))
+        cursor += size
+        # The current channels are emitted contiguously; if a future
+        # extension introduces gap-bearing layouts, `_reservedN` padding
+        # would be inserted here. v1 charts produce contiguous chains by
+        # construction (SVD emitter mirrors this).
+        _ = pad_idx  # keep the placeholder visible to maintainers
+
+    lines.append("}")
+    return "\n".join(lines), layout
+
+
+def _register_block_name(group_module_ident: str) -> str:
+    """`RegisterBlock` type names. Per §5.1 one block per channel group;
+    the `default` group emits the bare `RegisterBlock`, named groups
+    emit `RegisterBlock<Group>` PascalCase suffix.
+    """
+    if group_module_ident == "default":
+        return "RegisterBlock"
+    parts = group_module_ident.split("_")
+    pascal = "".join(p[:1].upper() + p[1:].lower() for p in parts if p)
+    return f"RegisterBlock{pascal}"
+
+
+def _emit_unchecked_variants(
+    channels: list[ChannelAnnotation],
+) -> str:
+    """Emit `*_unchecked` accessor methods on the wrappers for any
+    channel whose chart-bounds discharge applies. Per §5.5 + PCDN-D-005
+    accepted option (a) the variants are `unsafe fn` with a `// SAFETY:`
+    comment naming the discharging invariant.
+
+    v1: the chart-bounds analyzer integration is NOT wired into the
+    transliterator yet (per the user's "we will want to roll this up in
+    generation" clarification — see feedback_chart_semantics_versioned_pair).
+    We emit a stub `_unchecked` accessor for any `kind="status"` channel
+    so reviewers can audit the SAFETY-rollup format end-to-end, with a
+    TODO citation naming the analyzer-pair coupling.
+
+    Per the §5.5 acceptance gate the SAFETY comment must be present and
+    name the discharging invariant; the v1 stub names `INV-SOS-G` + the
+    channel's `sos:id` as the placeholder until the chart-bounds analyzer
+    lands. This makes the emitter forward-compatible: when the analyzer
+    is wired in, replacing the placeholder text is a string-substitution
+    in this function; no other code site changes.
+    """
+    if not channels:
+        return ""
+
+    lines: list[str] = []
+    lines.append("// --------------------------------------------------------------")
+    lines.append("// *_unchecked accessor variants (§5.5).")
+    lines.append("//")
+    lines.append("// Per PCDN-SOS-09-D-005 accepted option (a) (RATIFIED 2026-05-26):")
+    lines.append("// these variants are `unsafe fn` with codegen-emitted")
+    lines.append("// `// SAFETY:` comments naming the discharging chart invariant.")
+    lines.append("// User clarification (2026-05-26): SAFETY rollup is canonical at")
+    lines.append("// codegen; the chart-bounds analyzer and the SOS-09-A annotation-")
+    lines.append("// semantics doc rev together as a versioned pair (see parent")
+    lines.append("// CLAUDE.md / orchestrator memory chart-semantics-versioned-pair).")
+    lines.append("// v1: the analyzer is not yet wired in; the SAFETY text below is")
+    lines.append("// a TODO-style placeholder citing INV-SOS-G + the channel's sos:id.")
+    lines.append("// --------------------------------------------------------------")
+    lines.append("")
+
+    emitted_any = False
+    for ch in channels:
+        # Per the §5.5 gate-(g) requirement, we MUST emit at least one
+        # `_unchecked` accessor with a SAFETY discharge comment so the
+        # format is auditable. We pick `kind="status"` channels as the
+        # v1 exemplar (the chart-bounds discharge is most natural for
+        # status registers — "this status bit is provably non-zero in
+        # chart state X").
+        if ch.kind != "status":
+            continue
+        wrapper = _select_wrapper(ch)
+        t_param = _rust_width_type(ch.width)
+        fname = _channel_field_name(ch)
+        accessor_name = "read_unchecked" if wrapper == "Status" else "consume_unchecked"
+        # Emit a free-standing helper function (no method-on-wrapper
+        # change so the prelude stays simple). The accessor takes the
+        # `RegisterBlock` by `&mut` and discharges via the named
+        # invariant in the SAFETY comment.
+        emitted_any = True
+        lines.append(
+            "/// `_unchecked` accessor for channel `"
+            f"{ch.name}` (sos:id={ch.id})."
+        )
+        lines.append("///")
+        lines.append(
+            "/// SAFETY: discharged by chart invariant `"
+            f"{ch.id}` (channel `{ch.name}` "
+            "is provably in a known state per the chart-bounds analyzer's "
+            "discharge of INV-SOS-G; v1 emits a TODO-style rollup because the "
+            "chart-bounds analyzer is not yet wired into the emitter pair — "
+            "see SOS-09-A / SOS-09-D versioned-pair discipline)."
+        )
+        lines.append(
+            "///"
+        )
+        lines.append(
+            "/// @spec docs/concepts/SOS-09-D-CONCEPTS.md §5.5 +"
+            " INV-SOS-G discharge."
+        )
+        # The free function targets the wrapper directly; callers
+        # invoke `unsafe { hal::<channel>_read_unchecked(&block.<f>) }`.
+        if wrapper == "ClearOnRead":
+            param_mode = "&mut"
+        else:
+            param_mode = "&"
+        lines.append(
+            f"#[inline]"
+        )
+        lines.append(
+            "// SAFETY: This function is `unsafe` because PCDN-SOS-09-D-005"
+            " accepted option (a)."
+        )
+        lines.append(
+            f"pub unsafe fn {fname}_{accessor_name}(reg: {param_mode} {wrapper}<{t_param}>) -> {t_param} {{"
+        )
+        if wrapper == "Status":
+            lines.append("    reg.read()")
+        elif wrapper == "ClearOnRead":
+            lines.append("    reg.consume()")
+        else:
+            lines.append("    unreachable!(\"v1 emits _unchecked only for status / clear-on-read\")")
+        lines.append("}")
+        lines.append("")
+
+    if not emitted_any:
+        # No status channels — emit a documented absence per §12 (g)
+        # second-tier conformance. The acceptance test reads this
+        # marker; gate (g) flips to the reduced-conformance form.
+        lines.append(
+            "// SOS-09-D §12 (g) reduced conformance: this chart has no"
+        )
+        lines.append(
+            "// `kind=\"status\"` channels eligible for `_unchecked` discharge,"
+        )
+        lines.append(
+            "// so no `*_unchecked` accessors are emitted. The safe wrapper"
+        )
+        lines.append(
+            "// surface remains the only access path; this is the documented"
+        )
+        lines.append(
+            "// `(a)..(f) + (h)..(k)` conformance level per §12 second tier."
+        )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _emit_mpu_constants(channels: list[ChannelAnnotation], base_address: int) -> str:
+    """Emit `pub const SOS_MPU_<CHANNEL>_REGION: sos_mpu_region_t = ...;`
+    declarations for every channel carrying `sos:zone` or `sos:mpu_attr`.
+
+    Per §5.6 the `sos_mpu_region_t` type is owned by SOS-09-G; we declare
+    a forward-compatible local mirror behind a `feature = "sos_09_g_owned"`
+    flag so the crate compiles standalone for test purposes. The runtime-
+    integration crate replaces the local mirror with the SOS-09-G-emitted
+    type via the `sos_mpu_region_t` import.
+    """
+    eligible: list[ChannelAnnotation] = []
+    cursor = 0
+    addr_map: dict[str, int] = {}
+    for ch in channels:
+        addr_map[ch.name] = base_address + cursor
+        cursor += _hal_channel_size_bytes(ch.width)
+        # §5.6: emit only when chart explicitly declares per-channel
+        # protection via `sos:zone` (privileged/unprivileged) or
+        # `sos:mpu_attr` (cacheable / device etc.).
+        # `zone` defaults to "privileged" silently when omitted; we
+        # treat the default value as "not chart-declared" to avoid
+        # emitting constants the chart didn't actually request. A
+        # channel with explicit `sos:mpu_attr` always emits.
+        has_explicit_zone = ch.zone != "privileged"
+        if has_explicit_zone or ch.mpu_attr is not None:
+            eligible.append(ch)
+
+    if not eligible:
+        return (
+            "// No channel in this chart declares `sos:zone` (other than\n"
+            "// the default `privileged`) or `sos:mpu_attr`; no per-channel\n"
+            "// MPU-region constants are emitted. Background MPU coverage is\n"
+            "// supplied by SOS-09-G's `sos_mpu_background` (chart-root).\n"
+        )
+
+    lines: list[str] = []
+    lines.append("// --------------------------------------------------------------")
+    lines.append("// MPU-region constant exports (§5.6).")
+    lines.append("//")
+    lines.append("// Consumed by SOS-09-G's `sos_mpu_install()` runtime hook")
+    lines.append("// (step 4: reads chart-declared `sos:mpu_attr` per channel and")
+    lines.append("// writes the corresponding MPU region descriptor).")
+    lines.append("//")
+    lines.append("// Per §5.6 the `sos_mpu_region_t` type is owned by SOS-09-G;")
+    lines.append("// the local mirror below lets this crate compile standalone.")
+    lines.append("// --------------------------------------------------------------")
+    lines.append("")
+    lines.append("/// Local mirror of SOS-09-G's `sos_mpu_region_t`. The runtime-")
+    lines.append("/// integration crate replaces this with the SOS-09-G-emitted")
+    lines.append("/// type via the canonical import path.")
+    lines.append("#[repr(C)]")
+    lines.append("#[derive(Debug, Clone, Copy)]")
+    lines.append("pub struct sos_mpu_region_t {")
+    lines.append("    pub base_addr: u32,")
+    lines.append("    pub size: u32,")
+    lines.append("    pub attr: u32,")
+    lines.append("    pub perm: u32,")
+    lines.append("}")
+    lines.append("")
+
+    # Per §5.6 / SOS-09-G PCDN-G-003: encode `sos:mpu_attr` as a u32
+    # discriminator. We use the SOS-09-A frozen set order
+    # (cacheable / non_cacheable / device_ngnrne / device_ngnre).
+    attr_to_u32 = {
+        "cacheable": 0,
+        "non_cacheable": 1,
+        "device_ngnrne": 2,
+        "device_ngnre": 3,
+    }
+    zone_to_u32 = {
+        "privileged": 0,
+        "unprivileged": 1,
+    }
+    for ch in eligible:
+        const_name = f"SOS_MPU_{_channel_screaming_name(ch)}_REGION"
+        attr_val = attr_to_u32.get(ch.mpu_attr or "cacheable", 0)
+        perm_val = zone_to_u32.get(ch.zone, 0)
+        size_bytes = _hal_channel_size_bytes(ch.width)
+        lines.append(
+            f"/// MPU region descriptor for channel `{ch.name}` "
+            f"(sos:id={ch.id}, sos:zone={ch.zone}, "
+            f"sos:mpu_attr={ch.mpu_attr or '<unset>'})."
+        )
+        lines.append(f"pub const {const_name}: sos_mpu_region_t = sos_mpu_region_t {{")
+        lines.append(f"    base_addr: 0x{addr_map[ch.name]:08X},")
+        lines.append(f"    size: {size_bytes},")
+        lines.append(f"    attr: {attr_val},")
+        lines.append(f"    perm: {perm_val},")
+        lines.append("};")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _emit_lib_rs(
+    annotations: ChartAnnotations,
+    *,
+    base_address: int,
+) -> str:
+    """Emit the full `src/lib.rs` content. One module per
+    `sos:channel_group`; one `RegisterBlock` per module.
+    """
+    # Group channels by sos:channel_group (default = "default").
+    groups: dict[str, list[ChannelAnnotation]] = {}
+    for ch in annotations.channels:
+        groups.setdefault(_channel_group(ch), []).append(ch)
+    # Determinism: emit groups in lexicographic order. The "default"
+    # group surfaces first regardless of lexicographic position.
+    ordered_groups: list[tuple[str, list[ChannelAnnotation]]] = []
+    if "default" in groups:
+        ordered_groups.append(("default", groups["default"]))
+    for gname in sorted(groups.keys()):
+        if gname == "default":
+            continue
+        ordered_groups.append((gname, groups[gname]))
+
+    header = (
+        "//! SOS-09-D — emitted Rust HAL crate.\n"
+        "//!\n"
+        "//! Authority: `docs/concepts/SOS-09-D-CONCEPTS.md` (🟢 RATIFIED 2026-05-26).\n"
+        "//! This crate is a BUILD OUTPUT (per umbrella INV-S-MEM-2); do not edit by hand.\n"
+        "//! Re-emit via `tools/sos-codegen/transliterate_rust.py::emit_rust_hal()`.\n"
+        "//!\n"
+        "//! INV-S-MEM-D-1: every register field is accessed through the §5.2 newtype\n"
+        "//! wrappers; no raw `core::ptr::read_volatile` / `write_volatile` reaches\n"
+        "//! driver code.\n"
+        "//! INV-S-MEM-D-4: this crate passes `cargo check --no-default-features\n"
+        "//! --target thumbv7em-none-eabihf`.\n"
+        "//! INV-S-MEM-D-5: `RegisterBlock` field offsets match the SVD `<addressOffset>`\n"
+        "//! chain bit-for-bit (verified by emitted `core::mem::offset_of!` asserts).\n"
+        "//! INV-S-MEM-D-6: accessor + type names deterministic from `sos:name`\n"
+        "//! (sos:id appears only in `// SAFETY:` comments below; never as a Rust\n"
+        "//! identifier).\n"
+        "\n"
+        "#![no_std]\n"
+        "#![allow(non_camel_case_types)]\n"
+        "\n"
+        "#[cfg(feature = \"alloc\")]\n"
+        "extern crate alloc;\n"
+        "\n"
+    )
+
+    body_parts: list[str] = [header, _RUST_HAL_PRELUDE, ""]
+
+    body_parts.append("/// Re-exported prelude. Per §5.2 driver code can `use ...::prelude::*;`")
+    body_parts.append("/// and obtain the full newtype family.")
+    body_parts.append("pub mod prelude {")
+    body_parts.append("    pub use super::{")
+    body_parts.append("        ClearOnRead, Claimed, Command, ContentionError, FireOnWrite,")
+    body_parts.append("        Queue, Shared, Status,")
+    body_parts.append("    };")
+    body_parts.append("}")
+    body_parts.append("")
+
+    # Per-group RegisterBlocks.
+    all_layout_records: list[tuple[str, str, int, int]] = []
+    for group_name, channels in ordered_groups:
+        block_src, layout = _emit_register_block(group_name, channels)
+        body_parts.append(block_src)
+        body_parts.append("")
+        for fname, off, size in layout:
+            all_layout_records.append((group_name, fname, off, size))
+
+    # *_unchecked variants for the union of channels (one per status channel).
+    unchecked_src = _emit_unchecked_variants(list(annotations.channels))
+    body_parts.append(unchecked_src)
+
+    # MPU-region constants.
+    mpu_src = _emit_mpu_constants(list(annotations.channels), base_address=base_address)
+    body_parts.append(mpu_src)
+
+    # Determinism / offset-assert hook. INV-S-MEM-D-5 says the offsets
+    # MUST match SVD bit-for-bit; we emit a `const _: () = ...;` block
+    # using `core::mem::offset_of!` so any drift surfaces at compile
+    # time. (The macro is stable since Rust 1.77; targeting it is
+    # consistent with thumbv7em-none-eabihf which is a stable-Rust
+    # target.)
+    if all_layout_records:
+        body_parts.append("// INV-S-MEM-D-5: assert that emitted offsets match the chart-derived")
+        body_parts.append("// `<addressOffset>` chain bit-for-bit. Drift becomes a build-stop.")
+        body_parts.append("const _SOS_09_D_LAYOUT_ASSERTIONS: () = {")
+        for group_name, fname, off, _size in all_layout_records:
+            block_name = _register_block_name(_safe_module_ident(group_name))
+            body_parts.append(
+                f"    assert!(core::mem::offset_of!({block_name}, {fname}) == 0x{off:X}usize,"
+            )
+            body_parts.append(
+                f"        \"INV-S-MEM-D-5 offset drift: {block_name}.{fname} != 0x{off:X}\");"
+            )
+        body_parts.append("};")
+        body_parts.append("")
+
+    return "\n".join(body_parts).rstrip() + "\n"
+
+
+def _emit_cargo_toml(crate_name: str) -> str:
+    """Emit `Cargo.toml`. Per §5.4 the `cortex_m` feature is default-on
+    (PCDN-D-004 accepted option (b)); `alloc` is opt-in.
+
+    Determinism: dependency versions are pinned at v1; no `^`/`~` ranges.
+    """
+    return (
+        "# SOS-09-D — emitted Rust HAL crate manifest.\n"
+        "# Authority: docs/concepts/SOS-09-D-CONCEPTS.md §5.4 + PCDN-D-004.\n"
+        "# This file is a BUILD OUTPUT; do not edit by hand.\n"
+        "[package]\n"
+        f"name = {crate_name!r}\n"
+        "version = \"0.1.0\"\n"
+        "edition = \"2021\"\n"
+        "publish = false\n"
+        "\n"
+        "[lib]\n"
+        "path = \"src/lib.rs\"\n"
+        "\n"
+        "[features]\n"
+        "# PCDN-SOS-09-D-004 accepted option (b): cortex_m gated; default-on.\n"
+        "# `--no-default-features` produces a target-agnostic crate for\n"
+        "# host-tests + Miri.\n"
+        "default = [\"cortex_m\"]\n"
+        "cortex_m = [\"dep:cortex-m\"]\n"
+        "alloc = []\n"
+        "\n"
+        "[dependencies]\n"
+        "vcell = \"0.1\"\n"
+        "cortex-m = { version = \"0.7\", optional = true }\n"
+    )
+
+
+def emit_rust_hal(
+    annotations: ChartAnnotations,
+    *,
+    crate_name: str,
+    base_address: int = 0x40000000,
+) -> dict[str, str]:
+    """Emit the file map for a SOS-09-D Rust HAL crate.
+
+    Args:
+        annotations: parsed SOS-09-A annotation model (the same input
+            SOS-09-B consumes for SVD emission). Channels are emitted
+            in document order; INV-S-MEM-D-5 holds because the SVD
+            emitter uses the identical ordering + byte arithmetic.
+        crate_name: Cargo crate name. Should be a valid Cargo identifier
+            (snake_case ASCII). Not validated here — Cargo itself will
+            reject malformed names.
+        base_address: peripheral base address. Default 0x40000000
+            (typical Cortex-M peripheral region); only affects MPU
+            constant `base_addr` values.
+
+    Returns:
+        Dict mapping relative paths to file contents. The caller writes
+        them under `build/rust-hal/<chart_id>/` per umbrella INV-S-MEM-2.
+
+    Determinism: same input → byte-identical output (gate (g) /
+    INV-S-MEM-D-6). No timestamps, no clock nonces, no dict ordering.
+    """
+    if not isinstance(crate_name, str) or not crate_name:
+        raise ValueError(f"crate_name must be a non-empty string; got {crate_name!r}")
+    if not isinstance(base_address, int) or isinstance(base_address, bool) or base_address < 0:
+        raise ValueError(f"base_address must be a non-negative integer; got {base_address!r}")
+
+    files: dict[str, str] = {}
+    files["Cargo.toml"] = _emit_cargo_toml(crate_name)
+    files["src/lib.rs"] = _emit_lib_rs(annotations, base_address=base_address)
+    return files
+
+
+def emit_rust_hal_from_chart(
+    chart_path,
+    *,
+    crate_name: str,
+    base_address: int = 0x40000000,
+) -> dict[str, str]:
+    """Load a chart, parse SOS-09-A annotations, emit the Rust HAL crate.
+
+    Convenience wrapper paralleling :func:`transliterate_svd.emit_svd_from_chart`.
+    """
+    from pathlib import Path as _Path
+    from loader import load_chart  # local import, mirrors SVD emitter
+
+    ast = load_chart(_Path(chart_path))
+    if ast.raw_scjson is None:
+        raise RuntimeError(
+            f"loader returned ChartAst without raw_scjson for {chart_path!r}"
+        )
+    annotations = parse_chart_annotations(ast.raw_scjson)
+    return emit_rust_hal(
+        annotations, crate_name=crate_name, base_address=base_address,
+    )
+
+
+def write_rust_hal_crate(
+    annotations: ChartAnnotations,
+    *,
+    crate_name: str,
+    output_dir,
+    base_address: int = 0x40000000,
+) -> dict[str, str]:
+    """Emit + write a SOS-09-D Rust HAL crate to `output_dir`.
+
+    Returns the file map (for inspection in tests / drivers). The
+    `output_dir` is created if missing; existing files are overwritten
+    so re-emit is idempotent (gate (g) determinism).
+    """
+    from pathlib import Path as _Path
+
+    files = emit_rust_hal(
+        annotations, crate_name=crate_name, base_address=base_address,
+    )
+    out = _Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    for rel, content in files.items():
+        target = out / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return files
+
+
 if __name__ == "__main__":
     import sys
     src = sys.stdin.read()

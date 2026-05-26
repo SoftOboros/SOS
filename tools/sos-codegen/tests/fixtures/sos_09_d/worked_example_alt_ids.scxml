@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-09-D `sos:name`-determinism gate (i) fixture: same channel set as
+  `worked_example.scxml`, differing only in `sos:id` UUIDs. Per
+  INV-S-MEM-D-6, emitted Rust symbol names (struct fields, MPU const
+  names) MUST derive from `sos:name` only and MUST be byte-identical
+  across UUID variation. The `sos:id` only appears inside `// SAFETY:`
+  comments and the per-channel doc comment (a documented variation
+  surface acknowledged by gate (i)).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="RX_STATUS_CH"
+       other_attributes='{"sos:mpu_background": "kernel_default"}'>
+
+  <state id="RX_STATUS_CH"
+         other_attributes='{
+           "sos:id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+           "sos:name": "rx_status",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:width": 32,
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "ready", "start_bit": 0, "width": 1, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0},
+               {"name": "count", "start_bit": 1, "width": 7, "access": "RO", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="go" target="TX_COMMAND_CH"/>
+  </state>
+
+  <state id="TX_COMMAND_CH"
+         other_attributes='{
+           "sos:id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+           "sos:name": "tx_command",
+           "sos:kind": "command",
+           "sos:dir": "sw→hw",
+           "sos:width": 32,
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "start", "start_bit": 0, "width": 1, "access": "WO", "side_effect": "side-effect-on-write", "reset_value": 0},
+               {"name": "mode", "start_bit": 4, "width": 4, "access": "RW", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="done" target="REGION"/>
+  </state>
+
+  <parallel id="REGION">
+    <state id="PLAIN_STATUS_CH"
+           other_attributes='{
+             "sos:id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+             "sos:name": "plain_status",
+             "sos:kind": "status",
+             "sos:dir": "hw→sw",
+             "sos:width": 32,
+             "sos:irq": "plain_irq",
+             "sos:mpu_attr": "device_ngnrne"
+           }'/>
+
+    <state id="PLAIN_COMMAND_CH"
+           other_attributes='{
+             "sos:id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+             "sos:name": "plain_command",
+             "sos:kind": "command",
+             "sos:dir": "sw→hw",
+             "sos:width": 32
+           }'/>
+
+    <state id="IO_QUEUE_CH"
+           other_attributes='{
+             "sos:id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+             "sos:name": "io_queue",
+             "sos:kind": "queue",
+             "sos:dir": "bidirectional",
+             "sos:width": 32
+           }'/>
+
+    <state id="SHARED_BLOCK_CH"
+           other_attributes='{
+             "sos:id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+             "sos:name": "shared_block",
+             "sos:kind": "shared",
+             "sos:dir": "bidirectional",
+             "sos:width": 32,
+             "sos:zone": "unprivileged",
+             "sos:mutex": "shared_lock"
+           }'/>
+  </parallel>
+
+</scxml>
