@@ -79,10 +79,14 @@ class TestDocExists:
             "Doc MUST begin with `# SOS-09-G` top-level heading."
         )
 
-    def test_status_drafted(self, doc_text: str) -> None:
-        # Per SOS-08-A precedent, the status badge appears near the top.
-        assert "🟡" in doc_text and "drafted" in doc_text, (
-            "Doc MUST carry a 🟡 drafted status badge."
+    def test_status_ratified(self, doc_text: str) -> None:
+        # Post-2026-05-25 ratification, the top-of-file status MUST
+        # be 🟢 ratified (the original 🟡 drafted marker was flipped
+        # when the four PCDNs walked).
+        head = doc_text.split("## 0.", 1)[0]
+        assert "🟢" in head and "ratified" in head.lower(), (
+            "Doc top-of-file MUST carry a 🟢 ratified status badge "
+            "post-2026-05-25 PCDN ratification."
         )
 
 
@@ -469,10 +473,24 @@ class TestSection16ChangeLog:
             "§16 first entry SHOULD say `Initial draft`."
         )
 
-    def test_status_drafted(self, doc_text: str) -> None:
+    def test_initial_draft_preserved(self, doc_text: str) -> None:
+        # The Initial draft change-log entry MUST be preserved as
+        # institutional memory even post-ratification; the per-doc
+        # 🟢 ratified entry sits AFTER the initial-draft entry.
         section16 = _section_slice(doc_text, 16)
         assert "🟡" in section16 and "drafted" in section16, (
-            "§16 first entry MUST end with 🟡 drafted status."
+            "§16 MUST preserve the Initial draft 🟡 drafted status "
+            "as institutional memory."
+        )
+
+    def test_ratification_entry_present(self, doc_text: str) -> None:
+        """§16 MUST carry a 🟢 Ratified entry post-2026-05-25 walkthrough."""
+        section16 = _section_slice(doc_text, 16)
+        assert "### 2026-05-25 — Ratified" in section16, (
+            "§16 MUST carry a `### 2026-05-25 — Ratified` entry."
+        )
+        assert "🟢" in section16, (
+            "§16 ratification entry MUST include a 🟢 ratified marker."
         )
 
 

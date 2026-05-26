@@ -75,18 +75,14 @@ class TestDocPresence:
             "as the CMSIS-SVD emission path."
         )
 
-    def test_drafted_status_marker(self, concepts_text: str) -> None:
-        # The doc opens with a 🟡 drafted status marker (PCDNs open).
-        # When PCDNs walk through, future commits flip this to 🟢
-        # ratified — until then, the drafted marker is the expected
-        # state.
+    def test_ratified_status_marker(self, concepts_text: str) -> None:
+        # Post-2026-05-25 ratification, the top-of-file status MUST be
+        # 🟢 ratified (the original 🟡 drafted marker was flipped
+        # when the five PCDNs walked).
         first_block = concepts_text[:500]
-        assert (
-            "🟡 **drafted" in first_block
-            or "🟢 **ratified" in first_block
-        ), (
-            "Top-of-file MUST carry a status marker "
-            "(🟡 drafted or 🟢 ratified)."
+        assert "🟢 **ratified" in first_block, (
+            "Top-of-file MUST carry a 🟢 ratified status marker "
+            "post-2026-05-25 PCDN ratification."
         )
 
 

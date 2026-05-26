@@ -1,19 +1,26 @@
 """SOS-09-A chart-annotation-surface concepts doc assertions.
 
-@spec  docs/concepts/SOS-09-A-CONCEPTS.md 2026-05-25 initial draft.
+@spec  docs/concepts/SOS-09-A-CONCEPTS.md (initial draft 2026-05-25;
+       ratified 2026-05-25 per the §16 ratification entry).
 @spec  docs/concepts/SOS-09-CONCEPTS.md §6 "SOS-09-A — Chart annotation
        surface" (umbrella sub-phase entry).
 @spec  docs/concepts/SOS-09-CONCEPTS.md §16 2026-05-25 amendment
        (PCDN-SOS-09-001 routed annotations through `other_attributes`).
 
-This module verifies that `SOS-09-A-CONCEPTS.md` exists with the
-expected section layout, the nine-key permitted attribute set, the four
-frozen `kind` enum values, the seven cross-sub-phase invariants
-(INV-S-MEM-A-1 through 7), at least three open PCDNs filed for user
-ratification, the §8 standards-integration matrix `compose` row for
-iState `other_attributes`, a draft-status §16 change-log entry, and
-the absence of any `xmlns:sos` namespace declaration in the doc body.
+This module verifies that `SOS-09-A-CONCEPTS.md` carries the
+expected section layout, the **ten-key** permitted attribute set
+(post-PCDN-SOS-09-A-003 ratification 2026-05-25, with `sos:name`
+added as a new required key), the four frozen `kind` enum values,
+the seven cross-sub-phase invariants (INV-S-MEM-A-1 through 7), the
+RFC 4122 UUID shape on `sos:id`, the SV-identifier shape on
+`sos:name`, the §8 standards-integration matrix `compose` row for
+iState `other_attributes`, and the absence of any `xmlns:sos`
+namespace declaration in the doc body.
 
+@invariants  INV-S-MEM-A-1 / INV-S-MEM-A-2 (post-PCDN-SOS-09-A-003
+             ratification: `sos:id` is UUID-shaped identity handle;
+             `sos:name` is SV-identifier-shaped emission-facing handle;
+             four required keys instead of three).
 @invariants  INV-S-MEM-A-3 / INV-S-MEM-A-4 (no XML namespace
              reinterpretation; `xmlns:sos` declarations rejected) —
              verified by asserting the doc body contains no
@@ -36,9 +43,11 @@ _CONCEPTS_PATH = _REPO_ROOT / "docs" / "concepts" / "SOS-09-A-CONCEPTS.md"
 # Frozen enum values mirrored from SOS-09 §5.1.
 _KIND_ENUM_VALUES = ("status", "command", "queue", "shared")
 
-# The nine `sos:`-prefixed keys per §5.2.
+# The ten `sos:`-prefixed keys per §5.2 (post-PCDN-SOS-09-A-003
+# ratification 2026-05-25 — added `sos:name`).
 _PERMITTED_KEYS = (
     "sos:id",
+    "sos:name",
     "sos:kind",
     "sos:dir",
     "sos:zone",
@@ -122,17 +131,26 @@ def test_section_5_enumerates_each_permitted_key(
     )
 
 
-def test_section_5_enumerates_nine_keys(concepts_text: str) -> None:
-    """§5 MUST enumerate exactly nine `sos:`-prefixed keys."""
+def test_section_5_enumerates_ten_keys(concepts_text: str) -> None:
+    """§5 MUST enumerate exactly ten `sos:`-prefixed keys.
+
+    Post-PCDN-SOS-09-A-003 ratification 2026-05-25: `sos:name` was
+    added as a new required key, alongside the original nine.
+    The §5 section MAY mention additional `sos:`-prefixed keys
+    (e.g. `sos:mpu_attr`, `sos:mpu_background` referenced from
+    SOS-09-G); the assertion ensures the ten-key set is fully
+    present, not that it is the only set referenced.
+    """
     # Slice from §5 heading through §6 heading.
     section_5 = _slice_section(concepts_text, "## 5.", "## 6.")
     # Count distinct `sos:KEY` occurrences in §5.
     distinct = set(re.findall(r"`sos:([a-z_]+)`", section_5))
     expected_suffixes = {k.split(":", 1)[1] for k in _PERMITTED_KEYS}
-    assert distinct == expected_suffixes, (
-        f"§5 permitted-key set mismatch.\n"
-        f"  expected: {sorted(expected_suffixes)}\n"
-        f"  found:    {sorted(distinct)}"
+    missing = expected_suffixes - distinct
+    assert not missing, (
+        f"§5 permitted-key set missing keys: {sorted(missing)}.\n"
+        f"  expected at least: {sorted(expected_suffixes)}\n"
+        f"  found:             {sorted(distinct)}"
     )
 
 
@@ -246,25 +264,33 @@ def test_section_8_mirrors_sos_09_kind_enum(concepts_text: str) -> None:
 # --- §16 change log ----------------------------------------------------
 
 
-def test_section_16_has_draft_status_entry(concepts_text: str) -> None:
-    """§16 MUST carry an entry naming this initial draft (🟡 drafted)."""
+def test_section_16_has_initial_draft_entry(concepts_text: str) -> None:
+    """§16 MUST preserve the initial-draft change-log entry as institutional memory."""
     section_16 = _slice_section(concepts_text, "## 16.", None)
     assert "Initial draft" in section_16, (
-        "§16 must carry an 'Initial draft' change-log entry"
-    )
-    assert "drafted" in section_16.lower(), (
-        "§16 must declare drafted status (e.g. 'Status: 🟡 drafted')"
+        "§16 must preserve the 'Initial draft' change-log entry"
     )
 
 
-def test_top_of_file_status_is_drafted(concepts_text: str) -> None:
-    """The doc header MUST declare status drafted (not yet ratified)."""
+def test_section_16_has_ratification_entry(concepts_text: str) -> None:
+    """§16 MUST carry a 2026-05-25 ratification entry post-PCDN walkthrough."""
+    section_16 = _slice_section(concepts_text, "## 16.", None)
+    assert "### 2026-05-25 — Ratified" in section_16, (
+        "§16 must carry a `### 2026-05-25 — Ratified` entry"
+    )
+    assert "🟢" in section_16, (
+        "§16 ratification entry must include a 🟢 ratified marker"
+    )
+
+
+def test_top_of_file_status_is_ratified(concepts_text: str) -> None:
+    """The doc header MUST declare 🟢 ratified status post-2026-05-25."""
     head = concepts_text.split("## 0.", 1)[0]
-    assert "drafted" in head.lower(), (
-        "Top-of-file `**Status:**` line must declare drafted state"
+    assert "ratified" in head.lower(), (
+        "Top-of-file `**Status:**` line must declare ratified state"
     )
-    assert "ratified" not in head.lower() or "umbrella" not in head, (
-        "Top-of-file must NOT prematurely claim ratified status"
+    assert "🟢" in head, (
+        "Top-of-file must carry a 🟢 status marker"
     )
 
 
@@ -334,6 +360,170 @@ def test_section_5_1_cites_each_parent_context(
     section_5 = _slice_section(concepts_text, "## 5.", "## 6.")
     assert parent_element in section_5, (
         f"§5.1 must cite parent context {parent_element!r}"
+    )
+
+
+# --- PCDN-SOS-09-A-003 ratification: UUID `sos:id` + new `sos:name` ----
+
+
+def test_section_5_sos_id_is_uuid(concepts_text: str) -> None:
+    """§5 MUST declare `sos:id` as RFC 4122 UUID shape.
+
+    Per PCDN-SOS-09-A-003 ratification 2026-05-25, `sos:id` is the
+    cross-doc source-of-uniqueness-truth: an RFC 4122 UUID in
+    canonical hyphenated form. The earlier SV-identifier shape on
+    `sos:id` is retracted.
+    """
+    section_5 = _slice_section(concepts_text, "## 5.", "## 6.")
+    # The §5.2 key table row for `sos:id` MUST cite UUID + RFC 4122.
+    assert "UUID" in section_5, (
+        "§5 MUST cite `UUID` as the shape of `sos:id`"
+    )
+    assert "RFC 4122" in section_5, (
+        "§5 MUST cite RFC 4122 as the canonical UUID specification"
+    )
+
+
+def test_section_5_sos_id_is_not_sv_identifier(concepts_text: str) -> None:
+    """§5 MUST NOT describe `sos:id` as SV-identifier-shaped.
+
+    Per PCDN-SOS-09-A-003 ratification 2026-05-25, the SV-identifier
+    shape on `sos:id` was retracted in favour of RFC 4122 UUID.
+    The §5.2 row for `sos:id` MUST NOT carry the SV-identifier
+    description.
+    """
+    section_5 = _slice_section(concepts_text, "## 5.", "## 6.")
+    # Look at the §5.2 Markdown table row for `sos:id` specifically.
+    for line in section_5.splitlines():
+        if (
+            line.lstrip().startswith("|")
+            and "`sos:id`" in line
+            and "required" in line
+        ):
+            # The `sos:id` row MUST NOT call it SV identifier.
+            assert "SV identifier" not in line, (
+                "§5.2 `sos:id` row MUST NOT describe `sos:id` as "
+                "SV-identifier shape post-PCDN-SOS-09-A-003 ratification"
+            )
+            return
+    pytest.fail(
+        "§5.2 must carry a `sos:id` required table row for the "
+        "assertion to apply"
+    )
+
+
+def test_section_5_sos_name_is_required_sv_identifier(
+    concepts_text: str,
+) -> None:
+    """§5 MUST declare `sos:name` as a NEW required key (SV-identifier).
+
+    Per PCDN-SOS-09-A-003 ratification 2026-05-25, `sos:name` is added
+    as a required key (SV-identifier shape; unique within the composed
+    scope path per PCDN-SOS-09-A-002 namespaced compose). Used as the
+    emission-facing handle (SVD register name, RTL signal name, C
+    macro name).
+    """
+    section_5 = _slice_section(concepts_text, "## 5.", "## 6.")
+    # The §5.2 table row for `sos:name` MUST cite SV identifier + required.
+    # Restrict to true Markdown table rows (starting with `|`).
+    for line in section_5.splitlines():
+        if (
+            line.lstrip().startswith("|")
+            and "`sos:name`" in line
+            and "required" in line
+        ):
+            assert "SV identifier" in line, (
+                "§5.2 `sos:name` row MUST declare SV-identifier shape"
+            )
+            return
+    pytest.fail(
+        "§5.2 must carry a `sos:name` required table row "
+        "(post-PCDN-SOS-09-A-003 ratification 2026-05-25)"
+    )
+
+
+def test_section_5_required_attribute_count_is_four(
+    concepts_text: str,
+) -> None:
+    """§5.4 rule (2) MUST require four keys (added `sos:name`).
+
+    Post-PCDN-SOS-09-A-003 ratification: required-attribute count
+    grows from three (`sos:id`, `sos:kind`, `sos:dir`) to four
+    (`sos:id`, `sos:name`, `sos:kind`, `sos:dir`).
+    """
+    section_5 = _slice_section(concepts_text, "## 5.", "## 6.")
+    # The §5.4 rule (2) prose MUST name the four required keys.
+    pattern = re.compile(
+        r"\*\*\(2\).*?(?=\*\*\(3\)|\Z)",
+        re.DOTALL,
+    )
+    match = pattern.search(section_5)
+    assert match is not None, "§5.4 must carry a rule (2) about required attributes"
+    rule_2 = match.group(0)
+    for key in ("sos:id", "sos:name", "sos:kind", "sos:dir"):
+        assert key in rule_2, (
+            f"§5.4 rule (2) MUST cite required key {key!r} "
+            f"(post-PCDN-SOS-09-A-003 ratification 2026-05-25)"
+        )
+
+
+def test_section_5_4_rule_7_demands_uuid_for_sos_id(
+    concepts_text: str,
+) -> None:
+    """§5.4 rule (7) MUST demand UUID shape on `sos:id`.
+
+    Post-PCDN-SOS-09-A-003 ratification: rule (7) was updated to
+    require RFC 4122 UUID on `sos:id`. The SV-identifier requirement
+    moved to `sos:name`.
+    """
+    section_5 = _slice_section(concepts_text, "## 5.", "## 6.")
+    pattern = re.compile(
+        r"\*\*\(7\).*?(?=\*\*\(8\)|\*\*\(9\)|\Z)",
+        re.DOTALL,
+    )
+    match = pattern.search(section_5)
+    assert match is not None, "§5.4 must carry a rule (7) about `sos:id` shape"
+    rule_7 = match.group(0)
+    assert "UUID" in rule_7 or "RFC 4122" in rule_7, (
+        "§5.4 rule (7) MUST demand RFC 4122 UUID shape on `sos:id`"
+    )
+
+
+def test_pcdn_a_003_marked_ratified(concepts_text: str) -> None:
+    """§15 PCDN-SOS-09-A-003 MUST carry a 🟢 ratified marker."""
+    section_15 = _slice_section(concepts_text, "## 15.", "## 16.")
+    # Find the PCDN-SOS-09-A-003 entry; assert a 🟢 ratified marker
+    # appears within the entry's body.
+    pattern = re.compile(
+        r"\*\*PCDN-SOS-09-A-003.*?(?=\*\*PCDN-SOS-09-A-|\Z)",
+        re.DOTALL,
+    )
+    match = pattern.search(section_15)
+    assert match is not None, "§15 must carry a PCDN-SOS-09-A-003 entry"
+    body = match.group(0)
+    assert "🟢" in body and "ratified" in body, (
+        "§15 PCDN-SOS-09-A-003 entry MUST carry a 🟢 ratified marker "
+        "(post-2026-05-25 ratification)"
+    )
+
+
+@pytest.mark.parametrize(
+    "pcdn_num",
+    ["001", "002", "003", "004"],
+)
+def test_each_pcdn_marked_ratified(concepts_text: str, pcdn_num: str) -> None:
+    """All four §15 PCDN-SOS-09-A-NNN entries MUST carry 🟢 ratified markers."""
+    section_15 = _slice_section(concepts_text, "## 15.", "## 16.")
+    pcdn_label = f"PCDN-SOS-09-A-{pcdn_num}"
+    pattern = re.compile(
+        rf"\*\*{re.escape(pcdn_label)}.*?(?=\*\*PCDN-SOS-09-A-|\Z)",
+        re.DOTALL,
+    )
+    match = pattern.search(section_15)
+    assert match is not None, f"§15 must carry a {pcdn_label} entry"
+    body = match.group(0)
+    assert "🟢" in body and "ratified" in body, (
+        f"§15 {pcdn_label} entry MUST carry a 🟢 ratified marker"
     )
 
 

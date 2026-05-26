@@ -1,6 +1,6 @@
 # SOS-09-G — MPU configuration emission
 
-**Status:** 🟡 **drafted 2026-05-25**, awaiting PCDN walkthrough (see §15).
+**Status:** 🟢 **ratified 2026-05-25** — all four PCDNs walked; see §16 ratification entry.
 
 ## 0. Authority policy
 
@@ -96,12 +96,23 @@ Each chart-declared channel maps to one MPU region descriptor tuple `{base_addr,
 
 - **`base_addr`**: derived from SOS-09-B's chart-declared address-offset assignment for the channel. MUST be aligned to the region `size` (architectural requirement; ARM ARM B3.5.7). If the channel's natural offset is not aligned, the codegen pads the region down to the next aligned boundary AND uses SRD per §5.4 to mask the unused sub-regions.
 - **`size`**: smallest power of two enclosing the channel's register footprint, padded up to satisfy alignment. Encoded as `log2(size_in_bytes) - 1` in the `SIZE` field of `MPU_RASR` (5 bits). Minimum 32 B (`SIZE=0b00100`), maximum 4 GB (`SIZE=0b11111`).
-- **`attr`**: **`Device-nGnRnE`** (strongly-ordered, non-cacheable, non-shareable) at v1 — register-mapped peripherals. Encoded as `TEX=0b000`, `S=0`, `C=0`, `B=0` in `MPU_RASR`. PCDN-SOS-09-G-003 covers attribute selection.
+- **`attr`**: Per PCDN-SOS-09-G-003 ratification 2026-05-25 (narrowed scope): the default attribute depends on the **portion** of the channel being covered.
+  - The **register portion** of any channel (status / command / queue) → **`Device-nGnRnE`** (strongly-ordered, non-cacheable, non-shareable). Encoded as `TEX=0b000`, `S=0`, `C=0`, `B=0` in `MPU_RASR`.
+  - The **shared-channel datamodel portion** (the DPRAM-backed shared memory belonging to a `kind="shared"` channel) → **`Normal Cacheable`** to allow the MPU-protected side to participate in normal cacheable operations on shared memory. Encoded as `TEX=0b001`, `S=1`, `C=1`, `B=1` (typical write-back / write-allocate; precise encoding lives in §5.4-adjacent emission code, mirrored from CMSIS-Core's `ARM_MPU_RASR_EX` helper macros).
+  - **Non-shared SCXML datamodel stays OUTSIDE the MPU table** (covered by the background region per §5.5, PCDN-SOS-09-G-002 ratification).
+  - **Chart-author override.** A `sos:mpu_attr` annotation on a channel via `other_attributes` overrides the default. Permitted values per PCDN-SOS-09-G-003 ratification 2026-05-25: `cacheable`, `non_cacheable`, `device_ngnrne`, `device_ngnre`. **Scope-inheritance semantics**: `sos:mpu_attr` declared on a parent element propagates to child shared-datamodel items; a child-element declaration overrides the parent.
 - **`perm`**: derived from the chart-declared `sos:zone` per the following mapping (encoded as `AP[2:0]` in `MPU_RASR`, per ARM DDI 0403E.e B3.5.6 Table B3-15):
   - `sos:zone="privileged"` → `AP=0b001` (RW priv, no unpriv access — "Privileged Access only").
   - `sos:zone="unprivileged"` → `AP=0b011` (RW full — "Full Access").
 
-The XN (Execute Never) bit MUST be set to 1 for all SOS-09-G-emitted regions — register-mapped peripherals are not code. The TYPEEXT bit and the C/B/S sub-fields all default to the `Device-nGnRnE` shape above.
+The XN (Execute Never) bit MUST be set to 1 for all SOS-09-G-emitted regions covering register portions — register-mapped peripherals are not code. For shared-channel datamodel regions, XN MUST also be set to 1 — shared data is not code either. The TYPEEXT bit and the C/B/S sub-fields default to the `Device-nGnRnE` shape for register portions and to the `Normal Cacheable` shape for shared-datamodel portions per the attribute rules above.
+
+**Coverage scope (PCDN-SOS-09-G-003 ratification 2026-05-25, narrowed).** The MPU table covers exactly two categories of regions:
+
+1. **Register channels** — every SOS-09 channel with `kind ∈ {status, command, queue}`, plus the `shared` channel's chart-top register surface (the register portion of the shared channel — the doorbell / status / size registers, not the DPRAM payload).
+2. **Shared-channel datamodel scopes** — M shared-datamodel regions, **one per `shared`-channel's datamodel scope** (NOT per-item; regions aggregate per the channel they belong to).
+
+**Non-shared SCXML datamodel stays OUTSIDE the MPU table.** Items in the chart's `<datamodel>` that are NOT part of a `shared` channel are covered by the background region (per PCDN-SOS-09-G-002 ratification — `PRIVDEFENA=1` kernel-mode default).
 
 Frozen-enumeration registration policy: **Standards Action**.
 
@@ -162,12 +173,14 @@ Frozen-enumeration registration policy: **Standards Action**.
 
 ### 5.5 MPU enable invariant — `sos_mpu_install()` shape
 
+**Chart-root annotation key (PCDN-SOS-09-G-002 ratification 2026-05-25).** The chart's root `<scxml>` element MAY carry a `sos:mpu_background` key in `other_attributes` with value `"kernel_default"` or `"strict"`. When absent, the default is `"kernel_default"` (background region enabled for privileged accesses; `PRIVDEFENA=1`). `"strict"` disables the background region (`PRIVDEFENA=0`) — every accessed address must lie in an explicit region. Per the user clarification at the ratification session, "secure by default" is an **iState user setting** (UI-level default that gets injected into new charts at create time), NOT a build-time codegen flag — codegen reads whatever the chart's `sos:mpu_background` says at codegen time; absent = `kernel_default`. No CodeBuild env var or `--mpu-background=...` codegen flag exists.
+
 Emitted runtime hooks include a `sos_mpu_install()` function with the following behaviour:
 
 1. Disable MPU (`MPU_CTRL.ENABLE = 0`) before reconfiguration.
 2. For each row in `sos_mpu_table`: write `MPU_RBAR` with `base_addr | VALID=1 | REGION=region_num`; write `MPU_RASR` with the packed `{size_log2, attr, perm, srd, ENABLE=1}` encoding.
 3. Disable any unused region slots (`MPU_RBAR` write with `REGION=k` and `MPU_RASR.ENABLE=0`) so that prior boot state cannot leak into an undeclared region.
-4. Set `PRIVDEFENA=1` in `MPU_CTRL` (background region enabled for privileged accesses) per PCDN-SOS-09-G-002 recommendation. Set `HFNMIENA=0` (MPU disabled for HardFault / NMI / FAULTMASK handlers) per ARM ARM default.
+4. Set `PRIVDEFENA` in `MPU_CTRL` according to the chart's `sos:mpu_background` value (per PCDN-SOS-09-G-002 ratification 2026-05-25): `kernel_default` (absent or explicit) → `PRIVDEFENA=1`; `strict` → `PRIVDEFENA=0`. Set `HFNMIENA=0` (MPU disabled for HardFault / NMI / FAULTMASK handlers) per ARM ARM default.
 5. Set `MPU_CTRL.ENABLE = 1`.
 6. Issue `DSB` then `ISB` to ensure the MPU is in effect before the next instruction fetch.
 
@@ -304,13 +317,13 @@ These are the open questions whose resolution moves this doc from 🟡 drafted t
 
 Frozen-enumeration registration policy for all four PCDNs below: **Standards Action** (each touches a load-bearing decision either on the cross-target axis or on the protection-end-to-end invariant; later relaxation requires a §16 amendment).
 
-- **PCDN-SOS-09-G-001 — Region budget overflow policy.** If a chart declares more privileged-distinct zones than the target MPU has regions (e.g. 9 zones on Cortex-M3's 8 regions, or 17 zones on Cortex-M7's 16), is the emit a hard error or does the codegen attempt to merge contiguous same-perm regions? **Recommendation**: hard error at v1 with an explicit "increase target MPU or reduce zone count" message; merging is a follow-on optimisation. Rationale: silent merging breaks INV-S-MEM-G-2 (regions are sized exactly to the chart-declared channel footprint) because merged regions span addresses outside any single channel's footprint; the chart-author should make the merge intent explicit by combining channels rather than relying on the codegen to do it.
+- **PCDN-SOS-09-G-001 — Region budget overflow policy.** 🟢 **ratified 2026-05-25 — see §16 ratification entry below.** If a chart declares more protected regions than the target MPU has, is the emit a hard error or does the codegen attempt to merge contiguous same-perm regions? **Note (per ratification 2026-05-25)**: the region count is (N register channels) + (M shared-datamodel scopes), NOT (N register channels + all SCXML datamodel items) — non-shared SCXML datamodel stays outside the MPU table (covered by the background region per PCDN-SOS-09-G-002). **Recommendation**: hard error at v1 with an explicit "increase target MPU or reduce protected-region count" message; merging is a follow-on optimisation. Rationale: silent merging breaks INV-S-MEM-G-2 (regions are sized exactly to the chart-declared channel footprint) because merged regions span addresses outside any single channel's footprint; the chart-author should make the merge intent explicit by combining channels rather than relying on the codegen to do it.
 
-- **PCDN-SOS-09-G-002 — Background region policy.** Enable (`PRIVDEFENA=1` — kernel-mode access outside chart regions succeeds via the architectural default memory map) vs disable (`PRIVDEFENA=0` — strict; kernel must also map regions for every address it accesses, including SRAM / flash / peripherals not declared in the chart). **Recommendation**: enable at v1. Rationale: the chart-author controls peripherals declared in the chart; demanding the chart-author also declare SRAM / flash / ITCM / DTCM regions just to permit kernel access is friction without security benefit (kernel code is trusted by construction in the SOS model). Disabling the background region is a future opt-in for chart-authors building hardened deployments where the kernel itself is sandboxed.
+- **PCDN-SOS-09-G-002 — Background region policy.** 🟢 **ratified 2026-05-25 — see §16 ratification entry below.** Enable (`PRIVDEFENA=1` — kernel-mode access outside chart regions succeeds via the architectural default memory map) vs disable (`PRIVDEFENA=0` — strict; kernel must also map regions for every address it accesses, including SRAM / flash / peripherals not declared in the chart). **Recommendation**: kernel-mode default (`PRIVDEFENA=1`) when the chart doesn't specify; chart-root `other_attributes` switch `sos:mpu_background="kernel_default" | "strict"` allows explicit override. Per the ratification 2026-05-25, "secure by default" is an **iState user setting** (UI-level default that gets injected into new charts at create time), NOT a build-time codegen flag — codegen reads whatever the chart says. Rationale: kernel code is trusted by construction in the SOS model; chart-authors who want a sandboxed-kernel deployment opt-in via `sos:mpu_background="strict"`.
 
-- **PCDN-SOS-09-G-003 — Memory attribute selection.** `Device-nGnRnE` (strongly-ordered) vs `Device-nGnRE` (no early write acknowledge but ordered) vs `Normal Non-cacheable`. **Recommendation**: `Device-nGnRnE` at v1 for safety. Rationale: register-mapped peripherals are the v1 use case (per SOS-09 §5.2's channel-category enum); strongly-ordered is the safest default — no merging, no reordering, no caching. Cache-attribute overrides (for queue channels backed by DPRAM where cacheable access would be a perf win) are deferred to a PCDN follow-on once the perf gap is measured.
+- **PCDN-SOS-09-G-003 — Memory attribute selection.** 🟢 **ratified 2026-05-25 — see §16 ratification entry below.** `Device-nGnRnE` (strongly-ordered) vs `Device-nGnRE` (no early write acknowledge but ordered) vs `Normal Non-cacheable` vs `Normal Cacheable`. **Narrowed scope (per ratification 2026-05-25 — "only shared get the datamodel treatment")**: register portions of any channel (status / command / queue, and the `shared` channel's chart-top register surface) → `Device-nGnRnE`; **`shared`-channel datamodel scopes** (the DPRAM-backed shared memory) → `Normal Cacheable` to allow the MPU-protected side to participate in normal cacheable operations on shared memory; non-shared SCXML datamodel stays outside the MPU table (covered by background region). **New chart-author override key**: `sos:mpu_attr` declared on a channel via `other_attributes`, valid values: `cacheable`, `non_cacheable`, `device_ngnrne`, `device_ngnre`. Override semantics: declared on a parent element propagates to child shared-datamodel items (scope inheritance); child-element declaration overrides parent. Region aggregation along shared seams: M shared-datamodel regions, one per `shared`-channel's datamodel scope (NOT per-item; aggregated by the channel they belong to).
 
-- **PCDN-SOS-09-G-004 — Per-target attribute differences.** Cortex-M7 has additional memory attributes vs Cortex-M3 / M4 (cacheability, shareability, TEX[2:0] sub-types per ARM DDI 0403E.e B3.5.6 Table B3-13). Chart-author exposed (per-target attribute set) vs codegen-fixed (the `Device-nGnRnE` default works on all ARMv7-M targets uniformly)? **Recommendation**: codegen-fixed at v1. Rationale: the `Device-nGnRnE` default works on all ARMv7-M targets without per-target chart-author intervention; the chart stays target-agnostic per INV-S15 (SOS-00 §10). Chart override is deferred — when a chart-author needs a non-default attribute (cacheable queue channel on M7), the override path lands as a `sos:mpu_attr` annotation in a future SOS-09-G amendment.
+- **PCDN-SOS-09-G-004 — Per-target attribute differences.** 🟢 **ratified 2026-05-25 — see §16 ratification entry below.** Cortex-M7 has additional memory attributes vs Cortex-M3 / M4 (cacheability, shareability, TEX[2:0] sub-types per ARM DDI 0403E.e B3.5.6 Table B3-13). Chart-author exposed (per-target attribute set) vs codegen-fixed (the per-portion defaults of G-003 work on all ARMv7-M targets uniformly)? **Recommendation**: codegen-fixed at v1. The full vendor-attribute-set chart-author exposure is a future "more general vendor support pass" — likely lands as part of broader vendor onboarding work (Cortex-M33+ TrustZone, custom Lattice attributes, etc.), not standalone. Rationale: the codegen-fixed defaults work on all ARMv7-M targets without per-target chart-author intervention; the chart stays target-agnostic per INV-S15 (SOS-00 §10).
 
 ## 16. Change log
 
@@ -327,3 +340,28 @@ Frozen-enumeration registration policy for all four PCDNs below: **Standards Act
 - §15 four PCDNs raised: region budget overflow policy; background region policy; memory attribute selection; per-target attribute differences. All recommendations toward strict / safe defaults with explicit chart-override-or-future-amendment escape hatches.
 
 Status: 🟡 **drafted**, awaiting PCDN walkthrough.
+
+### 2026-05-25 — Ratified (Ira)
+
+All four PCDNs walked and resolved in a ratification session 2026-05-25. PCDN-SOS-09-G-001, -002, and -003 carry amendment language; PCDN-SOS-09-G-004 ratified as-is.
+
+| PCDN | Resolution | Registration policy |
+|---|---|---|
+| **PCDN-SOS-09-G-001 — Region budget overflow policy** | ✅ Hard error when region budget overflows; explicit "increase target MPU or reduce protected-region count" message. **Per the narrowed scope of G-003**: the region count is (N register channels) + (M shared-datamodel scopes), NOT (N register channels + all SCXML datamodel items). Non-shared SCXML datamodel stays outside the MPU table (covered by the background region per G-002). | Standards Action |
+| **PCDN-SOS-09-G-002 — Background region policy** | ✅ Kernel-mode default (`PRIVDEFENA=1`) when the chart doesn't specify. **Chart-root `other_attributes` switch added**: `sos:mpu_background="kernel_default" | "strict"`. "Secure by default" becomes an **iState user setting** (UI-level default that gets injected into new charts at create time), NOT a build-time codegen flag — codegen reads whatever the chart's `sos:mpu_background` says at codegen time; absent = `kernel_default`. No CodeBuild env var, no `--mpu-background=...` codegen flag. | Standards Action |
+| **PCDN-SOS-09-G-003 — Memory attribute selection** | ✅ Ratified with **NARROWED scope vs the original PCDN**. Registers (SOS-09 channels with `kind ∈ {status, command, queue}`, AND the `shared` channel's chart-top register surface) get `Device-nGnRnE`. **The `shared` channel's datamodel-aggregated region (the DPRAM-backed shared memory) gets `Normal Cacheable`** to allow the MPU-protected side to participate in normal cacheable operations on shared memory. **Non-shared SCXML datamodel stays OUTSIDE the MPU table** — covered by the background region (per G-002 default). **New chart-author override key**: `sos:mpu_attr` declared on a channel via `other_attributes`, valid values: `cacheable`, `non_cacheable`, `device_ngnrne`, `device_ngnre`. Override semantics: declared on a parent element propagates to child shared-datamodel items (scope inheritance); child-element declaration overrides parent. **Region aggregation along shared seams**: M shared-datamodel regions, one per `shared`-channel's datamodel scope (NOT per-item; aggregated by the channel they belong to). This narrowing was a key clarification — the user explicitly said "only shared get the datamodel treatment". | Standards Action |
+| **PCDN-SOS-09-G-004 — Per-target attribute differences** | ✅ Codegen-fixed at v1. The full vendor-attribute-set chart-author exposure is a future "more general vendor support pass" — likely lands as part of broader vendor onboarding work (Cortex-M33+ TrustZone, custom Lattice attributes, etc.), not standalone. | Standards Action |
+
+**New chart-level annotation keys introduced.**
+
+- `sos:mpu_background` (chart-root only) — per PCDN-SOS-09-G-002 ratification. Values: `kernel_default` (default) / `strict`.
+- `sos:mpu_attr` (per channel / per shared-datamodel item) — per PCDN-SOS-09-G-003 ratification. Values: `cacheable` / `non_cacheable` / `device_ngnrne` / `device_ngnre`. Scope-inheritance semantics.
+
+**Spec amendments landing with this ratification.**
+
+- **§5.2 attr derivation.** The `attr` rule split per portion: register portion → `Device-nGnRnE`; shared-channel datamodel portion → `Normal Cacheable`; non-shared SCXML datamodel → not in the MPU table. Chart-author `sos:mpu_attr` override added with scope-inheritance semantics.
+- **§5.2 coverage scope.** New paragraph naming the two MPU-table categories (register channels + shared-channel datamodel scopes) and explicitly excluding non-shared SCXML datamodel.
+- **§5.5 `sos:mpu_background` chart-root key.** New annotation key on the chart's root `<scxml>` element controlling `PRIVDEFENA`. Codegen reads the chart; no codegen flag. iState injects the user-preference default at chart-create time.
+- **§5.5 `sos_mpu_install()` step 4.** Updated to read `sos:mpu_background` from the chart instead of hard-coding `PRIVDEFENA=1`.
+
+Status: 🟢 **ratified**. SOS-09-G's MPU configuration emission contract is stable; the protection end-to-end claim (INV-S-MEM-3) is now codified across both the HW gate (SOS-09-E) and the SW MPU fence (this sub-phase). Implementation work on `tools/sos-codegen/mpu_emit.py` is unblocked.
