@@ -256,8 +256,8 @@ This phase does NOT:
 A conforming SOS-10 ratification satisfies:
 
 - (a) ✅ PCDN-SOS-10-001 through 008 resolved — see §15 2026-05-23 ratification entry.
-- (b) ⏸ The MCU + FPGA + gateway worked example (§9) instantiated as a buildable demonstration on the bench substrate (Lattice ECP5 + STM32H747I-DISCO; the gateway runs on a host Linux machine connected via LAN).
-- (c) ⏸ Each of the 4 media has at least one cross-piece event tested end-to-end via cocotb-equivalent harness. (Wave-16 landed unit-test coverage on 3 of 4 emitters; cocotb-equivalent end-to-end harness still pending. `network` emitter not yet implemented — deferred to a follow-on wave.)
+- (b) ⏸ The MCU + FPGA + gateway worked example (§9) instantiated as a buildable demonstration on the bench substrate (Lattice ECP5 + STM32H747I-DISCO; the gateway runs on a host Linux machine connected via LAN). (Wave-17 landed the chart skeleton at `examples/orchestrator_mcu_fabric_gateway.scxml` exercising all four media + both network transports; bench-side build + run still pending.)
+- (c) ⏸ Each of the 4 media has at least one cross-piece event tested end-to-end via cocotb-equivalent harness. (Wave-16 + wave-17 landed unit-test coverage on all 4 media: in-process, shared-memory, mmio, and network (protobuf IDL + gRPC stubs + AMQP messages). End-to-end cocotb-equivalent harness still pending.)
 - (d) ⏸ Cross-piece bounded-reachability vectors emitted; INV-SOS-H rendered failures in chart vocabulary verified manually on a deliberate broken-protocol case.
 - (e) ✅ SOS-09 + SOS-12 cited correctly with no semantic duplication; SOS-10 strictly composes them. (Wave-16: the `mmio` emitter generates SOS-09 channel annotations as inputs to the SOS-09 emitter family rather than re-emitting any SOS-09 artifact; the `in-process` and `shared-memory` emitters cite their primitive layers explicitly and emit `@spec` blocks naming the source-of-truth phases.)
 - (f) ✅ INV-S-ORCH-1 through 6 cited correctly in the implementation phase. (Wave-16: every emitted artifact carries an `@spec` comment block citing §6.x of this doc + the relevant INV-S-ORCH-N invariants + INV-SOS-A.)
@@ -349,3 +349,21 @@ Implementation wave landed across four parallel agents + one sequential pre-step
 **Network emitter deferred** to a follow-on wave. Substantial scope: protobuf .proto generation + gRPC service stubs (server + client) + AMQP message schemas + wire-format derivation per INV-S-ORCH-4 + timeout/idempotency annotation handling. Splitting it from this wave keeps in-process / shared-memory / mmio thin and tractable.
 
 Test suite delta (full SOS-codegen suite): 2181 → 2246 passing (+65), 2 skipped (Yosys + iverilog, environmental, unchanged).
+
+### 2026-05-26 — Wave-17 implementation (network medium + worked-example chart)
+
+Wave-17 closes out the four-medium emitter family with the network medium (deferred from wave-16) and lands the §9 worked-example chart as a parsing-ready skeleton:
+
+- **SOS10-PROTO** (`9fd1832` / `d8ce7f9`): protobuf IDL emitter — canonical wire format per PCDN-SOS-10-002. Emits proto3 `.proto` files per chart (`build/network/<chart_id>/orchestrator.proto` + `<piece_id>_service.proto`) plus an `amqp_routing.json` metadata sidecar consumed by the AMQP emitter. Alphabetical message ordering, hex8 package suffix from `sos:id`, scalar-type mapping with default-`bytes` + TODO comment. +22 tests; +1 skip (protoc).
+- **SOS10-GRPC** (`790d202` / `113b521`): gRPC service-stub emitter — Rust `tonic` server + client stubs derived from the protobuf IDL. Role-asymmetric emission (source-only → client only; target-only → server only; bidirectional → both). Timeout precedence transport > medium > 5000ms default per PCDN-SOS-10-006. PCDN-SOS-10-005 idempotency `SAFETY:` comment block on non-idempotent transitions. +32 tests; +1 skip (cargo offline).
+- **SOS10-AMQP** (`7dbef8f` / `17933ac`): AMQP message-handler emitter — Rust `lapin` producer + consumer + topology stubs with protobuf-encoded message bodies. Timeout default 10000ms per PCDN-SOS-10-006. PCDN-SOS-10-005 emitter-time WARN log on non-idempotent AMQP transitions. ExchangeKind::Direct per chart-explicit routing-key matching; topology declaration is idempotent. +25 tests.
+- **SOS10-EXAMPLE** (`807dcc5` / `6f11662`): §9 worked-example chart at `examples/orchestrator_mcu_fabric_gateway.scxml` — three pieces (`mcu` rust, `fabric` vhdl, `gateway` rust) with five cross-piece transitions exercising all four media and both network transports. Smoke-test confirms the chart parses cleanly through `sos10_annotations.parse_orchestrator_annotations`. +6 tests.
+
+**§12 acceptance gate status update**:
+- (b) ⏸ still pending bench-side build; chart skeleton now exists (was missing pre-wave-17).
+- (c) ⏸ still pending cocotb-equivalent end-to-end harness; all 4 media now have unit-test coverage (network was missing pre-wave-17).
+- (d) ⏸ unchanged — bounded-reachability vector emission + INV-SOS-H chart-vocabulary failure rendering pending.
+
+**Network-medium implementation complete**. The remaining ⏸ gates ((b)/(c)/(d)) are integration / bench / vector-emission concerns, not emitter-implementation concerns.
+
+Test suite delta (full SOS-codegen suite): 2246 → 2331 passing (+85), 4 skipped (Yosys + iverilog + protoc + cargo-offline, environmental).
