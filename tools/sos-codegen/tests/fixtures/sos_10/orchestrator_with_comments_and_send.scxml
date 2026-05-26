@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- scjson 0.4.0 feature-surface smoke fixture (SOS-ROADMAP-07-PLUS §12).
+     Exercises help_text (root + per-state comments), <send>, <invoke>,
+     and other_attributes registry in one short chart. NOT a valid SOS-10
+     orchestrator chart — purely a corpus for the smoke tests. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="idle">
+
+  <!-- Help text for the idle state: this should attach via CONV-F. -->
+  <state id="idle"
+         other_attributes='{"sos:channel_group": "default"}'>
+    <transition event="audio.start" target="running">
+      <send event="kernel.audio.start"
+            delay="100ms"
+            target="#_internal"
+            namelist="rate channels"/>
+    </transition>
+  </state>
+
+  <state id="running">
+    <invoke id="codec_init"
+            src="urn:sos:codec"
+            autoforward="true">
+      <finalize>
+        <log expr="'codec_init finalized'"/>
+      </finalize>
+    </invoke>
+    <transition event="audio.stop" target="idle"/>
+  </state>
+
+</scxml>

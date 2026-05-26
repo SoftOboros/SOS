@@ -62,6 +62,18 @@ Validation:
 - Only ``peripheral_grouping="one"`` is supported at v1.
 """
 
+# @spec: scjson 0.4.0 feature integration (roadmap-tracked, NOT current scope)
+#   Per SOS-09-CONCEPTS.md §16 (2026-05-26) and SOS-ROADMAP-07-PLUS.md §12,
+#   the scjson 0.4.0 feature surface (help_text, comment promotion, XInclude,
+#   <send>, <invoke>, other_attributes registry) is available upstream but
+#   NOT consumed by this emitter. Integration is roadmap-tracked.
+#   - help_text: chart XML comments could become emitted doc-comments (Rust ///, C /** */).
+#   - XInclude: chart-composition at parse time could collapse multi-file charts.
+#   - <send>/<invoke>: SOS-10 orchestrator-driven events; this emitter's per-channel
+#     surface is unchanged.
+#   Smoke tests confirming feature accessibility live in
+#   tests/test_scjson_04_features.py.
+
 from __future__ import annotations
 
 import re
