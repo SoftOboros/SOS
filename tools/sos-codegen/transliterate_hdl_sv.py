@@ -4072,6 +4072,71 @@ def one_hot_value(index: int, n_states: int) -> str:
     return _one_hot_value(index, n_states)
 
 
+# ---------------------------------------------------------------------------
+# SOS-09-E HDL register-file emission integration
+# ---------------------------------------------------------------------------
+#
+# @spec  docs/concepts/SOS-09-E-CONCEPTS.md §5.1..§5.7 (frozen decisions)
+# @spec  docs/concepts/SOS-09-E-CONCEPTS.md §6 INV-S-MEM-E-1..6
+# @spec  docs/concepts/SOS-09-E-CONCEPTS.md §13 "Files cited" — this walker
+#        listed as the SystemVerilog entry point that the SOS-09-E phase
+#        EXTENDS (not rewrites) with the sos_regfile template emission.
+#
+# The regfile emission body lives in ``transliterate_regfile.py`` (a
+# sibling module — single source for both VHDL + SystemVerilog so
+# INV-S-MEM-E-5 holds by construction).
+
+
+def render_regfile_sv(
+    chart_ir: Any,
+    config: Any,
+) -> dict[str, str]:
+    """Emit the SOS-09-E ``sos_regfile`` SystemVerilog-2017 source.
+
+    Args:
+        chart_ir: raw scjson dict (same shape as ``render_target``).
+        config: dict / namespace carrying:
+            - ``peripheral_name`` (str): module-base name.
+            - ``bus_type`` (str): ``"axi4lite"`` (default) or ``"apb"``.
+            - ``base_address`` (int): default 0x40000000.
+            - ``bus_clock_domain`` (str): default ``"bus"``.
+
+    Returns:
+        ``{"sos_regfile_<peripheral>.sv": <text>}``.
+
+    Raises:
+        Sos09RegfileError: validation failure (duplicate channel, bad
+            bus type, etc.) — see ``transliterate_regfile.py``.
+    """
+    from sos09_annotations import parse_chart_annotations  # noqa: WPS433
+    from transliterate_regfile import emit_regfile  # noqa: WPS433
+
+    if isinstance(config, dict):
+        peripheral_name = config.get("peripheral_name") or config.get("chart_name") or "chart"
+        bus_type = config.get("bus_type", "axi4lite")
+        base_address = int(config.get("base_address", 0x40000000))
+        bus_clock_domain = config.get("bus_clock_domain", "bus")
+    else:
+        peripheral_name = (
+            getattr(config, "peripheral_name", None)
+            or getattr(config, "chart_name", None)
+            or "chart"
+        )
+        bus_type = getattr(config, "bus_type", "axi4lite")
+        base_address = int(getattr(config, "base_address", 0x40000000))
+        bus_clock_domain = getattr(config, "bus_clock_domain", "bus")
+
+    annotations = parse_chart_annotations(chart_ir)
+    files = emit_regfile(
+        annotations,
+        peripheral_name=peripheral_name,
+        bus_type=bus_type,
+        base_address=base_address,
+        bus_clock_domain=bus_clock_domain,
+    )
+    return {k: v for k, v in files.items() if k.endswith(".sv")}
+
+
 if __name__ == "__main__":  # pragma: no cover — dev / debug entry
     import sys
     from pathlib import Path

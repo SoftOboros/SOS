@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-09-E worked-example fixture: a regfile with at least one channel
+  of each kind (status / command / queue / shared), exercising:
+
+    - bit_layout with reserved bits + clear-on-read (gates b, c, e)
+    - side-effect-on-write (gate registered fire strobe — PCDN-E-006(b))
+    - sos:privilege_region partition (gate f — one strobe-latch per region)
+    - sos:zone="unprivileged" channel (gate d — read-clear gating exercised
+      via the privilege axis)
+    - cross-clock-domain channel via sos:clock_domain (PCDN-E-004(a))
+
+  Per SOS-09-A §5.1, allowed parent contexts are <state> and <parallel>.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="STATUS_RX">
+
+  <!--
+    Channel 1: status / hw→sw / clear-on-read field + reserved high bits.
+    privilege_region="core" — joins violation aggregator "core".
+  -->
+  <state id="STATUS_RX"
+         other_attributes='{
+           "sos:id": "aaaa1111-1111-4111-8111-111111111111",
+           "sos:name": "rx_status",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:zone": "privileged",
+           "sos:width": 32,
+           "sos:irq": "rx_irq",
+           "sos:privilege_region": "core",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "ready", "start_bit": 0, "width": 1, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0},
+               {"name": "count", "start_bit": 1, "width": 7, "access": "RO", "side_effect": null, "reset_value": 0},
+               {"name": "reserved_hi", "start_bit": 8, "width": 24, "access": "reserved", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="go" target="CMD_TX"/>
+  </state>
+
+  <!--
+    Channel 2: command / sw→hw / side-effect-on-write + RW field + reserved gap.
+    Cross-clock-domain marker via sos:clock_domain="hw_clk".
+  -->
+  <state id="CMD_TX"
+         other_attributes='{
+           "sos:id": "bbbb2222-2222-4222-8222-222222222222",
+           "sos:name": "tx_command",
+           "sos:kind": "command",
+           "sos:dir": "sw→hw",
+           "sos:width": 32,
+           "sos:privilege_region": "core",
+           "sos:clock_domain": "hw_clk",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "start", "start_bit": 0, "width": 1, "access": "WO", "side_effect": "side-effect-on-write", "reset_value": 0},
+               {"name": "mode",  "start_bit": 4, "width": 4, "access": "RW", "side_effect": null, "reset_value": 3}
+             ]
+           }
+         }'>
+    <transition event="done" target="REGIONS"/>
+  </state>
+
+  <!--
+    Channel 3+4 in a parallel block. Channel 3 is queue; channel 4 is shared.
+    Channel 5 is a deliberately-unprivileged status channel in a SECOND
+    privilege_region ("dma") — exercises one-strobe-latch-per-region.
+  -->
+  <parallel id="REGIONS"
+            other_attributes='{
+              "sos:id": "cccc3333-3333-4333-8333-333333333333",
+              "sos:name": "io_queue",
+              "sos:kind": "queue",
+              "sos:dir": "bidirectional",
+              "sos:width": 32,
+              "sos:privilege_region": "core"
+            }'>
+    <state id="SHARED_REG"
+           other_attributes='{
+             "sos:id": "dddd4444-4444-4444-8444-444444444444",
+             "sos:name": "shared_block",
+             "sos:kind": "shared",
+             "sos:dir": "bidirectional",
+             "sos:width": 32,
+             "sos:mutex": "shared_lock",
+             "sos:privilege_region": "core"
+           }'/>
+
+    <state id="DMA_STATUS"
+           other_attributes='{
+             "sos:id": "eeee5555-5555-4555-8555-555555555555",
+             "sos:name": "dma_status",
+             "sos:kind": "status",
+             "sos:dir": "hw→sw",
+             "sos:zone": "unprivileged",
+             "sos:width": 32,
+             "sos:irq": "dma_irq",
+             "sos:privilege_region": "dma"
+           }'/>
+  </parallel>
+
+</scxml>

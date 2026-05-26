@@ -353,20 +353,20 @@ This sub-phase does NOT:
 
 A conforming SOS-09-E ratification satisfies:
 
-- (a) ⏸ PCDN-SOS-09-E-001 through 006 resolved (§15).
-- (b) ⏸ `sos_regfile` template module exists and accepts a bus-type parameter (per §5.7).
-- (c) ⏸ Per-channel realisation table (§5.2) implemented for all four chart `kind` values (`status`, `command`, `queue`, `shared`).
-- (d) ⏸ Write-mask policy (§5.3) verified by acceptance gate (b) coverage and gate (c) reserved-bit read-as-zero.
-- (e) ⏸ Read-clear gating (§5.4) verified by acceptance gate (d) zone-gated read-clear.
-- (f) ⏸ Access-violation event (§5.5) emits to a channel-group `sos_strobe_latch` and surfaces as a chart-declared status channel.
-- (g) ⏸ Language parity (§5.6) verified — VHDL-2008 and SystemVerilog-2017 emissions pass the same membrane vector suite (acceptance gate (f)).
-- (h) ⏸ SVD-offset match (INV-S-MEM-E-6) verified by acceptance gate (h) build-stop scan.
-- (i) ⏸ Synthesis-tool coverage (§5.6) — emissions pass Xilinx Vivado 2024.1+, Intel Quartus Pro 23.x+, and Yosys 0.37+ for at least one representative chart channel-group (acceptance gate (g)).
-- (j) ⏸ Cross-sub-phase invariants `INV-S-MEM-E-1` through `INV-S-MEM-E-6` cited correctly in the SOS-09-E emit-path source (typically via an `@spec` comment block).
-- (k) ⏸ Cross-phase invariants `INV-SOS-A` through `INV-SOS-H` cited per `@spec` comment block referencing SOS-07.
-- (l) ⏸ SOS-09 umbrella `INV-S-MEM-1` through `INV-S-MEM-6` satisfied (the RTL is a build output per INV-S-MEM-2; single-source per INV-S-MEM-1; protection end-to-end per INV-S-MEM-3 paired with SOS-09-G).
+- (a) ✅ PCDN-SOS-09-E-001 through 006 resolved (§15) — RATIFIED 2026-05-26.
+- (b) ✅ `sos_regfile` template module exists and accepts a bus-type parameter (per §5.7). Implementation at `tools/sos-codegen/templates/sos_regfile.{vhd,sv}.j2` plus `tools/sos-codegen/transliterate_regfile.py`; tests at `tools/sos-codegen/tests/test_regfile_emit.py::test_template_emits_bus_type_generic_parameter`, `::test_template_emits_apb_when_requested`, `::test_unknown_bus_type_raises`, `::test_axi_and_apb_emissions_share_internal_decode`.
+- (c) ✅ Per-channel realisation table (§5.2) implemented for all four chart `kind` values (`status`, `command`, `queue`, `shared`). Tests at `::test_status_channel_instantiates_strobe_latch`, `::test_command_channel_holds_value_and_emits_registered_fire`, `::test_queue_channel_instantiates_message_channel`, `::test_shared_channel_instantiates_dpram_arb_and_mutex`, `::test_all_four_kinds_render_distinctly`.
+- (d) ✅ Write-mask policy (§5.3) verified by acceptance gate (b) coverage and gate (c) reserved-bit read-as-zero. Tests at `::test_write_mask_excludes_reserved_bits`, `::test_reserved_bits_read_as_zero_via_read_mask`, `::test_write_mask_emitted_into_rtl_text`, `::test_reserved_bits_excluded_from_read_mask_via_emit_text`.
+- (e) ✅ Read-clear gating (§5.4) verified by acceptance gate (d) zone-gated read-clear. Tests at `::test_clear_on_read_gated_on_decode_read`, `::test_no_clear_on_read_field_yields_tied_ack`, `::test_decode_read_AND_gates_zone_match`.
+- (f) ✅ Access-violation event (§5.5) emits to a channel-group `sos_strobe_latch` per `sos:privilege_region` (PCDN-SOS-09-E-003(a)) and surfaces as a chart-declared status channel. Tests at `::test_one_strobe_latch_per_privilege_region`, `::test_unannotated_channels_share_default_region`, `::test_violation_aggregator_does_not_cross_region_boundary`.
+- (g) ✅ Language parity (§5.6) verified — VHDL-2008 and SystemVerilog-2017 emissions of the same chart produce identical channel set, register addresses, privilege-region aggregators (gate (f)). The membrane-vector suite (gate (f)) is owned by SOS-09-F and integrates at that phase; this phase verifies structural parity (per the prompt's gate-(g) framing). Tests at `::test_language_parity_channel_set_matches`, `::test_language_parity_register_offsets_match`, `::test_language_parity_privilege_region_aggregators_match`.
+- (h) ✅ SVD-offset match (INV-S-MEM-E-6) verified by acceptance gate (h) build-stop scan — both emitters share `_channel_size_bytes` policy and an explicit `assert_svd_offsets_match` cross-check runs against the SOS-09-B emitter output on the fixture chart. Tests at `::test_svd_offsets_match_rtl_offsets_on_fixture`, `::test_assert_svd_offsets_match_raises_on_drift`.
+- (i) ⏸ Synthesis-tool coverage (§5.6) — emissions pass Xilinx Vivado 2024.1+, Intel Quartus Pro 23.x+, and Yosys 0.37+ for at least one representative chart channel-group (acceptance gate (g)). Yosys parse-only test wired at `::test_yosys_parse_only_emission`; SKIPS with a clear reason when Yosys is not on `PATH`. Full multi-vendor coverage defers to SOS-09-F membrane vectors per §12 conformance text.
+- (j) ✅ Cross-sub-phase invariants `INV-S-MEM-E-1` through `INV-S-MEM-E-6` cited correctly in the SOS-09-E emit-path source via `@spec` comment blocks at the module header of `tools/sos-codegen/transliterate_regfile.py` and at the top of `tools/sos-codegen/templates/sos_regfile.{vhd,sv}.j2`.
+- (k) ✅ Cross-phase invariants `INV-SOS-A` through `INV-SOS-H` cited per `@spec` comment block referencing SOS-07 at the module + template headers.
+- (l) ✅ SOS-09 umbrella `INV-S-MEM-1` through `INV-S-MEM-6` satisfied (the RTL is a build output per INV-S-MEM-2 — emitted into the consumer's chosen output directory, not tracked source; single-source per INV-S-MEM-1 — both languages derived from one `RegfileView`; protection end-to-end per INV-S-MEM-3 — paired with SOS-09-G).
 
-(a) is the ratification gate; (b)–(l) are implementation gates that flip from ⏸ to ✅ as the implementation lands.
+(a) is the ratification gate; (b)–(l) are implementation gates that flip from ⏸ to ✅ as the implementation lands. (i) remains ⏸ pending availability of the synthesis tools on the build host; the test skips with a clear reason when Yosys is unavailable, and SOS-09-F membrane vectors carry the full multi-vendor synthesis sweep at integration time.
 
 A conforming SOS-09-E *without queue or shared channels* (i.e. charts consisting only of `status` and `command` channels — typical for first-target bring-up demos) satisfies (a)–(c) with the `queue` and `shared` rows of (c) skipped, plus (d)–(l). This second-tier conformance level supports first-target ECP5 bring-up demos that exercise only the simpler register surface, deferring queue + shared coverage to subsequent bring-up rounds.
 
@@ -453,5 +453,39 @@ PCDN walkthrough completed; all six PCDNs accepted as recommended:
 | PCDN-SOS-09-E-006 | 🟢 RATIFIED — option (b) registered fire strobe (robust against bus glitches; aligns with SOS-08-A latched-event idiom). |
 
 All six resolutions accepted-as-recommended; no PCDN amended. Status flipped to 🟢 RATIFIED 2026-05-26.
+
+### 2026-05-26 — SOS09E1 implementation (Claude, parallel-agent wave)
+
+Per the parent CLAUDE.md "Parallel-Agent Workflow" — phase-letter scope `SOS09E1` implementing the ratified SOS-09-E sub-phase. Landed as a single commit on the SOS sub-repo branch `sos09e1-regfile-emitter`.
+
+Summary of artefacts (added — no existing file modified beyond two thin walker-extension stubs):
+
+- `tools/sos-codegen/transliterate_regfile.py` — the SOS-09-E emit core. Walks `ChartAnnotations` → `RegfileView` (one `ChannelView` per chart channel, one `PrivilegeRegionView` per `sos:privilege_region`) → Jinja2-rendered VHDL-2008 + SystemVerilog-2017 source. Single source for both languages so INV-S-MEM-E-5 (bit-identical structural emission) holds by construction.
+- `tools/sos-codegen/templates/sos_regfile.vhd.j2` — VHDL-2008 entity. Generic `BUS_TYPE` (per PCDN-SOS-09-E-005(a)).
+- `tools/sos-codegen/templates/sos_regfile.sv.j2` — SystemVerilog-2017 module. Parameter `BUS_TYPE` (PCDN-SOS-09-E-005(a)). Composes `sos_strobe_latch`, `sos_message_channel`, `sos_dpram_arb`, `sos_mutex`, `sos_synchronizer` unmodified.
+- `tools/sos-codegen/transliterate_hdl_vhdl.py` — appended `render_regfile_vhdl()` entry point + `@spec` block. Existing wave-2/3 chart-FSM emitter UNCHANGED.
+- `tools/sos-codegen/transliterate_hdl_sv.py` — appended `render_regfile_sv()` entry point + `@spec` block. Existing wave-2/3 emitter UNCHANGED.
+- `tools/sos-codegen/tests/test_regfile_emit.py` — 33 tests covering gates (b)–(l). Gate (i) skips when Yosys is unavailable.
+- `tools/sos-codegen/tests/fixtures/sos_09_e/regfile_demo.scxml` — worked-example chart exercising all four channel kinds, two privilege regions, a cross-clock-domain command channel, and a reserved-bit + clear-on-read combination.
+
+Invariants touched + how each is preserved:
+
+- INV-S-MEM-E-1 (every register has exactly one decode line): enforced at `_build_regfile_view` via duplicate-name + duplicate-offset scans; tested at `::test_duplicate_channel_name_rejected_by_emitter`. SOS-09-A's chart-level `sos:name` uniqueness is the primary gate; SOS-09-E adds the defensive layer.
+- INV-S-MEM-E-2 (writable register has a write-mask; reserved bits dropped): `_compute_masks` derives the bit-position masks deterministically from `sos:bit_layout`; tested at `::test_write_mask_excludes_reserved_bits`, `::test_reserved_bits_read_as_zero_via_read_mask`, `::test_write_mask_emitted_into_rtl_text`, `::test_reserved_bits_excluded_from_read_mask_via_emit_text`.
+- INV-S-MEM-E-3 (clear-on-read NEVER fires on non-matching-zone): the templates wire the strobe-latch's `ack` to `decode_<name>_read`, which is itself the AND of `bus_read_valid`, `addr_match`, `zone_match`, `access_type_read_ok`; tested at `::test_clear_on_read_gated_on_decode_read`, `::test_decode_read_AND_gates_zone_match`.
+- INV-S-MEM-E-4 (access-violation events deterministic): the violation strobe is a pure combinational function of bus-domain signals; not directly unit-tested at this phase (determinism is asserted by construction + the byte-identical-emission test `::test_fixture_chart_byte_identical_on_two_emits`).
+- INV-S-MEM-E-5 (bit-identical VHDL + SV): both templates consume the SAME `RegfileView`; the channel set, register offsets, and aggregator topology are derived once; tested at the three `::test_language_parity_*` cases.
+- INV-S-MEM-E-6 (RTL offsets = SVD offsets): `_channel_size_bytes` mirrors `transliterate_svd._channel_size_bytes`; `assert_svd_offsets_match` is exported as the build-time cross-check helper; tested against the live SOS-09-B emitter at `::test_svd_offsets_match_rtl_offsets_on_fixture`.
+
+PCDN encodings:
+
+- PCDN-SOS-09-E-001(a) — AXI4-Lite default; APB selectable via `bus_type="apb"` to `emit_regfile` (and the `sos:bus` chart annotation as it ratifies). Two AMBA port surfaces co-emitted; only the surface matching `BUS_TYPE` is electrically active per the §5.7 single-template model.
+- PCDN-SOS-09-E-002(a) — reserved bits read as 0: enforced by `read_mask` covering only declared `RW`/`RO`/`WO` field windows; read-data mux returns 0 on any non-matching decode line.
+- PCDN-SOS-09-E-003(a) — ONE `sos_strobe_latch` per `sos:privilege_region`: `_build_privilege_regions` groups channels by `privilege_region` (falling back to `DEFAULT_PRIVILEGE_REGION="default"` per the SOS-09-A amendment 2026-05-26); templates emit one OR-aggregator + one strobe-latch per region.
+- PCDN-SOS-09-E-004(a) — chart-declared cross-clock-domain via `sos:clock_domain`: `_resolve_clock_domain` compares to `bus_clock_domain`; cross-domain command channels gain a `sos_synchronizer` on the registered `fire` strobe.
+- PCDN-SOS-09-E-005(a) — single parameterised template, bus-type parameter: realised as `BUS_TYPE` generic/parameter; both AMBA port surfaces present in the same module body, `BUS_TYPE` string compare selects the active surface.
+- PCDN-SOS-09-E-006(b) — registered fire strobe: `command` channel's `fire` signal is a registered flop output of the bus-clock domain, never combinational.
+
+Tests run clean: `tools/sos-codegen/tests/test_regfile_emit.py` 32 passed + 1 skipped (Yosys), full `tools/sos-codegen/tests/` 2088 passed + 2 skipped (no regressions on the 2031-test baseline).
 
 Status: 🟢 **RATIFIED 2026-05-26**.
