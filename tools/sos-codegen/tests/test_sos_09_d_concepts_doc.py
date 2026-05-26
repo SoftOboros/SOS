@@ -21,16 +21,18 @@
        (SOS-08-A / SOS-09-B as reference shapes).
 
 This module verifies that the SOS-09-D-CONCEPTS.md doc is structurally
-sound:
+sound (post 2026-05-26 ratification):
 
-  - Status banner is 🟡 DRAFT (awaiting PCDN walkthrough).
+  - Status banner is 🟢 RATIFIED 2026-05-26.
   - Required sections (§0..§16) present.
   - §5 has the six frozen-decisions subsections §5.1..§5.6 each
     declaring a registration policy.
   - §6 declares the six INV-S-MEM-D-1..6 invariants.
-  - §15 files five PCDNs (PCDN-SOS-09-D-001 through 005) with
-    🟡 PENDING USER WALKTHROUGH markers.
-  - §16 marked as awaiting ratification.
+  - §15 carries five PCDNs (PCDN-SOS-09-D-001 through 005) marked
+    🟢 RATIFIED 2026-05-26 with their chosen-option letters.
+  - §16 carries the 2026-05-26 ratified entry, including the D-001
+    borrow-checker enclosing-scope clarification and the D-005
+    SAFETY-rollup + chart-bounds-analyzer dual-TCB role note.
   - §4 source-of-truth map carries at least one AuthorityRelationship
     row.
   - The doc cites SOS-09 umbrella + SOS-09-A + SOS-09-B + SOS-09-G as
@@ -91,20 +93,21 @@ class TestDocPresence:
             "as the Rust HAL trait emission path."
         )
 
-    def test_draft_status_marker(self, concepts_text: str) -> None:
-        # Pre-ratification, the top-of-file status MUST be
-        # 🟡 DRAFT (awaiting PCDN walkthrough).
+    def test_ratified_status_marker(self, concepts_text: str) -> None:
+        # Post-ratification: top-of-file status MUST be
+        # 🟢 RATIFIED 2026-05-26.
         first_block = concepts_text[:500]
-        assert "🟡 **DRAFT" in first_block, (
-            "Top-of-file MUST carry a 🟡 DRAFT status marker "
-            "pre-ratification (awaiting PCDN walkthrough)."
+        assert "🟢 **RATIFIED" in first_block, (
+            "Top-of-file MUST carry a 🟢 RATIFIED status marker "
+            "post 2026-05-26 walkthrough."
         )
 
-    def test_draft_date_present(self, concepts_text: str) -> None:
-        # Draft date naming the 2026-05-26 ratification round.
+    def test_ratified_date_present(self, concepts_text: str) -> None:
+        # The 2026-05-26 ratification date.
         first_block = concepts_text[:500]
         assert "2026-05-26" in first_block, (
-            "Top-of-file status MUST name the 2026-05-26 draft date."
+            "Top-of-file status MUST name the 2026-05-26 ratification "
+            "date."
         )
 
 
@@ -504,11 +507,10 @@ class TestSection15PCDNs:
             "fn for *_unchecked."
         )
 
-    def test_all_pcdns_marked_pending(self, section_15: str) -> None:
-        # Each PCDN body must carry a 🟡 PENDING USER WALKTHROUGH
-        # marker (pre-ratification).
+    def test_all_pcdns_marked_ratified(self, section_15: str) -> None:
+        # Each PCDN body MUST carry a 🟢 RATIFIED 2026-05-26 marker
+        # post-ratification.
         for pcdn in self.EXPECTED_PCDNS:
-            # Find the PCDN line.
             pattern = re.compile(
                 rf"\*\*{re.escape(pcdn)}.*?(?=- \*\*PCDN-SOS-09-D-|\Z)",
                 re.DOTALL,
@@ -518,17 +520,86 @@ class TestSection15PCDNs:
                 f"Could not locate {pcdn} block in §15."
             )
             pcdn_body = match.group(0)
-            assert "🟡" in pcdn_body, (
-                f"{pcdn} MUST carry a 🟡 status marker pre-ratification."
+            assert "🟢" in pcdn_body, (
+                f"{pcdn} MUST carry a 🟢 RATIFIED status marker "
+                f"post-ratification."
             )
-            assert "PENDING" in pcdn_body.upper(), (
-                f"{pcdn} MUST carry a PENDING status text "
-                f"pre-ratification."
+            assert "RATIFIED" in pcdn_body.upper(), (
+                f"{pcdn} MUST carry a RATIFIED status text "
+                f"post-ratification."
             )
+
+    @pytest.mark.parametrize(
+        "pcdn_id,chosen_option",
+        [
+            ("PCDN-SOS-09-D-001", "(a)"),
+            ("PCDN-SOS-09-D-002", "(a)"),
+            ("PCDN-SOS-09-D-003", "(b)"),
+            ("PCDN-SOS-09-D-004", "(b)"),
+            ("PCDN-SOS-09-D-005", "(a)"),
+        ],
+    )
+    def test_pcdn_carries_chosen_option(
+        self, section_15: str, pcdn_id: str, chosen_option: str
+    ) -> None:
+        # Each PCDN's ratification line MUST name the chosen option
+        # letter.
+        pattern = re.compile(
+            rf"\*\*{re.escape(pcdn_id)}.*?(?=- \*\*PCDN-SOS-09-D-|\Z)",
+            re.DOTALL,
+        )
+        match = pattern.search(section_15)
+        assert match is not None, (
+            f"Could not locate {pcdn_id} block in §15."
+        )
+        body = match.group(0)
+        assert f"accepted option {chosen_option}" in body, (
+            f"{pcdn_id} MUST name `accepted option {chosen_option}` "
+            f"as the ratified choice."
+        )
+
+    def test_pcdn_001_borrow_checker_clarification(
+        self, section_15: str
+    ) -> None:
+        # PCDN-SOS-09-D-001 carries the borrow-checker
+        # enclosing-scope user clarification.
+        pattern = re.compile(
+            r"\*\*PCDN-SOS-09-D-001.*?(?=- \*\*PCDN-SOS-09-D-|\Z)",
+            re.DOTALL,
+        )
+        match = pattern.search(section_15)
+        assert match is not None, "Could not locate PCDN-SOS-09-D-001."
+        body = match.group(0)
+        assert "borrow checker" in body.lower(), (
+            "PCDN-SOS-09-D-001 MUST capture the borrow-checker "
+            "enclosing-scope ownership clarification."
+        )
+        assert "RegisterBlock" in body, (
+            "PCDN-SOS-09-D-001 MUST tie the borrow-checker scope to "
+            "the `RegisterBlock` enclosing scope."
+        )
+
+    def test_pcdn_005_dual_tcb_role(self, section_15: str) -> None:
+        # PCDN-SOS-09-D-005 carries the chart-bounds-analyzer
+        # dual-TCB role note.
+        pattern = re.compile(
+            r"\*\*PCDN-SOS-09-D-005.*?(?=- \*\*PCDN-SOS-09-D-|\Z)",
+            re.DOTALL,
+        )
+        match = pattern.search(section_15)
+        assert match is not None, "Could not locate PCDN-SOS-09-D-005."
+        body = match.group(0)
+        assert "TCB" in body, (
+            "PCDN-SOS-09-D-005 MUST name the TCB dual-role escalation "
+            "of the chart-bounds analyzer."
+        )
+        assert "chart-bounds" in body.lower() or "chart bounds" in body.lower(), (
+            "PCDN-SOS-09-D-005 MUST name the chart-bounds analyzer."
+        )
 
     def test_pcdns_carry_recommendation(self, section_15: str) -> None:
         # Each PCDN includes a `**Recommendation**:` line per the
-        # SOS-09-B precedent.
+        # SOS-09-B precedent (preserved on ratification).
         recommendation_count = section_15.count("**Recommendation**")
         pcdn_ids = set(re.findall(r"PCDN-SOS-09-D-\d{3}", section_15))
         assert recommendation_count >= len(pcdn_ids), (
@@ -557,21 +628,78 @@ def section_16(concepts_text: str) -> str:
 
 
 class TestSection16ChangeLog:
-    """§16 is marked as awaiting ratification (no §15-resolved entries)."""
+    """§16 carries the 2026-05-26 ratified entry covering all 5 D PCDNs."""
 
-    def test_change_log_awaits_ratification(self, section_16: str) -> None:
-        # Pre-ratification, §16 carries a placeholder noting that
-        # ratification has not yet happened.
-        assert "awaiting ratification" in section_16.lower(), (
-            "§16 MUST carry an 'awaiting ratification' marker "
-            "pre-ratification."
+    def test_ratified_entry_present(self, section_16: str) -> None:
+        # Post-ratification: §16 carries the 2026-05-26 Ratified entry.
+        assert "### 2026-05-26 — Ratified" in section_16, (
+            "§16 MUST carry a `### 2026-05-26 — Ratified` entry."
         )
 
-    def test_change_log_has_no_ratified_entry(self, section_16: str) -> None:
-        # A ratified entry would carry a '🟢 ratified' marker. The
-        # draft state has none.
-        assert "🟢 ratified" not in section_16, (
-            "§16 MUST NOT carry a 🟢 ratified marker pre-ratification."
+    def test_ratified_entry_lists_all_five_pcdns(self, section_16: str) -> None:
+        # The ratified entry MUST list all 5 PCDNs by id.
+        for pcdn in (
+            "PCDN-SOS-09-D-001",
+            "PCDN-SOS-09-D-002",
+            "PCDN-SOS-09-D-003",
+            "PCDN-SOS-09-D-004",
+            "PCDN-SOS-09-D-005",
+        ):
+            assert pcdn in section_16, (
+                f"§16 ratified entry MUST list {pcdn}."
+            )
+
+    def test_ratified_entry_d001_borrow_checker_clarification(
+        self, section_16: str
+    ) -> None:
+        # The D-001 borrow-checker enclosing-scope clarification MUST
+        # be captured in §16.
+        assert "borrow checker" in section_16.lower(), (
+            "§16 ratified entry MUST capture the D-001 "
+            "borrow-checker enclosing-scope clarification."
+        )
+        assert "RegisterBlock" in section_16, (
+            "§16 D-001 clarification MUST name the `RegisterBlock` "
+            "enclosing scope."
+        )
+
+    def test_ratified_entry_d005_dual_tcb_role(self, section_16: str) -> None:
+        # The D-005 SAFETY-rollup + chart-bounds-analyzer dual-TCB
+        # role note MUST be in §16.
+        assert "TCB" in section_16, (
+            "§16 ratified entry MUST capture the D-005 dual-TCB role "
+            "note."
+        )
+        assert "chart-bounds" in section_16.lower() or "chart bounds" in section_16.lower(), (
+            "§16 D-005 dual-TCB note MUST name the chart-bounds "
+            "analyzer."
+        )
+        assert "SAFETY" in section_16, (
+            "§16 D-005 entry MUST capture the SAFETY-rollup "
+            "clarification (// SAFETY: comment text canonical at "
+            "codegen)."
+        )
+
+    def test_ratified_entry_cross_refs_sos_09_a(
+        self, section_16: str
+    ) -> None:
+        # §16 cross-references SOS-09-A as the authority for the
+        # discharging-invariant vocabulary the SAFETY comments cite.
+        assert "SOS-09-A" in section_16, (
+            "§16 ratified entry MUST cross-reference SOS-09-A as the "
+            "annotation-semantics authority for the SAFETY-comment "
+            "discharging-invariant vocabulary."
+        )
+
+    def test_ratified_entry_scjson_impact_note(self, section_16: str) -> None:
+        # One-line scjson impact note — no scjson changes required.
+        assert "scjson" in section_16.lower(), (
+            "§16 ratified entry MUST carry the one-line scjson "
+            "impact note."
+        )
+        assert "other_attributes" in section_16, (
+            "§16 scjson note MUST cite `other_attributes` JSON "
+            "preservation as the covered annotation surface."
         )
 
 
