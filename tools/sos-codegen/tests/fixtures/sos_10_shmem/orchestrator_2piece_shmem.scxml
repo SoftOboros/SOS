@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-10-B `shared-memory` medium fixture: minimal 2-piece chart for the
+  POSIX SHM + futex ring-buffer emitter (`shared_memory_emit.py`).
+
+  Two pieces, one cross-piece transition declared `kind="shared-memory"`,
+  exercising:
+    - producer piece in Rust (`producer` state, sos:lang="rust"),
+    - consumer piece in C    (`consumer` state, sos:lang="c"),
+    - a chart-author override of the default 256-slot ring capacity via
+      the `ring_capacity` attribute on `<sos:medium>` (surfaces in the
+      parsed `MediumAnnotation.extras` map per SOS-10-A's forward-compat
+      "preserve non-`kind` medium attributes" policy).
+
+  Authority: SOS-10-CONCEPTS.md §5.2 + §6.2; INV-S-ORCH-1..6.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="producer">
+
+  <state id="producer"
+         other_attributes='{"sos:lang": "rust"}'>
+    <transition event="frame.publish" target="consumer">
+      <sos:medium kind="shared-memory" ring_capacity="512">
+        <sos:timeout ms="500"/>
+      </sos:medium>
+    </transition>
+  </state>
+
+  <state id="consumer"
+         other_attributes='{"sos:lang": "c"}'>
+  </state>
+
+</scxml>
