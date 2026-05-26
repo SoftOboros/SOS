@@ -1,0 +1,97 @@
+{
+  "chart_id": "sis08_first_slice",
+  "plans": [
+    {
+      "address": 1073741824,
+      "channel_dir": "bidirectional",
+      "channel_id": "8b000000-0000-4000-8000-000000000001",
+      "channel_kind": "queue",
+      "channel_name": "fifo_data",
+      "channel_zone": "privileged",
+      "families": [
+        "atomicity",
+        "initial_value",
+        "protection",
+        "side_effect",
+        "write_then_read"
+      ],
+      "irq": null,
+      "mutex": null,
+      "privilege_region": null,
+      "width_bits": 32
+    },
+    {
+      "address": 1073741828,
+      "channel_dir": "hw\u2192sw",
+      "channel_id": "8b000000-0000-4000-8000-000000000002",
+      "channel_kind": "status",
+      "channel_name": "fifo_status",
+      "channel_zone": "privileged",
+      "families": [
+        "atomicity",
+        "clear_on_read",
+        "initial_value",
+        "protection"
+      ],
+      "irq": "fifo_irq",
+      "mutex": null,
+      "privilege_region": null,
+      "width_bits": 32
+    },
+    {
+      "address": 1073741832,
+      "channel_dir": "sw\u2192hw",
+      "channel_id": "8b000000-0000-4000-8000-000000000003",
+      "channel_kind": "command",
+      "channel_name": "fifo_control",
+      "channel_zone": "privileged",
+      "families": [
+        "initial_value",
+        "protection",
+        "side_effect",
+        "write_then_read"
+      ],
+      "irq": null,
+      "mutex": null,
+      "privilege_region": null,
+      "width_bits": 32
+    },
+    {
+      "address": 1073741836,
+      "channel_dir": "hw\u2192sw",
+      "channel_id": "8b000000-0000-4000-8000-000000000004",
+      "channel_kind": "status",
+      "channel_name": "mailbox_notify",
+      "channel_zone": "privileged",
+      "families": [
+        "atomicity",
+        "clear_on_read",
+        "initial_value",
+        "protection"
+      ],
+      "irq": "mailbox_irq",
+      "mutex": null,
+      "privilege_region": null,
+      "width_bits": 32
+    },
+    {
+      "address": 1073741840,
+      "channel_dir": "bidirectional",
+      "channel_id": "8b000000-0000-4000-8000-000000000005",
+      "channel_kind": "shared",
+      "channel_name": "credit_budget",
+      "channel_zone": "privileged",
+      "families": [
+        "atomicity",
+        "initial_value",
+        "protection",
+        "side_effect",
+        "write_then_read"
+      ],
+      "irq": null,
+      "mutex": "credit_lock",
+      "privilege_region": null,
+      "width_bits": 32
+    }
+  ]
+}

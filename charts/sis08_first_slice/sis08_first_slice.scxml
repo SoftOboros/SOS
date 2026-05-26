@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SIS-08B first hardware slice chart.
+
+  This chart is intentionally small: one memory-mapped FIFO data surface,
+  one FIFO status surface, one FIFO control surface, one mailbox
+  notification surface, and one credit-counter surface. The channels are
+  annotated through SOS-09-A `other_attributes`, then consumed by SOS-09-B
+  (CMSIS-SVD), SOS-09-G (MPU table), and SOS-09-F (membrane vectors).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="FIFO_DATA"
+       other_attributes='{"sos:mpu_background": "strict"}'>
+
+  <state id="FIFO_DATA"
+         other_attributes='{
+           "sos:id": "8b000000-0000-4000-8000-000000000001",
+           "sos:name": "fifo_data",
+           "sos:kind": "queue",
+           "sos:dir": "bidirectional",
+           "sos:zone": "privileged",
+           "sos:atomicity": "mutex-required",
+           "sos:width": 32,
+           "sos:channel_group": "fifo"
+         }'>
+    <transition event="fifo.status" target="FIFO_STATUS"/>
+  </state>
+
+  <state id="FIFO_STATUS"
+         other_attributes='{
+           "sos:id": "8b000000-0000-4000-8000-000000000002",
+           "sos:name": "fifo_status",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:zone": "privileged",
+           "sos:atomicity": "mutex-required",
+           "sos:width": 32,
+           "sos:irq": "fifo_irq",
+           "sos:channel_group": "fifo",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "empty", "start_bit": 0, "width": 1, "access": "RO", "side_effect": null, "reset_value": 1},
+               {"name": "full", "start_bit": 1, "width": 1, "access": "RO", "side_effect": null, "reset_value": 0},
+               {"name": "level", "start_bit": 8, "width": 8, "access": "RO", "side_effect": null, "reset_value": 0},
+               {"name": "underflow", "start_bit": 16, "width": 1, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0},
+               {"name": "overflow", "start_bit": 17, "width": 1, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="fifo.control" target="FIFO_CONTROL"/>
+  </state>
+
+  <state id="FIFO_CONTROL"
+         other_attributes='{
+           "sos:id": "8b000000-0000-4000-8000-000000000003",
+           "sos:name": "fifo_control",
+           "sos:kind": "command",
+           "sos:dir": "sw→hw",
+           "sos:zone": "privileged",
+           "sos:width": 32,
+           "sos:channel_group": "fifo",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "enable", "start_bit": 0, "width": 1, "access": "WO", "side_effect": "side-effect-on-write", "reset_value": 0},
+               {"name": "reset", "start_bit": 1, "width": 1, "access": "WO", "side_effect": "side-effect-on-write", "reset_value": 0},
+               {"name": "flush", "start_bit": 2, "width": 1, "access": "WO", "side_effect": "side-effect-on-write", "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="mailbox.notify" target="MAILBOX_NOTIFY"/>
+  </state>
+
+  <state id="MAILBOX_NOTIFY"
+         other_attributes='{
+           "sos:id": "8b000000-0000-4000-8000-000000000004",
+           "sos:name": "mailbox_notify",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:zone": "privileged",
+           "sos:atomicity": "mutex-required",
+           "sos:width": 32,
+           "sos:irq": "mailbox_irq",
+           "sos:channel_group": "mailbox",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "non_empty", "start_bit": 0, "width": 1, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0},
+               {"name": "priority", "start_bit": 8, "width": 4, "access": "RO", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="credit.update" target="CREDIT_BUDGET"/>
+  </state>
+
+  <state id="CREDIT_BUDGET"
+         other_attributes='{
+           "sos:id": "8b000000-0000-4000-8000-000000000005",
+           "sos:name": "credit_budget",
+           "sos:kind": "shared",
+           "sos:dir": "bidirectional",
+           "sos:zone": "privileged",
+           "sos:atomicity": "mutex-required",
+           "sos:mutex": "credit_lock",
+           "sos:width": 32,
+           "sos:channel_group": "credit"
+         }'>
+    <transition event="fifo.data" target="FIFO_DATA"/>
+  </state>
+
+</scxml>

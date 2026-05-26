@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<device xmlns:xs="http://www.w3.org/2001/XMLSchema-instance" schemaVersion="1.3" xs:noNamespaceSchemaLocation="CMSIS-SVD.xsd">
+  <name>Sis08FirstSlice</name>
+  <version>1.0</version>
+  <description>SOS-09-B generated CMSIS-SVD description for Sis08FirstSlice</description>
+  <addressUnitBits>8</addressUnitBits>
+  <width>32</width>
+  <size>32</size>
+  <resetValue>0x00000000</resetValue>
+  <resetMask>0xFFFFFFFF</resetMask>
+  <peripherals>
+    <peripheral>
+      <name>Sis08FirstSlice</name>
+      <description>SOS-09-B channel block for Sis08FirstSlice</description>
+      <baseAddress>0x40000000</baseAddress>
+      <addressBlock>
+        <offset>0x0</offset>
+        <size>0x00000014</size>
+        <usage>registers</usage>
+      </addressBlock>
+      <interrupt>
+        <name>fifo_irq</name>
+        <description>SOS-09-B placeholder vector for channel 'fifo_status'</description>
+        <value>0</value>
+      </interrupt>
+      <interrupt>
+        <name>mailbox_irq</name>
+        <description>SOS-09-B placeholder vector for channel 'mailbox_notify'</description>
+        <value>1</value>
+      </interrupt>
+      <registers>
+        <register>
+          <name>fifo_data</name>
+          <description>SOS-09-B channel 'fifo_data' (kind=queue, dir=bidirectional)</description>
+          <addressOffset>0x00000000</addressOffset>
+          <size>32</size>
+          <access>read-write</access>
+          <resetValue>0x00000000</resetValue>
+          <resetMask>0xFFFFFFFF</resetMask>
+        </register>
+        <register>
+          <name>fifo_status</name>
+          <description>SOS-09-B channel 'fifo_status' (kind=status, dir=hw→sw)</description>
+          <addressOffset>0x00000004</addressOffset>
+          <size>32</size>
+          <access>read-only</access>
+          <readAction>clear</readAction>
+          <resetValue>0x00000001</resetValue>
+          <resetMask>0x0003FF03</resetMask>
+          <fields>
+            <field>
+              <name>empty</name>
+              <description>bit-field 'empty' (access=RO)</description>
+              <bitOffset>0</bitOffset>
+              <bitWidth>1</bitWidth>
+              <access>read-only</access>
+            </field>
+            <field>
+              <name>full</name>
+              <description>bit-field 'full' (access=RO)</description>
+              <bitOffset>1</bitOffset>
+              <bitWidth>1</bitWidth>
+              <access>read-only</access>
+            </field>
+            <field>
+              <name>level</name>
+              <description>bit-field 'level' (access=RO)</description>
+              <bitOffset>8</bitOffset>
+              <bitWidth>8</bitWidth>
+              <access>read-only</access>
+            </field>
+            <field>
+              <name>underflow</name>
+              <description>bit-field 'underflow' (access=RO)</description>
+              <bitOffset>16</bitOffset>
+              <bitWidth>1</bitWidth>
+              <access>read-only</access>
+              <readAction>clear</readAction>
+            </field>
+            <field>
+              <name>overflow</name>
+              <description>bit-field 'overflow' (access=RO)</description>
+              <bitOffset>17</bitOffset>
+              <bitWidth>1</bitWidth>
+              <access>read-only</access>
+              <readAction>clear</readAction>
+            </field>
+          </fields>
+        </register>
+        <register>
+          <name>fifo_control</name>
+          <description>SOS-09-B channel 'fifo_control' (kind=command, dir=sw→hw)</description>
+          <addressOffset>0x00000008</addressOffset>
+          <size>32</size>
+          <access>write-only</access>
+          <resetValue>0x00000000</resetValue>
+          <resetMask>0x00000007</resetMask>
+          <fields>
+            <field>
+              <name>enable</name>
+              <description>bit-field 'enable' (access=WO)</description>
+              <bitOffset>0</bitOffset>
+              <bitWidth>1</bitWidth>
+              <access>write-only</access>
+            </field>
+            <field>
+              <name>reset</name>
+              <description>bit-field 'reset' (access=WO)</description>
+              <bitOffset>1</bitOffset>
+              <bitWidth>1</bitWidth>
+              <access>write-only</access>
+            </field>
+            <field>
+              <name>flush</name>
+              <description>bit-field 'flush' (access=WO)</description>
+              <bitOffset>2</bitOffset>
+              <bitWidth>1</bitWidth>
+              <access>write-only</access>
+            </field>
+          </fields>
+        </register>
+        <register>
+          <name>mailbox_notify</name>
+          <description>SOS-09-B channel 'mailbox_notify' (kind=status, dir=hw→sw)</description>
+          <addressOffset>0x0000000C</addressOffset>
+          <size>32</size>
+          <access>read-only</access>
+          <readAction>clear</readAction>
+          <resetValue>0x00000000</resetValue>
+          <resetMask>0x00000F01</resetMask>
+          <fields>
+            <field>
+              <name>non_empty</name>
+              <description>bit-field 'non_empty' (access=RO)</description>
+              <bitOffset>0</bitOffset>
+              <bitWidth>1</bitWidth>
+              <access>read-only</access>
+              <readAction>clear</readAction>
+            </field>
+            <field>
+              <name>priority</name>
+              <description>bit-field 'priority' (access=RO)</description>
+              <bitOffset>8</bitOffset>
+              <bitWidth>4</bitWidth>
+              <access>read-only</access>
+            </field>
+          </fields>
+        </register>
+        <register>
+          <name>credit_budget</name>
+          <description>SOS-09-B channel 'credit_budget' (kind=shared, dir=bidirectional)</description>
+          <addressOffset>0x00000010</addressOffset>
+          <size>32</size>
+          <access>read-write</access>
+          <resetValue>0x00000000</resetValue>
+          <resetMask>0xFFFFFFFF</resetMask>
+        </register>
+      </registers>
+    </peripheral>
+  </peripherals>
+</device>

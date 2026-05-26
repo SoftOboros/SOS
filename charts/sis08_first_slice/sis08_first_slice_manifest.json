@@ -1,0 +1,123 @@
+{
+  "backend": "hdl-sos",
+  "baseAddress": "0x40000000",
+  "channels": [
+    {
+      "dir": "bidirectional",
+      "id": "8b000000-0000-4000-8000-000000000001",
+      "irq": null,
+      "kind": "queue",
+      "mutex": null,
+      "name": "fifo_data",
+      "width": 32,
+      "zone": "privileged"
+    },
+    {
+      "dir": "hw\u2192sw",
+      "id": "8b000000-0000-4000-8000-000000000002",
+      "irq": "fifo_irq",
+      "kind": "status",
+      "mutex": null,
+      "name": "fifo_status",
+      "width": 32,
+      "zone": "privileged"
+    },
+    {
+      "dir": "sw\u2192hw",
+      "id": "8b000000-0000-4000-8000-000000000003",
+      "irq": null,
+      "kind": "command",
+      "mutex": null,
+      "name": "fifo_control",
+      "width": 32,
+      "zone": "privileged"
+    },
+    {
+      "dir": "hw\u2192sw",
+      "id": "8b000000-0000-4000-8000-000000000004",
+      "irq": "mailbox_irq",
+      "kind": "status",
+      "mutex": null,
+      "name": "mailbox_notify",
+      "width": 32,
+      "zone": "privileged"
+    },
+    {
+      "dir": "bidirectional",
+      "id": "8b000000-0000-4000-8000-000000000005",
+      "irq": null,
+      "kind": "shared",
+      "mutex": "credit_lock",
+      "name": "credit_budget",
+      "width": 32,
+      "zone": "privileged"
+    }
+  ],
+  "chart": "charts/sis08_first_slice/sis08_first_slice.scxml",
+  "chartHash": "sha256:4448a8881b32c863610393d849399ba41076e985c1dcb4fc29e16ef07721a722",
+  "descriptor": {
+    "contentHash": "sha256:3c61ce69cf836569ad7fd0cc1a8c33921ed26ef7cd4f52edd6ca22a3bf38ef69",
+    "format": "cmsis-svd-1.3",
+    "path": "charts/sis08_first_slice/sis08_first_slice.svd"
+  },
+  "id": "sis08-first-slice-membrane",
+  "mpu": {
+    "background": {
+      "c_define": "#define SOS_MPU_BACKGROUND_PRIVDEFENA 0",
+      "rust_const": "pub const SOS_MPU_BACKGROUND_PRIVDEFENA: bool = false;"
+    },
+    "c": "charts/sis08_first_slice/sis08_first_slice_mpu.c",
+    "rust": "charts/sis08_first_slice/sis08_first_slice_mpu.rs"
+  },
+  "placement": "hardware-block",
+  "rtlIntegrationBench": {
+    "makefile": "tb/sis08_first_slice/Makefile",
+    "test": "tb/sis08_first_slice/test_sis08_first_slice.py",
+    "top": "tb/sis08_first_slice/sis08_first_slice_top.sv"
+  },
+  "satisfies": [
+    "SIS-08 \u00a73 memory-mapped FIFO side-effect surface",
+    "SIS-08 \u00a76 hardware-backed Streamz node descriptor reference",
+    "SIS-08 \u00a77 membrane-vector layer",
+    "SIS-08A \u00a75 C1 pure-cocotb simulation slice"
+  ],
+  "vectors": [
+    {
+      "contentHash": "sha256:3bb4a87fdfb3d072e12900ba8e012106e952ff6503b2c1eec322633c04e97414",
+      "path": "charts/sis08_first_slice/vectors/sis08_first_slice/.uuid-cache.json"
+    },
+    {
+      "contentHash": "sha256:4c00a9ac69040f08fc658e4a69cbbb1b9f0f6acb8acc191abee13f60c30fc89d",
+      "path": "charts/sis08_first_slice/vectors/sis08_first_slice/conftest.py"
+    },
+    {
+      "contentHash": "sha256:8f2592d3f91bfab3f657ac8a53c3be51c4b5c9e81409a473d9a54548a1cf6999",
+      "path": "charts/sis08_first_slice/vectors/sis08_first_slice/plans.json"
+    },
+    {
+      "contentHash": "sha256:31bdab53508a3b249c51cfc28838aacfcd76e96bb83db1170dd4268ee37d73af",
+      "path": "charts/sis08_first_slice/vectors/sis08_first_slice/test_atomicity.py"
+    },
+    {
+      "contentHash": "sha256:ba4986ac1d17c9ff5c23e962e10808c8c417dfeb48b116d42784086d76a37c59",
+      "path": "charts/sis08_first_slice/vectors/sis08_first_slice/test_clear_on_read.py"
+    },
+    {
+      "contentHash": "sha256:f9bea8be0b597b73aa4ab1a3d78f4382cfe24d7636bdab95e92e0e306daa2dad",
+      "path": "charts/sis08_first_slice/vectors/sis08_first_slice/test_initial_value.py"
+    },
+    {
+      "contentHash": "sha256:623796f812bcc237e6d847d23f6b193f98c29fe12b36f3177f0d16641d2a530f",
+      "path": "charts/sis08_first_slice/vectors/sis08_first_slice/test_protection.py"
+    },
+    {
+      "contentHash": "sha256:d3b35045c311792688ea4e9eb0d059b3465d98ce10163553a7c9c5368cae4c4a",
+      "path": "charts/sis08_first_slice/vectors/sis08_first_slice/test_side_effect.py"
+    },
+    {
+      "contentHash": "sha256:764ab3713d3e49fe83de13699535fcb06bce3465a25e979c7c60fd4fbffc8f18",
+      "path": "charts/sis08_first_slice/vectors/sis08_first_slice/test_write_then_read.py"
+    }
+  ],
+  "version": "0.1.0"
+}
