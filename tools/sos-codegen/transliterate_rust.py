@@ -368,6 +368,7 @@ def apply_verified_strip(
     config: VerifiedStripConfig,
     state_id: str,
     chart_site: str,
+    bounds_input=None,
 ) -> tuple[str, list[dict]]:
     """Replace safe-default Rust idioms with unchecked equivalents
     where the chart's discharge annotations authorize it. Returns
@@ -389,9 +390,46 @@ def apply_verified_strip(
     emission patterns are deferred — the existing transliterator
     doesn't yet emit those guarded forms in shapes the post-pass can
     target. Adding them is additive and requires no spec amendment.
+
+    `bounds_input` — optional SOS-13 §7.3 eligibility-analysis hook.
+    When supplied (as a `sos13_invariants.BoundsAnalysisInput`), the
+    function consults `sos13_eligibility.check_eligibility(...)` to
+    confirm that the chart's bounds IR actually carries a discharging
+    invariant for the site BEFORE stripping. When the eligibility
+    verdict is ineligible, the strip is refused (the safe-default
+    emission survives), and no audit entry is recorded — preserving
+    INV-SOS-G's "no silent strip" guarantee at the IR-derived
+    discharge surface in addition to the existing annotation-derived
+    surface. When the verdict is eligible, the verdict's
+    `discharging_invariant` (an `INV-S-CHART-N` id) is embedded in
+    the SAFETY comment per §8. When `bounds_input` is None (the
+    default), behaviour is byte-identical to the wave-1 emission —
+    the eligibility module is opportunistically threaded as a
+    secondary check, not a hard precondition (matching the wave-1 /
+    wave-3 spec-before-code phasing).
     """
     if not config.is_active():
         return rust_source, []
+
+    # SOS-13 §7.3 eligibility analysis. Only runs when the caller
+    # threaded a bounds-analysis IR through — wave-1 callers without
+    # the IR see the previous behaviour unchanged.
+    eligibility_inv_id: str | None = None
+    if bounds_input is not None and config.has_discharge("bounds"):
+        from sos13_eligibility import check_eligibility  # noqa: E402
+        verdict = check_eligibility(
+            bounds_input,
+            vs_op="VS-OP-1",
+            region_id=config.region_id or state_id,
+        )
+        if not verdict.eligible:
+            # Strip refused at the IR layer. The safe-default
+            # emission survives; no audit entry recorded. The
+            # verdict's reason MAY be surfaced by the caller as a
+            # post-pass comment if desired — kept out of the
+            # function's return tuple to preserve the wave-1 shape.
+            return rust_source, []
+        eligibility_inv_id = verdict.discharging_invariant
 
     audit: list[dict] = []
     new_lines: list[str] = []
@@ -409,10 +447,19 @@ def apply_verified_strip(
             def _replace(match):
                 recv = match.group("recv")
                 idx = match.group("idx").strip()
-                safety = (
-                    f"INV-SOS-G — bounds discharged at chart "
-                    f"<sos:discharged check=\"bounds\"/> on {state_id}"
-                )
+                if eligibility_inv_id:
+                    # SOS-13 §8: cite the discharging invariant id
+                    # from the IR-derived eligibility verdict.
+                    safety = (
+                        f"{eligibility_inv_id} — bounds discharged at "
+                        f"chart <sos:discharged check=\"bounds\"/> on "
+                        f"{state_id}"
+                    )
+                else:
+                    safety = (
+                        f"INV-SOS-G — bounds discharged at chart "
+                        f"<sos:discharged check=\"bounds\"/> on {state_id}"
+                    )
                 audit.append({
                     "region_id": config.region_id or state_id,
                     "chart_state": state_id,
@@ -433,11 +480,19 @@ def apply_verified_strip(
                 # indentation off the original line so the comment
                 # aligns with the unsafe expression.
                 indent = line[: len(line) - len(line.lstrip())]
-                safety_comment = (
-                    f"{indent}// SAFETY: INV-SOS-G — bounds discharged "
-                    f"at chart <sos:discharged check=\"bounds\"/> on "
-                    f"{state_id} (SOS-13 §8)."
-                )
+                if eligibility_inv_id:
+                    safety_comment = (
+                        f"{indent}// SAFETY: {eligibility_inv_id} — "
+                        f"bounds discharged at chart "
+                        f"<sos:discharged check=\"bounds\"/> on "
+                        f"{state_id} (SOS-13 §8)."
+                    )
+                else:
+                    safety_comment = (
+                        f"{indent}// SAFETY: INV-SOS-G — bounds discharged "
+                        f"at chart <sos:discharged check=\"bounds\"/> on "
+                        f"{state_id} (SOS-13 §8)."
+                    )
                 new_lines.append(safety_comment)
                 out_line_no += 1
                 # Re-stamp the emitted_line for the audit entries we
