@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-10E1 cross-piece bound-reachability vector emitter fixture.
+
+  Authority: docs/concepts/SOS-10-CONCEPTS.md §12(d) — cross-piece
+  bounded-reachability vectors + INV-SOS-H broken-protocol render.
+
+  Coverage shape (one piece pair per medium kind + multi-hop chain +
+  idempotent + a broken-protocol slot driven by the harness's
+  receiver_event_index):
+
+    - in-process   : alpha  ->  alpha   event=local_pulse
+                     (self-loop; legal in-process shape per §6.1 +
+                      orchestrator_mcu_fabric_gateway.scxml precedent)
+    - mmio         : alpha  ->  beta    event=start_dma
+    - shared-memory: beta   ->  gamma   event=stream_metrics
+                     (+ <sos:timeout ms="2000"/>)
+    - network/gRPC : gamma  ->  alpha   event=dashboard_command
+                     (+ <sos:timeout ms="5000"/>; default per-transport)
+    - network/AMQP : gamma  ->  beta    event=analytics_event
+                     (+ <sos:timeout ms="10000"/> + <sos:idempotent
+                       value="true"/>; medium-level idempotent → fires
+                       the idempotent_retry vector)
+
+  Multi-hop chain (discovered by the emitter automatically):
+    alpha -mmio-> beta -shared-memory-> gamma
+
+  Chart sos:id is an RFC-4122 v4 UUID; the emitter records it in every
+  vector's `orchestrator_chart` metadata field per INV-S-ORCH-6.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="alpha"
+       other_attributes='{"sos:id": "a1b2c3d4-1e5f-4a6b-8c7d-9e0f1a2b3c4d"}'>
+
+  <state id="alpha"
+         other_attributes='{"sos:lang": "rust"}'>
+    <transition event="local_pulse" target="alpha">
+      <sos:medium kind="in-process"/>
+    </transition>
+    <transition event="start_dma" target="beta">
+      <sos:medium kind="mmio"/>
+    </transition>
+  </state>
+
+  <state id="beta"
+         other_attributes='{"sos:lang": "vhdl"}'>
+    <transition event="stream_metrics" target="gamma">
+      <sos:medium kind="shared-memory">
+        <sos:timeout ms="2000"/>
+      </sos:medium>
+    </transition>
+  </state>
+
+  <state id="gamma"
+         other_attributes='{"sos:lang": "rust"}'>
+    <transition event="dashboard_command" target="alpha">
+      <sos:medium kind="network">
+        <sos:transport name="gRPC"/>
+        <sos:timeout ms="5000"/>
+      </sos:medium>
+    </transition>
+    <transition event="analytics_event" target="beta">
+      <sos:medium kind="network">
+        <sos:transport name="AMQP"/>
+        <sos:timeout ms="10000"/>
+        <sos:idempotent value="true"/>
+      </sos:medium>
+    </transition>
+  </state>
+
+</scxml>

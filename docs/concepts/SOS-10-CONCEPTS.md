@@ -258,7 +258,7 @@ A conforming SOS-10 ratification satisfies:
 - (a) ✅ PCDN-SOS-10-001 through 008 resolved — see §15 2026-05-23 ratification entry.
 - (b) ⏸ The MCU + FPGA + gateway worked example (§9) instantiated as a buildable demonstration on the bench substrate (Lattice ECP5 + STM32H747I-DISCO; the gateway runs on a host Linux machine connected via LAN). (Wave-17 landed the chart skeleton at `examples/orchestrator_mcu_fabric_gateway.scxml` exercising all four media + both network transports; bench-side build + run still pending.)
 - (c) ⏸ Each of the 4 media has at least one cross-piece event tested end-to-end via cocotb-equivalent harness. (Wave-16 + wave-17 landed unit-test coverage on all 4 media: in-process, shared-memory, mmio, and network (protobuf IDL + gRPC stubs + AMQP messages). End-to-end cocotb-equivalent harness still pending.)
-- (d) ⏸ Cross-piece bounded-reachability vectors emitted; INV-SOS-H rendered failures in chart vocabulary verified manually on a deliberate broken-protocol case.
+- (d) ✅ Cross-piece bounded-reachability vectors emitted; INV-SOS-H rendered failures in chart vocabulary verified manually on a deliberate broken-protocol case. (SOS10E1 wave: `tools/sos-codegen/sos10_vectors.py` emits the 5-family vector set — transition / timeout / idempotent_retry / broken_protocol / multi_hop — with every record carrying the §12(d) INV-SOS-H metadata block; the broken-protocol render is asserted free of raw-medium primitives in the test suite.)
 - (e) ✅ SOS-09 + SOS-12 cited correctly with no semantic duplication; SOS-10 strictly composes them. (Wave-16: the `mmio` emitter generates SOS-09 channel annotations as inputs to the SOS-09 emitter family rather than re-emitting any SOS-09 artifact; the `in-process` and `shared-memory` emitters cite their primitive layers explicitly and emit `@spec` blocks naming the source-of-truth phases.)
 - (f) ✅ INV-S-ORCH-1 through 6 cited correctly in the implementation phase. (Wave-16: every emitted artifact carries an `@spec` comment block citing §6.x of this doc + the relevant INV-S-ORCH-N invariants + INV-SOS-A.)
 
@@ -367,3 +367,15 @@ Wave-17 closes out the four-medium emitter family with the network medium (defer
 **Network-medium implementation complete**. The remaining ⏸ gates ((b)/(c)/(d)) are integration / bench / vector-emission concerns, not emitter-implementation concerns.
 
 Test suite delta (full SOS-codegen suite): 2246 → 2331 passing (+85), 4 skipped (Yosys + iverilog + protoc + cargo-offline, environmental).
+
+### 2026-05-27 — SOS10E1: cross-piece reachability vector emitter landed
+
+`tools/sos-codegen/sos10_vectors.py` ratifies the §12(d) acceptance gate by implementing the cross-piece bound-reachability vector emitter that consumes `sos10_annotations.OrchestratorAnnotations` and produces a typed `list[CrossPieceVectorRecord]` ready for the cocotb-equivalent harness ratified at PCDN-SOS-10-008.
+
+- Five vector families ratified as a Standards Action enum: `transition` (one per cross-piece transition), `timeout` (one per (medium, transport) pair the chart uses; per-medium defaults per PCDN-SOS-10-006), `idempotent_retry` (one per `<sos:idempotent value="true"/>` annotation per PCDN-SOS-10-005, with transition-level override winning over medium-level), `broken_protocol` (synthesised when the caller supplies a per-piece event-in index revealing a sender→receiver event the receiver doesn't declare), `multi_hop` (any A→B→C chain inferable from the orchestrator transition graph; cycles excluded).
+- INV-SOS-H chart-vocabulary failure rendering verified: `BrokenProtocolReason.UNDECLARED_EVENT` messages name the sender piece, receiver piece, event name, medium kind, and the receiver's declared event list — all chart vocabulary, no raw medium primitives. Test suite asserts the forbidden-token (`protobuf`, `field=`, `ring=`, `NVIC`, `0x`) absence.
+- INV-S-ORCH-6 traceability: every record carries `orchestrator_chart` (sos:id UUID when extractable from the scjson root), `transition_id` (`V-<ord>-<family>-<event>` shape), `sender_piece`, `receiver_piece`, `medium`, `expected_outcome`, plus a `spec_refs` tuple citing §12(d), INV-S-ORCH-6, INV-SOS-B, INV-SOS-H, and the family-relevant PCDN.
+- PCDN-SOS-10-007 strict-one-orchestrator enforced at the type boundary: passing anything other than a single `OrchestratorAnnotations` raises `Sos10VectorEmissionError` with `rule="PCDN-SOS-10-007"`.
+- Fixture at `tools/sos-codegen/tests/fixtures/sos_10/cross_piece_chart.scxml`: 3 pieces × 5 transitions covering all four §5.2 media + both PCDN-SOS-10-002 transports + a medium-level idempotency annotation + a chart `sos:id`. 21 tests; all passing.
+
+**§12 acceptance gate transition**: (d) ⏸ → ✅. The remaining ⏸ gates ((b) bench-side build, (c) cocotb-equivalent end-to-end harness) are integration / bench concerns; SOS10E1 closes out the spec-side vector-emission gate.
