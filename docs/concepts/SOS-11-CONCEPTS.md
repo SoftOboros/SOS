@@ -431,3 +431,28 @@ First wave of SOS-11 implementation commits landed under `tools/sos-codegen/sos1
 **Cross-cite to SOS-12.** SOS-12 (🟢 ratified 2026-05-23, doc at `docs/concepts/SOS-12-CONCEPTS.md`) is the peer phase whose implementation gates the two subchart-handler tools above. The implementation dependency runs SOS-11 → SOS-12 for those two tools only; the rest of the §5.1 / §5.2 surface is independent of SOS-12 and the wave-1 commits cover the §10.1 read-only band end-to-end.
 
 **Invariants touched.** The six wave-1 commits exercise INV-SOS-C (`derive` — the tool surface is the modification path; `chart_query.py` + `permissions.py` are the read-side; `tool_catalog.py` is the registry binding all writes through named tools) and INV-SOS-H (`derive` — `diffs.py` + `history.py` carry chart-vocabulary summaries into commit subjects / bodies). No invariant relationships changed; no §13 row required restating.
+
+### 2026-05-27 — SOS11K1: inline_subchart handler landed
+
+Closes the `inline_subchart` half of the wave-1 entry's "Still open" item #1 (extract/inline handler implementations gated on SOS-12). The complementary `extract_region_to_subchart` half lands separately under Wave-3J.
+
+**Landed** (🟢):
+
+| Commit | Subject | Module | Tests |
+|---|---|---|---|
+| `SOS11K1` | inline_subchart handler + tests | `tools/sos-codegen/sos11_mcp/inline.py` | `tools/sos-codegen/tests/test_sos11_inline.py` (18 tests) |
+
+**Gate-keepers wired in.**
+
+- **Wave-2I `verify_contract_match`** (from `tools/sos-codegen/sos12_contract_match.py`) is the first gate: the handler builds a `DispatchContractEdge` from the current parent expectation + child contract, and refuses the inline with `ToolCallError(code=CONFLICT)` if any §5.3 clause fires. Per Wave-2I's module-foot extension-point note ("Wave-3 K — `inline_subchart`"), this is the reverse-direction discharge — inlining a stale dispatch edge would deviate from the dispatch-tree's verification basis, so the verifier guards entry, not exit.
+- **PCDN-SOS-12-003 legibility threshold** (default 15 peer states at any one level, per SOS-12 §9.1 / §9.2) is the second gate: if the post-inline parent's max peer-state count across any nesting level exceeds the threshold, the handler returns `ToolCallError(code=LINT_FAILURE, failed_axis=lint)` with the diagnosis "inlining would exceed the legibility threshold." The threshold is overridable per-call via the `legibility_threshold` keyword — projects MAY tighten or loosen per `chart-family.toml` as the SOS-12 §10.2 registration policy permits.
+
+**State-id collision rewriting policy (v1 stance, not §15-ratified).** When a child sub-chart state id collides with any parent peer state id anywhere in the parent chart, the handler rewrites the inlined child id to `{dispatch_state_id}__{original_child_id}` and updates every transition target inside the inlined body to follow. The dispatch state's own id is preserved verbatim (external parent transitions targeting it survive untouched). The §5.1 prose for `inline_subchart` does not name a collision policy; this is a v1 documented stance, recorded in the module docstring's "State-id rewriting policy" section. A future §15 amendment MAY ratify a different rewrite shape; the `ToolCallResult.summary` cites the rewrite when it fires so chart authors can audit.
+
+**Validation-axis deferrals.** Per SOS-11 §6 the four-axis report must populate `scjson_round_trip`, `lint`, `bound_converges`, `invariants_hold`. The handler computes (a) `scjson_round_trip` operationally (serialise post-inline AST through `SCXMLDocumentHandler`, re-parse, confirm the structured diff is empty). Axes (b)/(c)/(d) are marked `passed=True` with a `diagnosis` field naming the deferral to the still-open `validation.py` composer (wave-1 entry's "Still open" item #2). Refusing to populate them would block the handler's adoption; populating them with silent stubs would mask real failures — naming the deferral explicitly is the in-between stance.
+
+**`vector_delta` populated.** The handler emits the negated boundary-vector set per Wave-1C `emit_boundary_vectors` (the vectors that NO LONGER exist post-inline because the dispatch boundary itself retires). The `VectorDelta.summary` is "inline at `<chart_path>` retires N boundary vector(s): -N events_in, -N events_out, …" — chart-vocabulary per INV-SOS-H. Citations carry the dispatch edge's `chart_path` (`<parent>.<dispatch_state>.<child>`). This closes the "vector_delta computation" wave-1 open item for the `inline_subchart` shape specifically; the broader full-delta `get_vector_delta(call_id)` surface remains open.
+
+**Tool-catalog binding.** `tool_catalog.py` gains a `HANDLER_BINDINGS: dict[str, str]` mapping primitive tool names to handler module paths. The Wave-3K registration is `"inline_subchart": "sos11_mcp.inline.inline_subchart"`. The dict shape is non-load-bearing on §5 (the catalog name itself was already frozen at wave-1); it's the MCP-dispatch surface that lets a downstream HTTP/MCP transport resolve a tool call by name.
+
+**Invariants touched.** INV-SOS-C (`derive` — `inline_subchart` is the structure-changing-edit modification path the §10.3 graphical-diff-preview gate guards; this handler IS that gate's downstream invocation site). INV-SOS-H (`derive` — `summary` + `vector_delta.summary` + the §15 cite shape all render in chart vocabulary). INV-S-DISP-2 (SOS-12 §10.1 — contract-matching is mandatory at every dispatch boundary; this handler invokes the operational gate at the moment the boundary retires). No invariant relationships changed; no §13 row required restating.

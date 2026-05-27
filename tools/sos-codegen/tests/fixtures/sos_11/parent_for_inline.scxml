@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Wave-3K fixture: a parent chart with one <sos:dispatch> ready to be
+  inlined back into the parent via the SOS-11 ``inline_subchart`` MCP
+  tool handler.
+
+  Authority:
+    - SOS-11 §5.1 — ``inline_subchart`` primitive (inverse of
+      ``extract_region_to_subchart``).
+    - SOS-12 §5.3 — contract-matching at the dispatch boundary; the
+      handler MUST verify the contract still matches before allowing
+      the inline.
+    - SOS-12 §9.2 — ``inline_subchart`` is admissible only if the
+      parent's post-inline peer-state count is below the legibility
+      threshold (PCDN-SOS-12-003 default 15).
+
+  Shape (kept deliberately small so the post-inline parent stays
+  well-below the default legibility threshold):
+
+    parent_for_inline
+      ├─ state id="idle"      -- transitions on req.received → handle_get
+      ├─ state id="handle_get" -- carries <sos:dispatch ref="child_for_inline.scxml"/>
+      │                          AND a parent-side external transition the
+      │                          inliner MUST preserve (target="recover").
+      └─ state id="recover"    -- external target referenced from handle_get.
+
+  After inline_subchart succeeds, handle_get's body becomes the child
+  sub-chart's body (states: parsing, done; initial: parsing); the
+  <sos:dispatch> is removed; the handle_get → recover external
+  transition is preserved at handle_get's level.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="idle">
+  <state id="idle">
+    <transition event="req.received" target="handle_get"/>
+  </state>
+  <state id="handle_get">
+    <transition event="abort" target="recover"/>
+    <sos:dispatch ref="child_for_inline.scxml"/>
+  </state>
+  <state id="recover"/>
+</scxml>

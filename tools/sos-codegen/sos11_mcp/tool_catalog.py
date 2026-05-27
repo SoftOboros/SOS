@@ -76,6 +76,16 @@ _STRUCTURE_PRESERVING_TOOLS = frozenset(
 _ALL_TOOL_NAMES = READ_ONLY_QUERY_TOOLS + PRIMITIVE_TOOLS + HIGHER_INTENT_TOOLS
 _ALL_TOOL_NAME_SET = frozenset(_ALL_TOOL_NAMES)
 
+
+# Wave-3 handler bindings: maps each primitive tool name with an implemented
+# handler to its module path. Read at the MCP dispatch surface; not load-
+# bearing on the §5 catalog itself. Entries are added as handlers land; an
+# unbound name simply has no executable surface (the §15 wave entries name
+# which primitives have handlers).
+HANDLER_BINDINGS: dict[str, str] = {
+    "inline_subchart": "sos11_mcp.inline.inline_subchart",
+}
+
 _HIGHER_INTENT_DECOMPOSITIONS: dict[str, tuple[str, ...]] = {
     "add_event_handler_for_state": (
         "add_event_to_vocabulary",

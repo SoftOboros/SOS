@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Wave-3K fixture: a child sub-chart dispatched from parent_for_inline.scxml
+  whose contract matches the parent's expected routing. Used by tests that
+  drive ``inline_subchart`` through to a successful merge.
+
+  Authority:
+    - SOS-12 §5.1 / PCDN-SOS-12-004 — ``<sos:contract>`` at chart root.
+    - SOS-12 §5.3 — contract clauses (events_in / events_out / reads /
+      writes / invariants_assumed / invariants_maintained).
+    - SOS-12 §5.2 — datamodel-boundary semantics; reads/writes attrs.
+
+  Shape kept small (two states); the parent's post-inline peer count
+  becomes 4 (idle + handle_get(now containing parsing+done) + recover),
+  well under the legibility-threshold default of 15.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="parsing">
+  <sos:contract reads="parsed_uri" writes="response_status">
+    <sos:events-in>
+      <sos:event>tcp.bytes_received</sos:event>
+    </sos:events-in>
+    <sos:events-out>
+      <sos:event>method.complete</sos:event>
+    </sos:events-out>
+    <sos:invariants>
+      <sos:maintained-by-subchart>INV-GET-1-headers-bounded</sos:maintained-by-subchart>
+      <sos:assumed-of-environment>INV-HTTP-1-request-line-parsed</sos:assumed-of-environment>
+    </sos:invariants>
+  </sos:contract>
+  <state id="parsing">
+    <transition event="tcp.bytes_received" target="done"/>
+  </state>
+  <state id="done"/>
+</scxml>
