@@ -15,7 +15,7 @@ Entries are permanent. Resolved entries stay as institutional memory; mark statu
 
 Open questions tied to errata entries appear here for at-a-glance visibility. Format: `EOQ-NNN-ERRATA-MMM`. See parent CLAUDE.md "EOQ identifiers" for the rule.
 
-*(none open — ERRATA-001 through ERRATA-006 all resolved at intake.)*
+*(none open — ERRATA-001 through ERRATA-007 all resolved at intake.)*
 
 ## Status of this log
 
@@ -31,6 +31,7 @@ ERRATA is now actively used. SOS-00 ratified 2026-05-19; every subsequent phase 
 | ERRATA-004 | 🟢 | `sos:dir` value vocabulary inconsistent across SOS-09 family (`bidirectional` retracted in favour of `hw↔sw`) | 2026-05-27 | SOS-09-A |
 | ERRATA-005 | 🟢 | SOS-12 boundary-vector `kind` field plural/singular convention codified (plural for events, singular for invariants) | 2026-05-27 | SOS-12 |
 | ERRATA-006 | 🟢 | `VectorCategory.Boundary` name collision (SOS-03 legacy edge-case vs SOS-12 dispatch-boundary) — overload is intentional at v1, disambiguated by directory + subtype | 2026-05-27 | SOS-03 |
+| ERRATA-007 | 🟢 | SOS-09-G MPU install-function name drift (`sos_mpu_install` vs `apply_mpu_config`) reconciled to canonical `apply_mpu_config()` | 2026-05-27 | SOS-09-G |
 
 ## ERRATA-001 — SOS-09-B implementation cite mismatch (stealth rename)
 
@@ -257,6 +258,47 @@ A future rename — promoting option (a) (rename SOS-12 dispatch-boundary surfac
 - SOS-12 §7.2 boundary-vector emission + the SOS12C1 emitter at `tools/sos-codegen/sos12_boundary_vectors.py` — the consumers that write `"category": "Boundary"` verbatim, whose behaviour this errata ratifies as intentional under option (c).
 - Future amendment trigger: reviewer confusion in practice. If a reader files an issue or asks on a PR review which `Boundary` surface a record belongs to, that signal motivates promoting one of options (a) or (b) into a §15 amendment. Until then, the option-(c) overload + directory + `subtype` disambiguation stands.
 - This entry is filed and resolved at intake; ERRATA-only form per the spec-before-code "no spec text changed → no §15 amendment owed" pattern. No co-amendment on SOS-03 §15 is owed by this entry; the existing W2O amendment carries the disambiguation.
+
+## ERRATA-007 — SOS-09-G MPU install-function name drift (`sos_mpu_install` vs `apply_mpu_config`)
+
+**Status:** 🟢 resolved
+**First seen:** 2026-05-27 (HEAD at first sighting: `1180910` — the PCDN-SOS-09-G-005 ratification commit that explicitly noted the drift and deferred the §5.5 prose reconciliation)
+**Owning phase:** SOS-09-G
+
+### Symptom
+
+Two ratified SOS-family documents named the MPU install entry point inconsistently:
+
+- `docs/concepts/SOS-09-G-CONCEPTS.md` §5.5 + §3 glossary + §4 source-of-truth map + §5.3 C / Rust function declarations + §7 INV-S-MEM-G-3 invariant + §9 acceptance gate (c) — `sos_mpu_install()` (pre-2026-05-27 prose surface).
+- `docs/concepts/SOS-04-CONCEPTS.md` §15 four-artifact boundary set table (the SOS-09-G row at `SOS-04-CONCEPTS.md:1282`, landed Wave-2P commit `38699f4`) + the 2026-05-27 cross-reference entry "PCDN-SOS-09-G-005 ratified (apply_mpu_config timing owned by SOS-04)" (landed Wave-5C commit `1180910`) + the PCDN-SOS-09-G-005 ratification question itself (commit `d9263a1`) — `apply_mpu_config()`.
+
+The two identifiers refer to the same function — the MPU runtime install hook emitted alongside `sos_mpu_table` per [SOS-09-G §5.5]. The PCDN-SOS-09-G-005 ratification entry on the SOS-09-G side (`SOS-09-G-CONCEPTS.md:410`) explicitly acknowledged the drift and deferred §5.5 prose reconciliation as a future minor amendment ("Reconciling §5.5's identifier prose to match the boundary-set identifier is a future minor amendment (no behaviour change) and is NOT in scope for this PCDN ratification"). A future SOS-04 implementation wave wiring `apply_mpu_config()` at the SOS-04-owned call site per the ratified contract would have had to choose at the code level which name to honor, with the spec text giving no clear single answer.
+
+### Root cause
+
+SOS-09-G §5.5 was authored before the SOS-04 §15 four-artifact boundary set table; the two surfaces evolved independently. The SOS-09-G §5.5 prose picked `sos_mpu_install()` as a SOS-family-prefixed install-hook identifier (consistent with `sos_mpu_table` / `sos_mpu_region_t` siblings in the same section). The SOS-04 §15 Wave-2P amendment authored the boundary-set table row referring to the same function as `apply_mpu_config()` — an action-verb-prefix form better suited to the boundary-contract narrative (SOS-04's runtime "applies" the SOS-09-G-emitted "config" at boot time). PCDN-SOS-09-G-005's ratification question used the Wave-2P boundary-set name (`apply_mpu_config()`) without flagging the §5.5 inconsistency; the ratification commit (`1180910`) carried the drift forward, with the PCDN-005 SOS-09-G §16 entry explicitly noting it as a known deferral.
+
+### Fix
+
+This commit reconciles the spec text to the single canonical identifier `apply_mpu_config()`. Resolution path:
+
+- **Canonical name picked:** `apply_mpu_config()`. Three commits (one Wave-2P, two Wave-5C) already pin this name at the cross-boundary contract surface; the non-canonical `sos_mpu_install()` identifier appeared only in SOS-09-G §5.5 prose + the surrounding glossary / declaration / invariant / gate surfaces that mirror §5.5's choice. The path of least drift is updating the SOS-09-G normative surface to match what SOS-04 §15 already pins.
+- **`docs/concepts/SOS-09-G-CONCEPTS.md`** — §16 dated 2026-05-27 entry "ERRATA-007 resolution: canonical MPU install function name" lands with this commit, citing this errata and recording the canonical-name pick. §3 glossary entry (line 52) renamed; §3 glossary backreference (line 51) updated; §4 source-of-truth map row (line 69) renamed; §5.3 C `void` declaration (line 138) renamed; §5.3 Rust `pub fn` declaration (line 154) renamed; §5.5 section title (line 174) + introducing sentence (line 178) + idempotency sentence (line 187) renamed; §7 INV-S-MEM-G-3 invariant statement (line 216) renamed; §9 acceptance gate (c) test-scaffolding cite (line 245) renamed. Historical §16 entries dated before 2026-05-27 are NOT modified — they remain as institutional memory of how the drift accumulated (per parent CLAUDE.md "stealth-revert prohibition" + this log's "entries are permanent" doctrine).
+- **`docs/concepts/SOS-04-CONCEPTS.md`** — §15 dated 2026-05-27 entry "Cross-reference: ERRATA-007 settles MPU install function name" lands with this commit, confirming `apply_mpu_config()` as the canonical name and citing this errata + the co-landing SOS-09-G §16 entry. The four-artifact boundary set table itself (row at line 1282) is unchanged — it already carried the canonical name.
+
+### Verification
+
+`grep -n "sos_mpu_install\|apply_mpu_config" docs/concepts/SOS-09-G-CONCEPTS.md docs/concepts/SOS-04-CONCEPTS.md docs/concepts/ERRATA.md` — pre-commit: SOS-09-G had 17 `sos_mpu_install` + 10 `apply_mpu_config`; SOS-04 had 0 `sos_mpu_install` + 4 `apply_mpu_config`; ERRATA had 0 / 0. Post-commit: SOS-09-G's non-historical prose (§3 / §4 / §5.3 / §5.5 / §7 / §9) carries only `apply_mpu_config()`; remaining `sos_mpu_install()` occurrences are confined to (i) the §3 glossary entry's parenthetical pointing at this errata + flagging that historical §16 entries retain the earlier identifier, and (ii) the §13 files-cited recap inside the 2026-05-25 §16 "Initial draft (Ira)" entry + the §16 "Ratified (Ira)" entry + the §16 SOS09G1 / PCDN-SOS-09-G-005 entries (all historical institutional memory, dated before this errata, unchanged per the "entries are permanent" doctrine). SOS-04 grew one new `apply_mpu_config` occurrence (the new §15 cross-reference entry).
+
+### Tracking
+
+- `docs/concepts/SOS-09-G-CONCEPTS.md` §16 dated 2026-05-27 ("ERRATA-007 resolution: canonical MPU install function name") cross-cites this entry.
+- `docs/concepts/SOS-04-CONCEPTS.md` §15 dated 2026-05-27 ("Cross-reference: ERRATA-007 settles MPU install function name") cross-cites this entry.
+- PCDN-SOS-09-G-005 ratification commit: `d9263a1` (the ratification commit that adopted `apply_mpu_config()` in the ownership-split text).
+- Wave-2P SOS04-09 runtime-boundary amendment commit: `38699f4` (the SOS-04 §15 commit that introduced `apply_mpu_config()` in the four-artifact boundary set table).
+- Wave-5C cross-reference commit: `1180910` (the SOS-04 §15 + SOS-09-G §16 PCDN-005 cross-reference pair; the SOS-09-G side explicitly deferred this errata's reconciliation as a future minor amendment).
+- This entry is filed and resolved at intake. The actual emitted Rust + C function names in `tools/sos-codegen/transliterate_mpu.py` MAY differ from the canonical spec name — that's a separate code-doc drift outside the scope of this errata, to be reconciled in a future implementation-side rename commit (no SOS-09-G or SOS-04 §16 / §15 amendment owed by such a future commit; only this errata's cite is needed).
+- ERRATA-002 cross-reference: ERRATA-002 (filename rename context, commit `d24528f`) handles the SIBLING drift of the implementation filename (`mpu_emit.py` → `transliterate_mpu.py`). ERRATA-007 handles the function-NAME drift at the spec layer; the two are independent and resolved separately.
 
 ## How to add an entry
 

@@ -48,8 +48,8 @@ Terms normative within SOS-09-G+. Authority relationships per §8.
 | **`sos:zone`** | A SOS-semantic JSON key inside the host element's `other_attributes` JSON, declaring the channel's protection zone. As defined in SOS-09 §5.4 and SOS-09-A §6 (per PCDN-SOS-09-001 amended 2026-05-25); used without modification. The key carries one of two values: `"privileged"` or `"unprivileged"`. |
 | **sub-region disable bitmap (SRD)** | The 8-bit `SRD` field of `MPU_RASR` that disables individual one-eighth slices of the region. For SOS-09-G emission, set bits MUST disable sub-regions outside the channel footprint; clear bits MUST keep enabled the sub-regions inside the channel footprint. SRD is only meaningful for region sizes ≥ 256 B. As defined in ARM DDI 0403E.e B3.5.10; used without modification. |
 | **BACKGROUND region** | The "default memory map" — when the MPU is enabled with the `PRIVDEFENA` bit of `MPU_CTRL` set, privileged-mode accesses to addresses not covered by any explicit region succeed using the architectural default attributes. Unprivileged accesses to such addresses always fault. As defined in ARM DDI 0403E.e B3.5.5; used without modification. PCDN-SOS-09-G-002 covers v1 background-region policy. |
-| **`sos_mpu_table`** | The emitted artifact — a C array of `sos_mpu_region_t` and a parallel Rust constant `SOS_MPU_TABLE: [SosMpuRegion; N]`. Both are consumed by the runtime's `sos_mpu_install()` function. The table is the canonical record of every chart-declared protection-zone realisation. |
-| **`sos_mpu_install()`** | The runtime hook emitted alongside the table; programs each region in `sos_mpu_table`, sets the `PRIVDEFENA` bit (per PCDN-SOS-09-G-002), and enables the MPU via `MPU_CTRL.ENABLE`. Idempotent per INV-S-MEM-G-3. |
+| **`sos_mpu_table`** | The emitted artifact — a C array of `sos_mpu_region_t` and a parallel Rust constant `SOS_MPU_TABLE: [SosMpuRegion; N]`. Both are consumed by the runtime's `apply_mpu_config()` function. The table is the canonical record of every chart-declared protection-zone realisation. |
+| **`apply_mpu_config()`** | The runtime hook emitted alongside the table; programs each region in `sos_mpu_table`, sets the `PRIVDEFENA` bit (per PCDN-SOS-09-G-002), and enables the MPU via `MPU_CTRL.ENABLE`. Idempotent per INV-S-MEM-G-3. (Name reconciled per ERRATA-007 2026-05-27 — historical §16 entries dated before 2026-05-27 retain the earlier `sos_mpu_install()` identifier.) |
 | **access-violation event** | The chart-declared status channel that SOS-09-E emits for cross-zone access attempts (per SOS-09 §6 SOS-09-E description, INV-S-MEM-3). When the MPU faults on an unprivileged access to a privileged region, the SW-side handler routes the fault into the same chart-declared event channel, closing the SOS-09-F membrane-vector loop for protection. |
 | **region budget** | The number of MPU regions on the target — 8 for Cortex-M3 / M4 / M0+, 16 for Cortex-M7. The codegen detects the target via the build configuration's `target_cpu` and sizes the emitted table accordingly. |
 
@@ -66,7 +66,7 @@ For every concept this sub-phase touches, **exactly one** location is the canoni
 | MPU region descriptor encoding | **this doc** (§5.2); ARM DDI 0403E.e B3.5 owns the wire-level grammar (**derive**) |
 | Sub-region disable bitmap policy | **this doc** (§5.4) |
 | Emission outputs (C array + Rust constant) | **this doc** (§5.3) |
-| `sos_mpu_install()` shape | **this doc** (§5.5) |
+| `apply_mpu_config()` shape | **this doc** (§5.5) |
 | Cross-sub-phase invariants INV-S-MEM-G-1 through 4 | **this doc** (§7) |
 | Cross-sub-phase invariants INV-S-MEM-1 through 6 | `SOS-09-CONCEPTS.md` §7 (cited, not redefined) |
 | Cross-phase invariants INV-SOS-A through H | `SOS-07-CONCEPTS.md` §6 (cited, not redefined) |
@@ -135,7 +135,7 @@ For every chart-declared protection-zone realisation, SOS-09-G emits:
   static const sos_mpu_region_t sos_mpu_table[] = { /* ... */ };
   static const size_t sos_mpu_table_len = N;
 
-  void sos_mpu_install(void);
+  void apply_mpu_config(void);
   ```
 
 - **Rust constant** in `<chart>_mpu.rs`:
@@ -151,7 +151,7 @@ For every chart-declared protection-zone realisation, SOS-09-G emits:
 
   pub const SOS_MPU_TABLE: [SosMpuRegion; N] = [ /* ... */ ];
 
-  pub fn sos_mpu_install();
+  pub fn apply_mpu_config();
   ```
 
 Both files include CMSIS / `cortex-m`-crate-compatible accessors that the runtime can pass to `MPU::set_region()` (Rust) or `ARM_MPU_SetRegion()` (CMSIS-Core C) directly. The accessor wrappers compose `base_addr | (region_num << 0) | (1 << 4)` (the `VALID` bit) for `MPU_RBAR` and the `MPU_RASR` packed encoding from `size_log2`, `attr`, `perm`, and `srd`.
@@ -171,11 +171,11 @@ For region sizes < 256 B (the 32 B, 64 B, 128 B sizes), SRD is not architectural
 
 Frozen-enumeration registration policy: **Standards Action**.
 
-### 5.5 MPU enable invariant — `sos_mpu_install()` shape
+### 5.5 MPU enable invariant — `apply_mpu_config()` shape
 
 **Chart-root annotation key (PCDN-SOS-09-G-002 ratification 2026-05-25).** The chart's root `<scxml>` element MAY carry a `sos:mpu_background` key in `other_attributes` with value `"kernel_default"` or `"strict"`. When absent, the default is `"kernel_default"` (background region enabled for privileged accesses; `PRIVDEFENA=1`). `"strict"` disables the background region (`PRIVDEFENA=0`) — every accessed address must lie in an explicit region. Per the user clarification at the ratification session, "secure by default" is an **iState user setting** (UI-level default that gets injected into new charts at create time), NOT a build-time codegen flag — codegen reads whatever the chart's `sos:mpu_background` says at codegen time; absent = `kernel_default`. No CodeBuild env var or `--mpu-background=...` codegen flag exists.
 
-Emitted runtime hooks include a `sos_mpu_install()` function with the following behaviour:
+Emitted runtime hooks include an `apply_mpu_config()` function with the following behaviour:
 
 1. Disable MPU (`MPU_CTRL.ENABLE = 0`) before reconfiguration.
 2. For each row in `sos_mpu_table`: write `MPU_RBAR` with `base_addr | VALID=1 | REGION=region_num`; write `MPU_RASR` with the packed `{size_log2, attr, perm, srd, ENABLE=1}` encoding.
@@ -184,7 +184,7 @@ Emitted runtime hooks include a `sos_mpu_install()` function with the following 
 5. Set `MPU_CTRL.ENABLE = 1`.
 6. Issue `DSB` then `ISB` to ensure the MPU is in effect before the next instruction fetch.
 
-The hook is **idempotent**: calling `sos_mpu_install()` multiple times produces the same MPU register state (the second and subsequent calls overwrite identical values). INV-S-MEM-G-3 formalises this.
+The hook is **idempotent**: calling `apply_mpu_config()` multiple times produces the same MPU register state (the second and subsequent calls overwrite identical values). INV-S-MEM-G-3 formalises this.
 
 Frozen-enumeration registration policy: **Specification Required** (the install sequence is normative; tweaks to the disable-other-slots step or the barrier ordering are phase-local mechanics).
 
@@ -213,7 +213,7 @@ In addition to the cross-phase invariants INV-SOS-A through H (from SOS-07) and 
 
 - **INV-S-MEM-G-2 — Regions are sized exactly to the chart-declared channel footprint.** SOS-09-G's emitter MUST size each region to the smallest power-of-two enclosing the channel's register footprint AND use the SRD field per §5.4 to mask sub-regions outside the footprint. Over-protection (emitting a region larger than the channel needs, with SRD bits clear over the unused sub-regions) is **forbidden**: it leaks address-space layout information to the unprivileged side, since the unprivileged side can probe which bytes outside the channel are also fenced and infer the surrounding address-space shape.
 
-- **INV-S-MEM-G-3 — `sos_mpu_install()` is idempotent.** Calling `sos_mpu_install()` multiple times produces the same MPU register state. Verified by acceptance gate (c) — the test scaffolding calls the hook twice and asserts register-state-equivalence.
+- **INV-S-MEM-G-3 — `apply_mpu_config()` is idempotent.** Calling `apply_mpu_config()` multiple times produces the same MPU register state. Verified by acceptance gate (c) — the test scaffolding calls the hook twice and asserts register-state-equivalence.
 
 - **INV-S-MEM-G-4 — Protection violations route to the chart-declared access-violation event.** The cocotb co-sim demonstrates that an unprivileged access to a privileged region fires the chart-declared access-violation event channel (the same `<sos:status>` channel that SOS-09-E emits for HW-side cross-zone access). This closes the SOS-09-F membrane vector for protection per umbrella §6. Verified by acceptance gate (b).
 
@@ -242,7 +242,7 @@ A conforming SOS-09-G v1 ratification satisfies:
 
 - **(b) Cocotb membrane vector for protection violation passes.** Per PCDN-SOS-09-005's cocotb-with-Python-CPU-stub framework: an unprivileged-access vector against a chart-declared `sos:zone="privileged"` region routes through the emitted MPU table, fires the chart-declared access-violation event, and renders the failure in chart vocabulary per INV-SOS-H (`"channel <name> in zone privileged rejected an unprivileged access from chart state <state>"`).
 
-- **(c) Idempotency demonstrated.** Test scaffolding calls `sos_mpu_install()` twice in sequence; asserts MPU register state (`MPU_RBAR`, `MPU_RASR`, `MPU_CTRL`) equivalence between the two post-call snapshots. Closes INV-S-MEM-G-3.
+- **(c) Idempotency demonstrated.** Test scaffolding calls `apply_mpu_config()` twice in sequence; asserts MPU register state (`MPU_RBAR`, `MPU_RASR`, `MPU_CTRL`) equivalence between the two post-call snapshots. Closes INV-S-MEM-G-3.
 
 - **(d) Bench validation deferred.** At least one bench-validation on a target ARMv7-M MPU (Cortex-M7 on the disco-analyzer board per SOS-00 §6's bench-substrate citation) is **deferred to a follow-on** with bench access. Gate (d) is the "implementation-tier" gate; the spec-tier acceptance is (a)–(c).
 
@@ -412,3 +412,38 @@ Ratified by Ira at the 2026-05-27 multi-PCDN session. **Option (a) chosen**: SOS
 No §5 frozen decision changes. No INV-S-MEM-G-N invariant amendment. The §5.5 install-hook step ordering remains normative and unchanged; this entry ratifies the boundary between SOS-09-G's normative surface (table shape + function body) and SOS-04's normative surface (call timing).
 
 Status: 🟢 **PCDN-SOS-09-G-005 ratified**. The boundary contract for `apply_mpu_config()` is stable across SOS-04 and SOS-09-G.
+
+### 2026-05-27 — ERRATA-007 resolution: canonical MPU install function name
+
+Resolves ERRATA-007 (`docs/concepts/ERRATA.md` ERRATA-007 — "SOS-09-G MPU install-function name drift (`sos_mpu_install` vs `apply_mpu_config`)"). The two identifiers refer to the same function. The PCDN-SOS-09-G-005 ratification entry immediately above noted the drift and explicitly deferred §5.5 prose reconciliation as a future minor amendment; this entry IS that amendment.
+
+**Canonical name picked: `apply_mpu_config()`.** Rationale (citation-chain settles it):
+
+- [SOS-04 §15] four-artifact boundary set table (the SOS-09-G row at `docs/concepts/SOS-04-CONCEPTS.md:1282`) uses `apply_mpu_config()` (commit `38699f4`, Wave-2P SOS04-09 runtime-boundary amendment).
+- PCDN-SOS-09-G-005's ratification question itself used `apply_mpu_config()` (commit `d9263a1`).
+- [SOS-04 §15] 2026-05-27 cross-reference entry "PCDN-SOS-09-G-005 ratified (apply_mpu_config timing owned by SOS-04)" carries `apply_mpu_config()` forward (commit `1180910`).
+- The PCDN-SOS-09-G-005 ratification entry above on this doc (commit `1180910`) uses `apply_mpu_config()` in every normative clause; the only `sos_mpu_install()` reference is the explicit naming-drift acknowledgement.
+
+The non-canonical `sos_mpu_install()` identifier appeared only in §5.5 prose + the §3 glossary entry + the §5.3 C / Rust function declarations + the INV-S-MEM-G-3 invariant statement + the §9 (c) acceptance gate + the §13 files-cited recap of glossary terms. Three commits (one Wave-2P, two Wave-5C) already pin `apply_mpu_config()` as the cross-boundary identifier; the path of least drift is updating SOS-09-G's normative surface to match.
+
+**Normative changes landing in this commit.**
+
+- §3 glossary (`docs/concepts/SOS-09-G-CONCEPTS.md:51-52`) — rename the glossary entry; the entry text adds a parenthetical pointing at this errata + flagging that historical §16 entries dated before 2026-05-27 retain the earlier identifier.
+- §4 source-of-truth map (`SOS-09-G-CONCEPTS.md:69`) — rename the row label.
+- §5.3 emission outputs (`SOS-09-G-CONCEPTS.md:138, 154`) — rename the C `void` declaration and the Rust `pub fn` declaration.
+- §5.5 section heading + prose (`SOS-09-G-CONCEPTS.md:174, 178, 187`) — rename the section title, the function-introducing sentence, and the idempotency sentence. The 6-step disable→write→disable-unused→PRIVDEFENA→enable→DSB-ISB sequence is unchanged; only the function identifier changes.
+- §7 invariant INV-S-MEM-G-3 (`SOS-09-G-CONCEPTS.md:216`) — rename the function identifier in the invariant statement. The invariant content (idempotency demonstrated by twice-invoke equivalence) is unchanged.
+- §9 acceptance gate (c) (`SOS-09-G-CONCEPTS.md:245`) — rename the function identifier in the test-scaffolding cite.
+- §13 files-cited recap (`SOS-09-G-CONCEPTS.md:333, 335, 336`) — these lines are INSIDE the 2026-05-25 §16 "Initial draft (Ira)" historical entry and are NOT modified; they remain as institutional memory of the original glossary / frozen-decision / invariant naming at draft time. The recap is informative; the normative §3 / §5 / §7 surfaces above are what the codegen + runtime contracts read against.
+
+**Historical §16 entries are NOT modified per parent CLAUDE.md "stealth-revert prohibition" + ERRATA.md "entries are permanent" doctrine.** The 2026-05-25 "Initial draft (Ira)", 2026-05-25 "Ratified (Ira)", 2026-05-27 "SOS09G1 implementation entry + cite reconciliation (ERRATA-002)", and 2026-05-27 "PCDN-SOS-09-G-005 ratification" entries all retain `sos_mpu_install()` exactly as they were written. They are institutional memory of how the drift accumulated and how it was identified; rewriting them would erase the very evidence ERRATA-007 records.
+
+**Cross-reference (co-authored in this commit).** [SOS-04 §15] amendment "2026-05-27 — Cross-reference: ERRATA-007 settles MPU install function name" records the SOS-04 side; the entry confirms `apply_mpu_config()` as the canonical name across both phase docs and cites ERRATA-007 + this §16 entry.
+
+**No behaviour change.** No code module is touched in this commit (the actual emitted Rust + C function names in `tools/sos-codegen/transliterate_mpu.py` MAY differ from the canonical spec name — that's a separate code-doc drift outside the scope of this errata, to be reconciled when the implementation-side rename lands). No frozen decision changes. No invariant content changes. The §5.5 install sequence (6 steps) is unchanged. The PCDN-SOS-09-G-005 ownership split (SOS-04 owns timing; SOS-09-G owns table + function body) is unchanged.
+
+**Frozen-enumeration registration policy: Specification Required** — the function identifier is a phase-local mechanic; future renames are a phase-owner walkthrough update, not a Standards Action amendment (the cross-boundary contract is the function's existence + signature shape, both of which are unchanged).
+
+**INV-SOS-A / INV-SOS-E unchanged.** The chart-as-source claim and the `compose` relationship between SOS-09-G and SOS-04 are unaffected by the spec-text rename; no upstream-vs-downstream ownership shift occurs.
+
+Status: 🟢 **ERRATA-007 resolved**. The §5.5 normative surface and the SOS-04 §15 boundary-set table now agree on `apply_mpu_config()` as the canonical identifier.
