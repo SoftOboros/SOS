@@ -284,15 +284,20 @@ class TestSection5EmissionOutputs:
         )
 
     def test_install_hook_named(self, doc_text: str) -> None:
+        """Per ERRATA-007 (commit `92b1120`) the canonical name is
+        `apply_mpu_config()`. §5 normative prose now uses the canonical
+        name; the historical `sos_mpu_install` name survives only in
+        pre-2026-05-27 §15/§16 entries (institutional memory)."""
         section5 = _section_slice(doc_text, 5)
-        assert "sos_mpu_install" in section5, (
-            "§5 MUST name the `sos_mpu_install()` runtime hook."
+        assert "apply_mpu_config" in section5, (
+            "§5 MUST name the `apply_mpu_config()` runtime hook "
+            "(canonical per ERRATA-007)."
         )
 
     def test_install_idempotent(self, doc_text: str) -> None:
         section5 = _section_slice(doc_text, 5)
         assert "idempotent" in section5.lower(), (
-            "§5 MUST state that `sos_mpu_install()` is idempotent."
+            "§5 MUST state that `apply_mpu_config()` is idempotent."
         )
 
 
