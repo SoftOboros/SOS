@@ -361,12 +361,13 @@ def test_tool_catalog_resolves_extract_region_to_subchart_handler() -> None:
 
 
 def test_tool_catalog_raises_for_still_unimplemented_tool() -> None:
-    """`inline_subchart` is registered in the catalog (per SOS-11 §15
-    Wave-1) but its handler is the Wave-3 K deliverable; lookup MUST
-    raise a clearly-cited KeyError."""
+    """A higher-intent tool (`factor_dispatch`) is registered in the catalog
+    (SOS-11 §5.2) but has no handler binding; lookup MUST raise a clearly-
+    cited KeyError. Retargeted from `inline_subchart` post-Wave-4U1 since
+    inline now resolves through HANDLER_BINDINGS."""
     with pytest.raises(KeyError) as exc:
-        get_handler("inline_subchart")
-    assert "Wave-1" in str(exc.value) or "Still open" in str(exc.value)
+        get_handler("factor_dispatch")
+    assert "Still open" in str(exc.value) or "no executable handler" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
