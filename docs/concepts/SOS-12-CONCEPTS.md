@@ -567,3 +567,19 @@ Wave-2 integration boundary: the local `SubChartContract` / `DispatchEdge` input
 Wave-1B fan-out: `tools/sos-codegen/sos12_bound.py` + `tools/sos-codegen/tests/test_sos12_bound.py` implement the §6.1-§6.4 bound-composition algebra as a pure-function module. Per-layer SUM (not Cartesian product) per INV-SOS-F + §6.3; SCXML `<parallel>`-style independence axes surface separately from sequential composition per §6.2 / §6.4; INV-S-DISP-5 (per-layer vector count is local) verified by property test. DAG enforcement per INV-S-DISP-3 (self + mutual + n-cycle rejection). Recursion depth cap default 8 per §6.5 + PCDN-SOS-12-005, project-overridable. Worked-example test pins §8.4 HTTP family bounds (47 for the 5-chart top + per-method-only family). 25 tests passing.
 
 Wave-2 integrator wires the Wave-1A `DispatchInventory` (annotation parser) output into this module's `BoundInputs` shape; the integration boundary is documented in the module's top-of-file docstring.
+
+### 2026-05-27 — SOS12I1: contract-matching verifier landed (Ira)
+
+Wave-2 fan-out: `tools/sos-codegen/sos12_contract_match.py` + `tools/sos-codegen/tests/test_sos12_contract_match.py` (25 tests, all passing) implement the §5.3 contract-matching algebra as a PCDN-SOS-12-006 compile-time gate. Per INV-S-DISP-2 every dispatch boundary now has a callable contract-match check; the verifier is the operational artifact that makes "contract-matching is mandatory" a compile-time property rather than aspirational prose.
+
+The module exposes:
+
+- `verify_contract_match(edge: DispatchContractEdge) -> None` — pure-function single-edge check; raises `ContractMismatchError` (carrying `pcdn="PCDN-SOS-12-006"`, `invariant="INV-S-DISP-2"`, frozen `clause` enum, `missing`/`extra` sets, INV-SOS-H `chart_path`) on the first failing clause.
+- `verify_inventory(inventory, *, edge_provider=simple_edge_provider) -> None` — depth-first walker over the Wave-1A `DispatchInventory` tree; first-failure halts traversal with the failing edge's chart_path naming the exact dispatch site.
+- `simple_edge_provider` — reference adapter deriving per-dispatch parent expectation from the parent chart's own `<sos:contract>` (the §5.2 four-set algebra applied at the chart level; adequate for single-dispatch charts, documented limitation for multi-dispatch).
+
+Six §5.3 clauses verified: `events_in`, `events_out`, `invariants_assumed`, `reads`, `writes` as strict set-membership checks against parent-side expectations; `invariants_maintained` as a documented v1 no-op pending invariant-grammar ratification (§14 non-goal). Clause enum is Standards Action — adding a clause needs §15 amendment.
+
+Wave-3 extension points reserved at the module foot: Wave-3 J (`extract_region_to_subchart`) wires this verifier as the discharge gate after extraction; Wave-3 K (`inline_subchart`) calls it in reverse before allowing inline. Both consumers operate on `DispatchContractEdge` records the SOS-11 MCP tool already has materialised, so no inventory walk is needed at the tool-call boundary.
+
+Spec ambiguity resolved by interpretation: §5.2 does not pin write-before-read ordering precisely (it states the four-set algebra but defers structural enforcement to the parent's reachability analysis). The v1 verifier checks set-membership only (`child.reads ⊆ parent.writes_before_dispatch`; `child.writes ⊆ parent.reads_after_dispatch`); the ordering check is delegated to the parent's per-layer reachability vectors (SOS-03 §6.1) plus the SOS-12 §7.2 boundary vectors at dispatch entry. Documented in `_check_reads` / `_check_writes` docstrings.
