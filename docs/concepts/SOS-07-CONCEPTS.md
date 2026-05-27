@@ -146,7 +146,7 @@ Per INV-SOS-E. Frozen enumeration registration policy: **Specification Required*
 | AMQP 1.0 | OASIS | **compose** | SOS-10 (forthcoming) | none — AMQP is one medium among many |
 | gRPC | open project | **compose** | SOS-10 (forthcoming) | same |
 | MCP (Model Context Protocol) | Anthropic-led, open | **adapt** | SOS-11 (forthcoming) | none — MCP wire is upstream |
-| CSP (Communicating Sequential Processes) | Hoare 1978 + ISO | **compose** (cite for bound-composition lineage) | SOS-12 (forthcoming) | none — citation only |
+| CSP (Communicating Sequential Processes) | Hoare 1978; ISO/IEC 13568:1996 | **compose** (sub-charts are CSP processes; events-in / events-out are CSP channels; contract-matching at dispatch is CSP channel synchronisation; SOS extends CSP with bounded-vector emission as a first-class operation) | SOS-12 §6.4, §11 (ratified 2026-05-23) | none — citation only; SOS does not modify CSP |
 
 This matrix is the defence against the failure mode CLAUDE.md names: *"we copied it into our schema, therefore we own it."* Every external standard's relationship is explicit; no silent ownership creep.
 
@@ -270,3 +270,21 @@ Each per-phase cycle proceeds independently and on its own ratification schedule
 - Co-landed with §15 amendments on SOS-00 through SOS-06 (in this drop's commit) and rename-pass updates on README / AGENTS / CLAUDE.
 
 Status: 🟢 ratified; subsequent SOS-NN phase ratifications proceed independently.
+
+### 2026-05-27 — SOS07-12-CSP absorption (closes SOS-12 §13(j))
+
+Absorbs the CSP `AuthorityRelationship` row declared by [SOS-12 §11][sos-12-matrix] (ratified 2026-05-23) into §7 per **INV-SOS-E** (explicit AuthorityRelationship) and per SOS-12 §13(j) acceptance gate. Replaces the §7 placeholder row that read "Hoare 1978 + ISO / compose (cite for bound-composition lineage) / SOS-12 (forthcoming) / citation only" with the full row declared by SOS-12 §11:
+
+| Concept | Upstream authority | Local relationship | Phase that declares it | Mutation rights |
+|---|---|---|---|---|
+| CSP (Communicating Sequential Processes) | Hoare 1978; ISO/IEC 13568:1996 | **compose** (sub-charts are CSP processes; events-in / events-out are CSP channels; contract-matching at dispatch is CSP channel synchronisation; SOS extends CSP with bounded-vector emission as a first-class operation) | SOS-12 §6.4, §11 (ratified 2026-05-23) | none — citation only; SOS does not modify CSP |
+
+Origin: SOS-12 §11 declares the row; SOS-12 §6.4 establishes the citation lineage (Hoare 1978 + ISO/IEC 13568:1996) per **EOQ-007-ROADMAP** resolution (2026-05-22, cite CSP explicitly for INV-SOS-F's per-layer × independence-axis bound composition).
+
+The `compose` relationship value is unchanged from the placeholder. The row's substance (the parenthetical detail on which CSP terms SOS uses, and the explicit acknowledgement of SOS's bounded-vector-emission extension) is what SOS-12 §11 added; this absorption brings §7 in sync with that detail so future readers do not have to cross-reference SOS-12 to see what SOS's CSP relationship actually entails.
+
+**Precedent note.** This is the **first `compose` row in §7 that names an academic / standardization-body upstream** (Hoare 1978 + ISO/IEC 13568:1996) rather than a tool, protocol, or wire format (AMQP, gRPC, MCP). The `compose` relationship vocabulary handles this case identically — `compose` is defined as "use upstream terms as components in a higher-level construct this repo owns", which fits CSP's process-algebraic operators serving as primitives in SOS-12's per-layer × independence-axis bound-composition algebra. The precedent is worth recording for future similar absorptions (formal-methods theories, type-system papers, programming-language semantics papers, etc.): such rows enter §7 the same way any tool/wire-format row does, with the upstream-authority column carrying the bibliographic citation rather than a standards-body-document name.
+
+**Registration policy reaffirmed.** Per §7 header and §9.2: adding a new row to the §7 matrix is **Specification Required** (phase-owner walkthrough; no §15 amendment to SOS-07 strictly required to add a row — though this absorption files one anyway to record the SOS-12 §13(j) closure event). **Modifying an existing row's relationship value** (e.g. flipping `compose` → `extend`) remains **Standards Action** (requires §15 amendment to SOS-07). **Adding a new RELATIONSHIP type beyond the seven defined in §9.2** (`{ mirror, adapt, extend, compose, own, derive, represent }`) is **Standards Action** at parent-CLAUDE.md scope — would require an amendment to parent CLAUDE.md "Standards integration: authority boundary declarations" and a §15 amendment to SOS-07 mirroring the change.
+
+[sos-12-matrix]: ./SOS-12-CONCEPTS.md#11-standards-integration-matrix-additions-to-sos-07-§7
