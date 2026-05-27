@@ -575,3 +575,45 @@ The conservative default is "ineligible" — every unknown / partial signal refu
 **Files cited.** [`docs/concepts/SOS-13-CONCEPTS.md`](./SOS-13-CONCEPTS.md) §7.1, §7.3, §7.5, §8, §12(b); [`docs/concepts/SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md) INV-SOS-G; [`docs/concepts/SOS-00-CONCEPTS.md`](./SOS-00-CONCEPTS.md) §9 INV-S7 / INV-S8; sister module `tools/sos-codegen/sos13_invariants.py` (wave-1E SOS13F1 §15 entry above); hook site `tools/sos-codegen/transliterate_rust.py:apply_verified_strip` (gains optional `bounds_input` kwarg).
 
 Status: 🟢 **landed**. §12(b) acceptance gate closure pending the SOS-02 / SOS-03 IR-to-codegen wiring that threads `BoundsAnalysisInput` instances through `main.py` to per-site `apply_verified_strip` calls; the eligibility module + hook are ready for that wiring without further refactor.
+
+### 2026-05-27 — SOS13W6D: BoundsAnalysisInput producer protocol landed (Ira)
+
+Wave-6 follow-on against §7.3 (eligibility analysis) and §8.1 (the `INV-S-CHART-N` series). This commit lands the **producer-side INTERFACE** for `BoundsAnalysisInput` instances; it explicitly does NOT land the SOS-02 host-simulator wiring nor the SOS-03 conformance-vector wiring (those remain deferred to dedicated future-wave §15 amendments — see deferral list below).
+
+**Public surface.** `tools/sos-codegen/sos13_bounds_producer.py` exports:
+
+- `BoundsProducer` — a `@runtime_checkable` `typing.Protocol` with one method, `produce(self, chart_path: pathlib.Path) -> BoundsAnalysisInput`. Real producers (SCXML walker, SOS-02 trace reader, SOS-03 vector runner) MUST satisfy this Protocol; `isinstance(producer, BoundsProducer)` SHOULD pass at runtime.
+- `InMemoryBoundsProducer` — a minimal stub for tests and demo scripts. Constructed with a pre-built `BoundsAnalysisInput`; `produce()` returns it verbatim regardless of `chart_path`. The stub is the reference shape that future producer implementations follow: small constructor, single `produce()` method, no hidden state.
+
+**`Path` vs `str` vs `bytes` — `Path` chosen.** The Protocol's `produce()` accepts `pathlib.Path`. The expected real producers consume on-disk artefacts (SCXML, scjson, vector JSON), `Path` carries platform-correct join semantics for sibling-artefact resolution, and the stub here ignores the argument so the choice has no cost for in-memory producers. Broadening to `str | Path` (duck-typed) or to `bytes` (archive-backed) requires a Specification Required §15 amendment per the registration policy below; reviewers landing the SOS-02 / SOS-03 producers MAY propose that broadening if either upstream's actual artefact source motivates it.
+
+**Upstream + consumer authorities.**
+
+- The `BoundsAnalysisInput`, `InvariantSpec`, and `DischargeAnnotation` dataclasses are authored in [`tools/sos-codegen/sos13_invariants.py`](../../tools/sos-codegen/sos13_invariants.py) (Wave-1E SOS13F1 §15 entry above) and re-exported from `__all__`; this producer module imports them without modification or redefinition.
+- The consumer of producer output is [`tools/sos-codegen/sos13_eligibility.py`](../../tools/sos-codegen/sos13_eligibility.py)'s `check_eligibility(chart_bounds, vs_op, region_id)` (Wave-5E SOS13E1 §15 entry above). The consumer's signature already accepts a `BoundsAnalysisInput`; no adapter or shim was required on the consumer side, and `sos13_eligibility.py` is unchanged in this commit.
+
+**Frozen-enumeration registration policy.**
+
+- **Specification Required** — changes to the `BoundsProducer` Protocol's `produce()` signature (parameter type, return type, addition or removal of methods). Adding a method or broadening the parameter type requires this §15 entry to be amended plus a phase-owner walkthrough update. The shape is local to SOS-13's discharge pipeline; no other phase doc owns it.
+- **Expert Review** — adding sibling producer classes (e.g. `Sos02TraceBoundsProducer`, `Sos03VectorBoundsProducer`, `ScxmlWalkerBoundsProducer`) in `sos13_bounds_producer.py`. Each new producer SHOULD ship next to the stub here unless it carries a substantial dependency that warrants its own module; the PR-level note in that case names the dependency and the import surface.
+
+**Deferred future-wave producer slots** (explicitly out of scope for SOS13W6D):
+
+- **SOS-02 producer (`Sos02TraceBoundsProducer` or similar)** — lands under a future SOS-02 §15 amendment when the host simulator's trace-aware bounds analysis is ratified. Will consume simulator run traces (the bounded-reachability layer in `sim/sos-sim/`) and emit `BoundsAnalysisInput` instances per chart run.
+- **SOS-03 producer (`Sos03VectorBoundsProducer` or similar)** — lands under a future SOS-03 §15 amendment when conformance vectors carry per-vector invariant cites. Will consume vector-run results (the conformance-harness output in `conformance/vectors/`) and emit `BoundsAnalysisInput` instances per vector.
+- **SCXML-walker producer (`ScxmlWalkerBoundsProducer` or similar)** — lands under a future SOS-01 or new SOS-X amendment when a chart-level static analysis (scjson AST walker) is in scope. Will consume the SCXML/scjson AST directly and emit `BoundsAnalysisInput` instances per chart, independent of any runtime execution surface.
+
+Each future producer wave reaffirms (in its own §15 entry) that it satisfies the `BoundsProducer` Protocol; structural `isinstance` checks in test code defend the contract.
+
+**INV-SOS-G traceability.** Per [SOS-07 INV-SOS-G](./SOS-07-CONCEPTS.md), no verified-strip emission is silent — every unchecked block cites the invariant that discharges it. The producer/consumer split formalised here preserves the invariant by construction:
+
+- The PRODUCER binds each `<sos:discharged>` site to its `INV-S-CHART-N` (the `discharges_invariant` field on `DischargeAnnotation` — explicit binding wins; prefix-match fallback in `sos13_invariants._build_registry`); the consumer trusts that binding.
+- The CONSUMER (`sos13_eligibility.check_eligibility`) refuses strips that lack a citable discharge; the producer trusts that refusal.
+
+The two responsibilities never overlap, so adding or fixing a producer cannot accidentally erode INV-SOS-G unless it also passes the consumer's eligibility check — which is the choke point that defends the invariant.
+
+**Tests.** `tools/sos-codegen/tests/test_sos13_bounds_producer.py` — 9 tests, all passing. Coverage: Protocol `@runtime_checkable` shape (positive + negative `isinstance`), stub returns bounds verbatim (identity-equality), stub ignores `chart_path` (path-agnostic), stub rejects non-`BoundsAnalysisInput` construction with `TypeError`, stub accepts empty bounds, end-to-end producer → eligibility chain (eligible + ineligible verdicts via the stub), Protocol signature accepts `pathlib.Path`. Regression: wave-5E `test_sos13_eligibility.py` (33 tests) + wave-1E `test_sos13_invariants.py` (23 tests) — all passing (65 tests total across the three SOS-13 modules).
+
+**Files cited.** [`docs/concepts/SOS-13-CONCEPTS.md`](./SOS-13-CONCEPTS.md) §7.3, §7.5, §8.1; [`docs/concepts/SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md) INV-SOS-G; sister modules `tools/sos-codegen/sos13_invariants.py` (Wave-1E SOS13F1 §15 entry above) + `tools/sos-codegen/sos13_eligibility.py` (Wave-5E SOS13E1 §15 entry above). Neither sister module was modified in this commit.
+
+Status: 🟢 **landed**. Interface contract for future SOS-02 / SOS-03 / SCXML-walker producer waves is now in place; each wave's §15 amendment will name the producer it adds and confirm it satisfies the `BoundsProducer` Protocol.
