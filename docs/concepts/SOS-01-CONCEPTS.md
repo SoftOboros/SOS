@@ -954,3 +954,103 @@ The namespace URI is the SOS-13-owned extension-namespace URI. The prefix `sos:`
 **Cross-reference.** See [SOS-13 §7.5](./SOS-13-CONCEPTS.md) for the chart-side grammar's full specification (annotation shape, frozen `check` enumeration, multiplicity, inheritance, codegen behaviour) and [SOS-13 §15 — PCDN-13-discharge-grammar ratified (2026-05-23)](./SOS-13-CONCEPTS.md) for the co-landing SOS-13-side ratification entry.
 
 No frozen-enum value modified at SOS-01. No PCDN re-ratified. `ExternalEventName` (§5.3) and `StateId` (§5.4) are unaffected — `<sos:discharged>` is an extension-namespace element, not an event name or state id. SOS-01 stays 🟢 ratified.
+
+### 2026-05-27 — SOS01-09 channel-annotation lint amendment (Ira)
+
+Co-landing amendment to [SOS-09 §12 (i)](./SOS-09-CONCEPTS.md) per the 2026-05-27 SOS09W1 roll-up commit `43c45bf` (the umbrella's §15 bookkeeping entry naming the outstanding co-land obligation on SOS-01). This amendment closes that gate by adding three new lint rules to SOS-01's catalog that enforce the SOS-09 channel-annotation surface frozen in [SOS-09-A §5.2 / §5.4](./SOS-09-A-CONCEPTS.md). Additive §15 amendment; SOS-01 stays 🟢 ratified.
+
+**Recognition.** The `sos:`-prefixed JSON keys inside iState's `other_attributes` extension surface (per the 2026-05-25 SOS-09 §15 PCDN-SOS-09-001 amendment routing channel annotations through `other_attributes` with a STRING key prefix) constitute a SOS-09-owned chart-author surface. SOS-01's role is to lint the surface at chart-load time so authoring errors (unknown `sos:`-prefixed keys, illegal enum values) fail loudly rather than silently producing broken downstream artifacts. The authoritative twelve-key set and the four-value `sos:kind` enum live in SOS-09-A; the three lint rules below enforce them without restating them.
+
+**Lint rules introduced.** Three new rules under the new category prefix `SCXML-LINT-CH-N` (channel-annotation lint). This is the first non-numeric category-prefix series in the catalog; per `LintRuleId` (§5.5) Standards Action policy and INV-S-LINT-5 (rule ids stable), the `SCXML-LINT-CH-N` namespace is reserved for SOS-09 chart-annotation lint and is append-only. The original `SCXML-LINT-NNN` numeric series remains owned by core SOS-01 chart structure / vocabulary / determinism lint; the category-prefix form (`SCXML-LINT-CH-N`, future `SCXML-LINT-DISP-N` for SOS-12, etc.) is the convention for downstream-phase-owned lint families that ride on SOS-01's runner without consuming the numeric id space.
+
+- **SCXML-LINT-CH-1 — Unknown `sos:`-prefixed key (severity: `error`).**
+
+  **Normative:** An `other_attributes` JSON key beginning with the four-character STRING prefix `sos:` on any iState/SCXML element MUST name a member of the SOS-09-A §5.2 authoritative twelve-key set:
+
+  ```
+  sos:id, sos:name, sos:kind, sos:dir, sos:zone, sos:atomicity,
+  sos:width, sos:bit_layout, sos:irq, sos:mutex,
+  sos:channel_group, sos:privilege_region
+  ```
+
+  Any other `sos:`-prefixed key (typo, speculative extension, removed-but-not-cleaned-up key) is a hard lint error. The chart-author-friendly diagnostic MUST name the offending key, the parent element (by chart `id` or path), and the full twelve-key list.
+
+  **Rationale:** A `sos:`-prefixed key that does not match the authoritative set is either (a) a typo (`sos:kindd`, `sos:dir_`), (b) a speculative extension that bypassed Standards Action ratification, or (c) a stale key from a removed feature. All three silently produce a chart that the downstream SOS-09 emitters either reject inconsistently or — worse — pass through without applying the intended semantic. Catching at lint time matches the §0 authority policy: SOS-01 owns the lint surface; SOS-09-A owns the key list.
+
+  **Example violation:**
+  ```json
+  {"position_x": 100, "sos:kindd": "status", "sos:dir": "hw→sw"}
+  ```
+
+  **Example fix:** correct the typo (`sos:kind`); OR, if the new key is genuinely needed, file a §16 amendment to SOS-09-A §5.2 adding the thirteenth key before the chart edit lands (Standards Action; see registration-policy note below).
+
+- **SCXML-LINT-CH-2 — Illegal `sos:kind` value (severity: `error`).**
+
+  **Normative:** When `sos:kind` is present, its value MUST be one of the four members of the SOS-09 §5.1 frozen channel-category enum:
+
+  ```
+  kind ∈ { status, command, queue, shared }
+  ```
+
+  Any other value (typo, speculative fifth category) is a hard lint error. The diagnostic MUST name the offending value, the parent element, and the four-value enum.
+
+  **Rationale:** Mirrors SOS-09-A §5.4 (3) at the SOS-01 lint layer. The SOS-09 §5.1 enum is the load-bearing vocabulary for the channel → membrane-primitive mapping (§5.2 of the umbrella); a typo (`statu`, `commad`) silently falls off the mapping table and produces a chart that emits zero artifacts for the channel rather than failing loudly. Per PCDN-SOS-09-A-004 (ratified 2026-05-25), the umbrella's chosen severity is hard error — "syntax error on any other compiler" — and SOS-01 mirrors that choice.
+
+  **Example violation:** `{"sos:id": "<UUID>", "sos:name": "rx_path", "sos:kind": "statu", "sos:dir": "hw→sw"}`.
+
+  **Example fix:** correct to one of the four enum values; OR, if a genuine fifth category is needed, file a §15 amendment to SOS-09 §5.1 (Standards Action, cross-phase consensus) before any chart edit lands.
+
+- **SCXML-LINT-CH-3 — Illegal `sos:dir` value (severity: `error`).**
+
+  **Normative:** When `sos:dir` is present, its value MUST be one of the values admitted by SOS-09 §5.2's channel → membrane-primitive mapping table:
+
+  ```
+  dir ∈ { hw→sw, sw→hw, hw↔sw }
+  ```
+
+  Any other value (typo, speculative direction) is a hard lint error. The diagnostic MUST name the offending value, the parent element, and the admitted set.
+
+  **Rationale:** Mirrors SOS-09-A §5.4 (3) and SOS-09 §5.2 at the SOS-01 lint layer. The dir vocabulary is the second half of the (`kind`, `dir`) pair that selects a row in the SOS-09 §5.2 mapping table; a typo (`hw->sw` ASCII, `bidi`) silently misses the table and the channel emits zero artifacts. SOS-09-A §5.4 (4) (cross-attribute consistency between `kind` and `dir`) is NOT enforced by SCXML-LINT-CH-3 — that consistency check belongs to the chart-load-time validator at `tools/sos-codegen/` (per SOS-09-A §5.4); SCXML-LINT-CH-3 enforces only the per-key value-shape constraint, which is the SOS-01-appropriate slice (SOS-01 lints text and vocabulary; behavioural validation is downstream, per INV-S-LINT-6).
+
+  **Example violation:** `{"sos:id": "<UUID>", "sos:name": "tx", "sos:kind": "command", "sos:dir": "bidi"}`.
+
+  **Example fix:** correct to one of the three admitted values.
+
+**Summary-table extension.** The §6.8 summary table (informative) gains a new "Channel-annotation" category row block:
+
+| Rule | Severity at draft | Category |
+|---|---|---|
+| SCXML-LINT-CH-1 — Unknown `sos:`-prefixed key | `error` | Channel-annotation |
+| SCXML-LINT-CH-2 — Illegal `sos:kind` value | `error` | Channel-annotation |
+| SCXML-LINT-CH-3 — Illegal `sos:dir` value | `error` | Channel-annotation |
+
+Updated severity counts post-amendment: **error: 14**, **warning: 7**, **info: 0**. (Adds three errors to the §6.8 summary's pre-amendment 11/7/0.)
+
+**Registration policy.** The twelve-key set (§5.2 of SOS-09-A) and the two value enums (`sos:kind` per SOS-09 §5.1; `sos:dir` per SOS-09 §5.2 + SOS-09-A §5.4(3)) all carry **Standards Action** registration policy:
+
+- The twelve-key set is per SOS-09-A §5.2 ratification (PCDN-SOS-09-A-003 ratified 2026-05-25; PCDN-SOS-09-007 follow-on ratified 2026-05-26).
+- The `sos:kind` four-value enum is per SOS-09 §5.1 ratification (Standards Action stated there).
+- The `sos:dir` enum is per SOS-09 §5.2 mapping rows + SOS-09-A §5.4(3) ratification (Standards Action; the mapping table is the umbrella's load-bearing surface).
+
+Adding a thirteenth `sos:`-prefixed key (e.g. a hypothetical `sos:dma_chain`) requires a **co-landed amendment on both SOS-01 (this rule SCXML-LINT-CH-1) and SOS-09-A (the §5.2 authoritative key list)**. The SOS-09-A amendment is the source of truth; the SOS-01 lint rule's list MUST be kept in lockstep so the lint runner accepts the new key. Same pattern for extending the `sos:kind` enum (requires SOS-09 §5.1 + this rule SCXML-LINT-CH-2) or the `sos:dir` enum (requires SOS-09 §5.2 + this rule SCXML-LINT-CH-3). Per parent CLAUDE.md "Execution discipline", the spec amendments land FIRST in a separate PR; no behaviour PR rides on an unamended invariant.
+
+**Implementation citation.** Tracked alongside the next SOS-01 lint-runner wave; the three rules' implementations land in `tools/sos-codegen/` (the family-wide codegen tool tree, which already hosts the SOS-09-A parse-and-validate path at `tools/sos-codegen/sos09_annotations.py` per the SOS-09 §15.7 2026-05-26 entry). The exact module path is left to the implementation commit; this §15 entry does not invent a path that does not exist.
+
+**Cross-reference to ERRATA.** ERRATA-001 and ERRATA-002 (filename-rename reconciliations under `transliterate_*` for SOS-09-B and SOS-09-G, landed in commit `d24528f`) do not directly intersect this amendment — they touch SVD and MPU emit-path module naming, not lint-rule content. They are cited here as context: the SOS-09 implementation tree settled on the `tools/sos-codegen/transliterate_*.py` / `tools/sos-codegen/sos09_annotations.py` naming, which is the same tree the three new lint rules will land into.
+
+**Future SOS-12 lint family (informative).** Any future SOS-12 dispatch-element lint rules (e.g. nested-depth caps, contract-mismatch reporting per the SOS-12 dispatch+contract annotation parser landed in `45de592`) would land under a separate `SCXML-LINT-DISP-N` series owned by SOS-12, registered in SOS-01's `LintRuleId` namespace per §5.5 (Standards Action). This amendment does not pre-allocate any `SCXML-LINT-DISP-N` ids; SOS-12 owns the series when its first lint rule ratifies.
+
+**Non-goal §11 reconciliation.** SOS-01 §11 forbids "Replacing W3C SCXML 1.0 with a SOS-specific superset". The `sos:`-prefixed `other_attributes` JSON keys do NOT violate this non-goal: per SOS-09-A INV-S-MEM-A-3 / INV-S-MEM-A-4, the `sos:` prefix is a JSON-key STRING convention only — NOT an XML namespace prefix. The chart-side XML carries no `xmlns:sos` declaration (and a chart that does is itself a hard error per SOS-09-A §5.4 (9)). The W3C SCXML 1.0 grammar is unmodified; `other_attributes` is iState's extension surface (relationship `compose` per SOS-09-A §8), and SOS-09 attaches semantic keys inside that pre-existing surface. The §11 prohibition is preserved.
+
+**Chart-file follow-up.** `rtos_kernel.scxml` at HEAD does NOT currently declare any `sos:`-prefixed channel annotations (the kernel chart is a pure-software statechart with no hardware membrane). When the first chart that declares a SOS-09 channel lands (driven by SOS-09-B/-C/-D/-E/-F/-G consumers exercising worked examples), the three new lint rules activate for that chart. This amendment does NOT itself edit `rtos_kernel.scxml`.
+
+**Cross-references.**
+- [SOS-09 §12 (i)](./SOS-09-CONCEPTS.md) — gate text closed by this amendment.
+- [SOS-09 §15 (2026-05-27 SOS09W1 roll-up)](./SOS-09-CONCEPTS.md) — the umbrella's bookkeeping entry naming the outstanding co-land obligation.
+- [SOS-09 §5.1 / §5.2](./SOS-09-CONCEPTS.md) — authoritative source for the four-value `sos:kind` enum and the channel → membrane-primitive mapping (source of the admitted `sos:dir` values).
+- [SOS-09-A §5.2](./SOS-09-A-CONCEPTS.md) — authoritative twelve-key set; mirrored verbatim in SCXML-LINT-CH-1.
+- [SOS-09-A §5.4](./SOS-09-A-CONCEPTS.md) — chart-load-time validation rules; SCXML-LINT-CH-2 / -CH-3 mirror rules (3) at the SOS-01 lint layer.
+- [SOS-09 §15 PCDN-SOS-09-001 amendment (2026-05-25)](./SOS-09-CONCEPTS.md) — JSON-key STRING prefix convention.
+- [SOS-09 §15.7 (2026-05-26 PCDN-SOS-09-007)](./SOS-09-CONCEPTS.md) — `sos:channel_group` + `sos:privilege_region` additions completing the twelve-key set.
+
+No frozen-enum value modified at SOS-01 (the `ECMAScriptFeature`, `LintRuleSeverity`, `ExternalEventName`, `StateId`, and pre-existing `SCXML-LINT-001..018` portions of `LintRuleId` are unchanged). The `LintRuleId` namespace (§5.5) grows by three with `SCXML-LINT-CH-1`, `SCXML-LINT-CH-2`, `SCXML-LINT-CH-3`; the category-prefix convention is introduced for downstream-phase-owned lint families as documented above. No PCDN re-ratified. SOS-01 stays 🟢 ratified.
