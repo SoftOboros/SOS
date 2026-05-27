@@ -2,7 +2,9 @@
 
 **Status:** 🟢 **ratified 2026-05-23**. All 6 PCDNs walked; resolutions recorded at the end of §15.
 
-**Blocks:** SOS-12 (recursive chart dispatch — the `extract_region_to_subchart` / `inline_subchart` tools land here and the §-numbered legibility-discipline integration lands there).
+**Peers:** [SOS-12][sos-12] (recursive chart dispatch — ratified 2026-05-23 alongside this doc). The `extract_region_to_subchart` / `inline_subchart` tools are catalogued here; their contract algebra (declared events-in / events-out, per-layer bound composition, legibility-discipline integration) is owned by SOS-12. The two phases were co-designed and co-ratified.
+
+[sos-12]: ./SOS-12-CONCEPTS.md
 
 > 🛑 **NO CODE.** Tool surface, result contract, failure modes, history-as-commits convention, viewer contract, permission scoping, frozen tool-name enumerations, AuthorityRelationship for MCP wire. The MCP host plumbing (iState's tool-catalogue server) is not authored by this doc — SOS-11 specifies the tool surface; iState hosts it.
 
@@ -125,7 +127,7 @@ Algebraic operations on the chart's semantic structure. Each operation has one w
 | `remove_transition` | Remove a transition by `(source, target, event)` triple. Fails if the triple is ambiguous. |
 | `nest_region` | Wrap a set of sibling states inside a new `<state>` or `<parallel>` parent. Parameters: `child_ids`, `new_parent_id`, `kind` ∈ {`compound`, `parallel`}. |
 | `unnest_region` | Inverse of `nest_region`: replace a parent state with its children promoted to siblings. Fails if the parent has entry/exit scripts that would be lost. |
-| `extract_region_to_subchart` | Lift a region into its own SCXML document with a declared contract (events-in, events-out, invariants). Replaces the region in the parent chart with a single state that dispatches to the subchart. Per [SOS-12][sos-12-link] formal model; SOS-11 ships the tool, SOS-12 ratifies the contract algebra. |
+| `extract_region_to_subchart` | Lift a region into its own SCXML document with a declared contract (events-in, events-out, invariants). Replaces the region in the parent chart with a single state that dispatches to the subchart. Per [SOS-12][sos-12] formal model (ratified 2026-05-23); SOS-11 ships the tool, SOS-12 owns the contract algebra. |
 | `inline_subchart` | Inverse of `extract_region_to_subchart`. Replaces a dispatching state with the subchart's body inlined. Fails if the subchart's declared invariants are not provable in the inlined context. |
 | `add_event_to_vocabulary` | Add an external event name to the chart's frozen event vocabulary (per [SOS-01 §5][sos-01]). Fails if the name collides. |
 | `remove_event_from_vocabulary` | Remove an event name. Fails if any transition references it. |
@@ -134,8 +136,6 @@ Algebraic operations on the chart's semantic structure. Each operation has one w
 | `update_datamodel_entry` | Modify a `<data>` element's type or initial-value expression. Atomic; fails if the type change is incompatible with existing references. |
 | `add_invariant` | Attach an invariant to a state or transition (in the per-chart invariant vocabulary feeding [INV-SOS-B][inv-sos-b] bound analysis). |
 | `remove_invariant` | Detach an invariant. |
-
-[sos-12-link]: ./SOS-ROADMAP-07-PLUS.md
 
 Registration policy for §5.1: **Specification Required**. Adding a new primitive requires a §15 amendment to this doc — primitives are the algebraic basis; expanding the basis is a phase-owner decision but not a cross-phase contract change.
 
@@ -149,7 +149,7 @@ Named recurring chart-edit patterns. Each decomposes into a deterministic sequen
 |---|---|
 | `add_event_handler_for_state` | `add_event_to_vocabulary` (if new) + `add_transition(source=state, target=…, event=…, executable_content=…)`. |
 | `extract_orthogonal_region` | `nest_region(kind=parallel)` + `add_state` for each declared region body. |
-| `factor_dispatch` | `extract_region_to_subchart` + `add_event_to_vocabulary` for each declared event-out + insert a `<send>` in the parent for each declared event-in. The protocol-stack motivating example from [roadmap §4 SOS-12][roadmap]. |
+| `factor_dispatch` | `extract_region_to_subchart` + `add_event_to_vocabulary` for each declared event-out + insert a `<send>` in the parent for each declared event-in. The protocol-stack motivating example from [roadmap §4 SOS-12][roadmap]; co-designed with [SOS-12][sos-12] (ratified 2026-05-23, doc at `docs/concepts/SOS-12-CONCEPTS.md`). |
 | `replace_transition_target` | `remove_transition` + `add_transition` with new target. Atomic. |
 | `split_state` | `add_state` + `add_transition` (entry from original state) + (optionally) re-target a subset of incoming/outgoing transitions to the new state. Parameter: which transitions split. |
 | `merge_states` | `rename_state` (deduplicate ids) + `remove_state` of the now-empty merged state. Fails if entry/exit scripts cannot be unified. |
@@ -314,9 +314,9 @@ Lint is the pre-commit validation pass (axis (b) of §6). SOS-11 does NOT extend
 
 SOS-03 owns the conformance vector framework. SOS-11's §6 `vector_delta` field is computed by running the SOS-03 bounded-reachability pipeline against the post-edit chart and diffing the result against the pre-edit set. SOS-11 does NOT author vectors; SOS-11 reports the delta SOS-03 produces.
 
-### vs. [SOS-12][roadmap] recursive dispatch (forthcoming)
+### vs. [SOS-12][sos-12] recursive dispatch
 
-`extract_region_to_subchart` and `inline_subchart` are the operational handles for SOS-12's chart-as-subchart model. SOS-11 ships the tools; SOS-12 ratifies the contract algebra (declared events-in, events-out, declared invariants, per-layer bound composition). The two phases are co-designed: SOS-11 cannot land `extract_region_to_subchart` without a contract surface to extract into; SOS-12 cannot land its contract algebra without a tool to invoke it through.
+`extract_region_to_subchart` and `inline_subchart` are the operational handles for SOS-12's chart-as-subchart model. SOS-11 ships the tools; SOS-12 owns the contract algebra (declared events-in, events-out, declared invariants, per-layer bound composition). The two phases were co-designed and co-ratified (both 🟢 2026-05-23): SOS-11 cannot land `extract_region_to_subchart` without a contract surface to extract into; SOS-12 cannot land its contract algebra without a tool to invoke it through. Implementation of the two subchart handlers themselves is gated on SOS-12 implementation work (see §15 2026-05-27 entry).
 
 ### vs. [SOS-07 §7][sos-07-matrix] MCP `adapt` row
 
@@ -406,3 +406,28 @@ All 6 PCDNs walked and resolved:
 | **006 — `scxml_diff` representation in result** | ✅ **Both**: structured AST as canonical (machine-readable); unified-diff rendered from it on demand for human review. One canonical form underneath; two presentation surfaces. |
 
 Status: 🟢 **ratified**. SOS-11 implementation work (MCP tool catalogue at `tools/sos-codegen/mcp-tools/` or a sibling location; the algebraic-tool-surface implementation; graphical viewer contract handoff to iState) unblocked.
+
+### 2026-05-27 — Wave-1 MCP tool surface implementation landed
+
+First wave of SOS-11 implementation commits landed under `tools/sos-codegen/sos11_mcp/`. Six commits stamp the §5 / §6 / §7 / §8 / §10 contract surfaces; subchart handlers + the full validation composer remain open (dependency edges to SOS-12 noted below).
+
+**Landed** (🟢):
+
+| Commit | Subject | Spec deliverable | Module |
+|---|---|---|---|
+| `ff7fc80` | SOS11-CATALOG: implement MCP tool catalog | §5.1 + §5.2 tool catalogue (frozen primitive + higher-intent names, permission ranks from §10) | `tools/sos-codegen/sos11_mcp/tool_catalog.py` |
+| `0b7d474` | SOS11-CONTRACTS: implement MCP result contracts | §6 four-tuple result shape + §7 `FailureCode` enum types | `tools/sos-codegen/sos11_mcp/contracts.py` |
+| `1df4961` | SOS11-QUERY: implement read-only chart queries | §10.1 read-only tool handlers (`query_state`, `query_transitions`, `query_vectors`, `query_invariants`, `query_event_vocabulary`) | `tools/sos-codegen/sos11_mcp/chart_query.py` |
+| `e5682d4` | SOS11-PERMISSIONS: implement MCP approval gates | §10 three-rank classifier + approval-required predicates | `tools/sos-codegen/sos11_mcp/permissions.py` |
+| `9f171db` | SOS11-DIFF: implement SCXML diff helpers | §6 `scxml_diff` field — structured AST diff + unified-diff renderer (per PCDN-SOS-11-006 "both") | `tools/sos-codegen/sos11_mcp/diffs.py` |
+| `8d1b182` | SOS11-HISTORY: implement chart commit metadata helpers | §8 chart-history-as-git convention — commit-subject / body / author shape (per PCDN-SOS-11-004 default `human-via-agent`) | `tools/sos-codegen/sos11_mcp/history.py` |
+
+**Still open** (🔴 — not landed by these six commits):
+
+- **`extract_region_to_subchart` + `inline_subchart` handler implementations.** Registered in `tool_catalog.py` (lines 43-44, 89) but no executable handlers exist. Gated on [SOS-12][sos-12] implementation (its contract-algebra parser, then the per-layer bound composition machinery). SOS-12 is ratified (🟢 2026-05-23) but its implementation has not yet landed; these two tools cannot be made functional without it.
+- **`validation.py` composer.** §6 axes (a)-(d) are typed in `contracts.py` as `ValidationReport` but no module wires scjson round-trip + SOS-01 lint + SOS-03 bound + invariant-check into a single pre-commit pipeline. Composer must enforce the failure-atomicity guarantee from §7 (chart rolls back on any axis failure).
+- **`vector_delta` computation.** §6 `vector_delta` field is typed but not populated; the computation wires to SOS-03's vector module. Per PCDN-SOS-11-002 resolution, the result-tuple carries a summary and a separate `get_vector_delta(call_id)` tool returns the full delta. Neither path is implemented yet.
+
+**Cross-cite to SOS-12.** SOS-12 (🟢 ratified 2026-05-23, doc at `docs/concepts/SOS-12-CONCEPTS.md`) is the peer phase whose implementation gates the two subchart-handler tools above. The implementation dependency runs SOS-11 → SOS-12 for those two tools only; the rest of the §5.1 / §5.2 surface is independent of SOS-12 and the wave-1 commits cover the §10.1 read-only band end-to-end.
+
+**Invariants touched.** The six wave-1 commits exercise INV-SOS-C (`derive` — the tool surface is the modification path; `chart_query.py` + `permissions.py` are the read-side; `tool_catalog.py` is the registry binding all writes through named tools) and INV-SOS-H (`derive` — `diffs.py` + `history.py` carry chart-vocabulary summaries into commit subjects / bodies). No invariant relationships changed; no §13 row required restating.
