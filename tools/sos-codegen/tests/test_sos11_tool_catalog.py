@@ -35,6 +35,7 @@ EXPECTED_READ_ONLY_QUERY_TOOLS = (
     "query_vectors",
     "query_invariants",
     "query_event_vocabulary",
+    "validate_chart",
 )
 
 EXPECTED_PRIMITIVE_TOOLS = (
@@ -81,7 +82,7 @@ def test_all_tool_names_returns_frozen_catalog_without_duplicates() -> None:
         + EXPECTED_HIGHER_INTENT_TOOLS
     )
     assert all_tool_names() == expected
-    assert len(all_tool_names()) == 29
+    assert len(all_tool_names()) == 30
     assert len(set(all_tool_names())) == len(all_tool_names())
 
 
@@ -261,6 +262,36 @@ def test_get_handler_raises_helpful_keyerror_for_unhandled_known_tool() -> None:
 def test_get_handler_raises_unknown_keyerror_for_unknown_tool() -> None:
     with pytest.raises(KeyError, match="Unknown SOS-11 MCP tool"):
         get_handler("reticulate_splines")
+
+
+# ---------------------------------------------------------------------------
+# SOS11W6C — validate_chart registered as read-only MCP tool (§5 amendment).
+# ---------------------------------------------------------------------------
+#
+# Wave-4U2 (commit 236be36) shipped the four-axis validation composer at
+# ``sos11_mcp.validation.validate_chart`` but left registration as a SOS-11
+# MCP tool open ("the natural next entry alongside the harmonized... dictionaries"
+# in the SOS11U2 §15 entry). Wave-6C closes that line item: ``validate_chart``
+# joins ``READ_ONLY_QUERY_TOOLS`` (it inspects a chart and returns a report,
+# no mutation) and ``HANDLER_BINDINGS`` (canonical declarative dispatch surface
+# per SOS11U1).
+
+
+def test_validate_chart_registered_in_read_only_tools() -> None:
+    """SOS11W6C: ``validate_chart`` is a §10.1 read-only catalog member."""
+    assert "validate_chart" in READ_ONLY_QUERY_TOOLS
+
+
+def test_get_handler_validate_chart_returns_composer() -> None:
+    """SOS11W6C: dispatch surface resolves to the Wave-4U2 composer callable."""
+    handler = get_handler("validate_chart")
+    from sos11_mcp.validation import validate_chart as _expected
+    assert handler is _expected
+
+
+def test_classify_tool_validate_chart_returns_read_only() -> None:
+    """SOS11W6C: §10 permission scoping confirms read-only classification."""
+    assert classify_tool("validate_chart") is Permission.READ_ONLY
 
 
 def test_importing_tool_catalog_does_not_pull_extract_or_inline() -> None:

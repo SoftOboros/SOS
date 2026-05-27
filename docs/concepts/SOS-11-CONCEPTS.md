@@ -680,3 +680,46 @@ Combined entry stamping two Wave-5 ratifications from the 2026-05-27 multi-PCDN 
 **Walkthrough cross-cite.** This entry stems from the 2026-05-27 multi-PCDN ratification session that sequentially ratified PCDN-SOS-11-007, -008, -009, and -010. PCDN-008 / PCDN-009 land under sibling Wave-5 entries (`SOS11AA` / `SOS11AB` / `SOS11AC`); the four PCDNs were ratified back-to-back as part of the single walkthrough.
 
 **Test count.** Targeted regression `test_sos11_{validation,extract,inline,tool_catalog,contracts}.py`: 104 → 111 passing (+7 net: 4 new validation tests + 3 new contracts tests; one updated test in each of extract/contracts kept the per-file totals stable). Broader regression `test_sos11_*.py test_sos12_*.py`: 266 passing total post-SOS11AD with no failures.
+
+### 2026-05-27 — SOS11W6C: register validate_chart as read-only MCP tool
+
+Closes the third (and final) item in the Wave-4U2 §15 "Still open" list — *"Tool-catalog registration of `validate_chart` as a SOS-11 read-only MCP tool — Wave-4U1 has now harmonized the registry surface (`HANDLER_BINDINGS` canonical); a future small commit registers `validate_chart` as the first read-only handler binding."* This entry is that commit, landed against the post-Wave-5AD base (commit `6e7e761`) so the registration sits on top of the harmonized `HANDLER_BINDINGS` surface (Wave-4U1, `eab96c0`), the four-axis composer (Wave-4U2, `236be36`), and the `AxisStatus` tristate (Wave-5AD).
+
+**§5 catalog amendment scope.** Adding `validate_chart` to the SOS-11 catalog is a §5 amendment. The catalog itself was frozen at Wave-1 (six original commits, §5.1 primitives + §5.2 higher-intent); §10.1 enumerated five read-only query tools (`query_state`, `query_transitions`, `query_vectors`, `query_invariants`, `query_event_vocabulary`). `validate_chart` is a NEW tool name — it does not collapse into any of the five existing read-only queries and it is not a §5.1 primitive (it makes no chart edit) nor a §5.2 higher-intent (it decomposes into nothing — it IS the leaf operation). It belongs in the §10.1 band: it inspects a chart and returns a `ValidationReport`, no mutation, no commit. This §15 entry ratifies the addition; the catalog's `READ_ONLY_QUERY_TOOLS` tuple grows from 5 → 6 entries and `all_tool_names()` from 29 → 30.
+
+**Registration policy: Standards Action.** Per the parent CLAUDE.md "Frozen enumerations — registration policy" doctrine, the SOS-11 tool-name catalog is the load-bearing dispatch surface across the entire SOS-11 + SOS-12 + future-MCP-transport stack. Adding a tool name is not an internal-only enum extension — it crosses into the MCP wire contract (every transport that speaks SOS-11 must understand the new name). Treating §5 / §10.1 catalog growth as Standards Action means new tool names ratify through a §15 amendment + walkthrough, not a quiet PR-level binding. This entry IS that ratification: no separate concepts-doc-amendment-only PR precedes the code change because the code change is a one-line registration with no behaviour drift (the composer itself was ratified at Wave-4U2). Future tool-name additions SHOULD file the §15 amendment as a separate commit landing before the registration code, matching the spec-before-code discipline; this entry's deviation is a one-time exception justified by the narrow scope (one-line addition to two existing tuples + one HANDLER_BINDINGS entry).
+
+**Permission classification.** `classify_tool("validate_chart") == Permission.READ_ONLY` per §10 — the composer never modifies the chart, never writes to disk, never commits. A test (`test_classify_tool_validate_chart_returns_read_only`) pins the classification. The §10.1 reading is: an agent MAY invoke `validate_chart` without explicit user approval, same band as the existing five `query_*` tools.
+
+**MCP wire shape.** The registered handler is the existing Wave-4U2 composer:
+
+```
+validate_chart(
+    chart_path: str | Path,
+    *,
+    axes: tuple[ValidationAxis, ...] = ALL_AXES,
+    max_depth: int = DEFAULT_MAX_DEPTH,          # 8 per SOS-12 §6.5 / PCDN-005
+    legibility_threshold: int = DEFAULT_LEGIBILITY_THRESHOLD,  # 15 per SOS-12 §9.1 / PCDN-003
+) -> ValidationReport
+```
+
+The returned `ValidationReport` serialises to the MCP wire via the existing `ValidationReport.to_dict()` method (already present in `contracts.py` pre-W6C — no addition needed). Each axis report carries `{axis, passed, status, diagnosis?}` per Wave-5AD's PCDN-010 tristate. Validation composer never raises; substrate failures surface as `passed=False` axis reports per §7 atomicity — exactly the contract the MCP transport needs (one well-typed response shape, no exception serialization required).
+
+**Landed** (🟢):
+
+| Commit | Subject | Module |
+|---|---|---|
+| `SOS11W6C` | register `validate_chart` as read-only MCP tool (§5 catalog amendment) | `tools/sos-codegen/sos11_mcp/tool_catalog.py` + `tools/sos-codegen/tests/test_sos11_tool_catalog.py` (3 new W6C tests; 1 read-only parametrized expansion; 1 catalog-size assertion bump 29 → 30) |
+
+**Test count.** Targeted `test_sos11_{tool_catalog,validation,contracts}.py`: 75 → 79 passing (+4 net: 3 new W6C tests + the parametrized `test_read_only_query_tools_are_read_only` gaining a sixth case for `validate_chart`). Broader regression `test_sos11_*.py test_sos12_*.py`: 274 passing total post-W6C with no failures.
+
+**No `contracts.py` change needed.** `ValidationReport.to_dict()` was already authored at Wave-1 (commit `0b7d474`) and Wave-5AD extended `ValidationAxisReport.to_dict()` to carry the `status` field per PCDN-010. The composer's return shape is MCP-serialisable as-is; this registration commit needed no contracts surface change.
+
+**No `validation.py` change needed.** The Wave-4U2 composer signature `validate_chart(chart_path: str | Path, *, axes=..., max_depth=..., legibility_threshold=...)` matches the MCP transport convention exactly — keyword-arg binding with typed defaults. The lazy-import boundary established by SOS11U1 continues to hold: importing `sos11_mcp.tool_catalog` does NOT pull `sos11_mcp.validation` (the validation module imports `sos12_lint`, `sos12_annotations`, `sos12_contract_match`, etc. — exactly the dependency chain `tool_catalog`'s lazy-import doctrine exists to defer).
+
+**Invariants touched.** INV-SOS-C (`derive` — registering `validate_chart` extends the modification-path's read-side surface; the validation composer is the §7 pre-commit gate, and exposing it as a callable MCP tool means agents can preflight a chart without invoking a structure-changing primitive — a strictly additive use of the existing `derive` relationship). No new INV-SOS row; no AuthorityRelationship matrix change. No §13 row required restating.
+
+**Still open after SOS11W6C.**
+
+- **`vector_delta` full-delta retrieval** (`get_vector_delta(call_id)` per PCDN-SOS-11-002 "both") — the last open item from Wave-1's "Still open" list. Extract handler's `ExtractRegionResult.boundary_vectors` already carries the full list; a future small commit lands the call-id-keyed cache + retrieval tool. Out of scope for W6C.
+- **Wiring `extract.py` and `inline.py` to delegate to `validate_chart()`** — the handlers still hand-roll their `ValidationReport` objects. The composer is now both callable AND tool-catalog-registered; a follow-up cleanup PR can update each handler's "step 8" / "step 6" validation-building block to call `validate_chart(chart_path)` instead. Out of scope for W6C per the file-disjoint Wave-6 dispatch contract.

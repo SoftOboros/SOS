@@ -32,6 +32,7 @@ READ_ONLY_QUERY_TOOLS: tuple[str, ...] = (
     "query_vectors",
     "query_invariants",
     "query_event_vocabulary",
+    "validate_chart",
 )
 
 PRIMITIVE_TOOLS: tuple[str, ...] = (
@@ -95,6 +96,7 @@ _ALL_TOOL_NAME_SET = frozenset(_ALL_TOOL_NAMES)
 HANDLER_BINDINGS: dict[str, str] = {
     "extract_region_to_subchart": "sos11_mcp.extract.extract_region_to_subchart",
     "inline_subchart": "sos11_mcp.inline.inline_subchart",
+    "validate_chart": "sos11_mcp.validation.validate_chart",
 }
 
 _HIGHER_INTENT_DECOMPOSITIONS: dict[str, tuple[str, ...]] = {
