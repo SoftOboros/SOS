@@ -36,6 +36,43 @@ class ValidationAxis(str, Enum):
     INVARIANTS_HOLD = "invariants_hold"
 
 
+class AxisStatus(str, Enum):
+    """Frozen SOS-11 §6 axis-evaluation tristate.
+
+    Disambiguates the meaning of ``ValidationAxisReport.passed``:
+
+    - ``EVALUATED`` — the axis's substrate ran end-to-end; ``passed`` is
+      substantive (True means the substrate concluded the axis holds;
+      False means the substrate concluded it does not).
+    - ``DEFERRED`` — the substrate for this axis is not yet wired into
+      the composer / handler. ``passed`` is by convention True so the
+      report shape doesn't force atomic-rollback on unwired substrates,
+      but the value is **non-substantive**; the ``diagnosis`` field
+      cites the not-yet-wired module.
+    - ``NOT_REQUESTED`` — the caller's ``axes=`` argument excluded this
+      axis. ``passed`` is by convention True for the same reason as
+      DEFERRED, but again non-substantive; ``diagnosis`` reads
+      ``"not requested"``.
+
+    Callers that want "axes that actually failed substantively" filter
+    with ``[r for r in report.axis_reports() if r.status ==
+    AxisStatus.EVALUATED and not r.passed]``. The default value at
+    construction is :attr:`EVALUATED` so existing call sites
+    constructing ``ValidationAxisReport(axis=..., passed=...)`` without
+    naming ``status`` continue to model substantive evaluation, which
+    matches the historical behaviour before this enum landed.
+
+    Registration policy: **Standards Action** — adding a fourth status
+    value requires a §15 amendment to SOS-11 + a walkthrough. The three
+    values mirror SOS-11 §6's three honest-partial reporting modes
+    (substantive evaluation, deferred substrate, caller opt-out).
+    """
+
+    EVALUATED = "evaluated"
+    DEFERRED = "deferred"
+    NOT_REQUESTED = "not_requested"
+
+
 @dataclass(frozen=True)
 class ScxmlDiff:
     """Canonical SCXML diff shape for SOS-11 tool-call results."""
@@ -70,14 +107,31 @@ class VectorDelta:
 
 @dataclass(frozen=True)
 class ValidationAxisReport:
-    """Pass/fail status for one SOS-11 validation axis."""
+    """Pass/fail status for one SOS-11 validation axis.
+
+    ``status`` (:class:`AxisStatus`, default :attr:`AxisStatus.EVALUATED`)
+    disambiguates whether ``passed`` is substantive. The field defaults
+    to ``EVALUATED`` so legacy construction sites that pre-date the
+    PCDN-SOS-11-010 ratification keep their existing semantics — a
+    construction site that says ``passed=True`` without naming
+    ``status`` is still claiming the substrate ran. New construction
+    sites that wrap a deferred substrate or a caller-skipped axis MUST
+    name :attr:`AxisStatus.DEFERRED` or
+    :attr:`AxisStatus.NOT_REQUESTED` respectively so downstream filters
+    can tell substantive failures from non-substantive ones.
+    """
 
     axis: ValidationAxis
     passed: bool
     diagnosis: str | None = None
+    status: AxisStatus = AxisStatus.EVALUATED
 
     def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"axis": self.axis.value, "passed": self.passed}
+        payload: dict[str, Any] = {
+            "axis": self.axis.value,
+            "passed": self.passed,
+            "status": self.status.value,
+        }
         if self.diagnosis is not None:
             payload["diagnosis"] = self.diagnosis
         return payload
@@ -190,3 +244,17 @@ class ToolCallError:
             "failed_axis": self.failed_axis.value if self.failed_axis else None,
             "chart_unchanged": True,
         }
+
+
+__all__ = [
+    "AxisStatus",
+    "FailureCode",
+    "JsonObject",
+    "ScxmlDiff",
+    "ToolCallError",
+    "ToolCallResult",
+    "ValidationAxis",
+    "ValidationAxisReport",
+    "ValidationReport",
+    "VectorDelta",
+]

@@ -107,6 +107,7 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from sos11_mcp.contracts import (  # noqa: E402
+    AxisStatus,
     FailureCode,
     ScxmlDiff,
     ToolCallError,
@@ -349,6 +350,7 @@ def _validation_report_for_inline(
             axis=ValidationAxis.SCJSON_ROUND_TRIP,
             passed=round_trip_passed,
             diagnosis=round_trip_diagnosis,
+            status=AxisStatus.EVALUATED,
         ),
         lint=ValidationAxisReport(
             axis=ValidationAxis.LINT,
@@ -357,6 +359,7 @@ def _validation_report_for_inline(
                 "deferred to the SOS-11 validation composer "
                 "(SOS-11 §15 2026-05-27 'Still open' item #2)"
             ),
+            status=AxisStatus.DEFERRED,
         ),
         bound_converges=ValidationAxisReport(
             axis=ValidationAxis.BOUND_CONVERGES,
@@ -365,6 +368,7 @@ def _validation_report_for_inline(
                 "deferred to the SOS-11 validation composer "
                 "(SOS-11 §15 2026-05-27 'Still open' item #2)"
             ),
+            status=AxisStatus.DEFERRED,
         ),
         invariants_hold=ValidationAxisReport(
             axis=ValidationAxis.INVARIANTS_HOLD,
@@ -373,6 +377,7 @@ def _validation_report_for_inline(
                 "deferred to the SOS-11 validation composer "
                 "(SOS-11 §15 2026-05-27 'Still open' item #2)"
             ),
+            status=AxisStatus.DEFERRED,
         ),
     )
 

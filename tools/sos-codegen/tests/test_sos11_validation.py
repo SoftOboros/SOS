@@ -380,3 +380,99 @@ def test_lint_axis_fails_on_depth_overflow_with_disp1_cite() -> None:
     assert not report.lint.passed
     assert report.lint.diagnosis is not None
     assert "SCXML-LINT-DISP-1" in report.lint.diagnosis
+
+
+# ---------------------------------------------------------------------------
+# PCDN-SOS-11-010 — AxisStatus tristate (ratified 2026-05-27)
+# ---------------------------------------------------------------------------
+
+
+def test_evaluated_axes_carry_status_evaluated() -> None:
+    """PCDN-SOS-11-010: when the composer actually ran the substrate,
+    every axis report MUST carry ``status=AxisStatus.EVALUATED`` so
+    callers filtering for substantive results can distinguish them
+    from deferred / not-requested axes.
+
+    Default selection (ALL_AXES) over a clean chart exercises all four
+    substrates, so all four axes are EVALUATED.
+    """
+    from sos11_mcp.contracts import AxisStatus
+
+    report = validate_chart(CLEAN_CHART)
+
+    for axis_report in report.axis_reports():
+        assert axis_report.status == AxisStatus.EVALUATED, (
+            f"{axis_report.axis.value} expected EVALUATED, got "
+            f"{axis_report.status} (diagnosis={axis_report.diagnosis!r})"
+        )
+
+
+def test_not_requested_axes_carry_status_not_requested() -> None:
+    """PCDN-SOS-11-010: axes excluded from the caller's ``axes=`` tuple
+    return ``passed=True`` (non-substantive) with
+    ``status=AxisStatus.NOT_REQUESTED`` and diagnosis ``"not requested"``.
+
+    The selected axis is the only one with EVALUATED status; the other
+    three carry NOT_REQUESTED. Callers can filter for substantive
+    results via ``status == EVALUATED``.
+    """
+    from sos11_mcp.contracts import AxisStatus
+
+    report = validate_chart(
+        CLEAN_CHART, axes=(ValidationAxis.SCJSON_ROUND_TRIP,),
+    )
+
+    assert report.scjson_round_trip.status == AxisStatus.EVALUATED
+    for unselected in (
+        report.lint,
+        report.bound_converges,
+        report.invariants_hold,
+    ):
+        assert unselected.status == AxisStatus.NOT_REQUESTED
+        assert unselected.passed is True  # non-substantive
+        assert unselected.diagnosis == "not requested"
+
+
+def test_status_field_serialises_into_axis_report_to_dict() -> None:
+    """PCDN-SOS-11-010: ``ValidationAxisReport.to_dict()`` MUST include
+    the ``status`` field. Per the §6 result-contract serialisation
+    convention the field name matches the dataclass attribute and the
+    value is the enum's ``.value`` string (``"evaluated"`` /
+    ``"deferred"`` / ``"not_requested"``)."""
+    report = validate_chart(
+        CLEAN_CHART, axes=(ValidationAxis.LINT,),
+    )
+
+    lint_dict = report.lint.to_dict()
+    assert lint_dict["status"] == "evaluated"
+
+    rt_dict = report.scjson_round_trip.to_dict()
+    assert rt_dict["status"] == "not_requested"
+
+
+def test_filter_substantively_failed_axes_with_status_evaluated() -> None:
+    """PCDN-SOS-11-010 motivating use-case: a caller can ask "which
+    axes did the substrate actually evaluate AND conclude failure?"
+    by filtering on ``status == EVALUATED and not passed``.
+
+    For a clean chart, the filter yields the empty list (every axis is
+    either EVALUATED-pass or, when filtered, NOT_REQUESTED). For a
+    contract-mismatch chart, the filter contains only ``invariants_hold``
+    (the substantive failure; round-trip / lint / bound all pass
+    substantively for the same fixture).
+    """
+    from sos11_mcp.contracts import AxisStatus
+
+    clean = validate_chart(CLEAN_CHART)
+    substantive_failures = [
+        r for r in clean.axis_reports()
+        if r.status == AxisStatus.EVALUATED and not r.passed
+    ]
+    assert substantive_failures == []
+
+    mismatch = validate_chart(CONTRACT_MISMATCH_CHART)
+    substantive_failures = [
+        r.axis for r in mismatch.axis_reports()
+        if r.status == AxisStatus.EVALUATED and not r.passed
+    ]
+    assert substantive_failures == [ValidationAxis.INVARIANTS_HOLD]

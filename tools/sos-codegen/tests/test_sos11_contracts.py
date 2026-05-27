@@ -14,6 +14,7 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from sos11_mcp.contracts import (  # noqa: E402
+    AxisStatus,
     FailureCode,
     ScxmlDiff,
     ToolCallError,
@@ -84,19 +85,26 @@ def test_all_validation_pass_behavior() -> None:
 
     assert validation.passed is True
     assert validation.failed_axes() == ()
+    # PCDN-SOS-11-010 (ratified 2026-05-27) adds a ``status`` field to
+    # every axis-report dict; the default value is ``"evaluated"`` so
+    # legacy ``ValidationReport.all_passed()`` construction sites keep
+    # claiming substantive evaluation (which IS what the helper means).
     assert validation.to_dict() == {
         "scjson_round_trip": {
             "axis": "scjson_round_trip",
             "passed": True,
+            "status": "evaluated",
         },
-        "lint": {"axis": "lint", "passed": True},
+        "lint": {"axis": "lint", "passed": True, "status": "evaluated"},
         "bound_converges": {
             "axis": "bound_converges",
             "passed": True,
+            "status": "evaluated",
         },
         "invariants_hold": {
             "axis": "invariants_hold",
             "passed": True,
+            "status": "evaluated",
         },
     }
 
@@ -135,6 +143,59 @@ def test_failing_axis_reporting_and_error_serialization() -> None:
         "diagnosis": "Transition `T42` fails lint rule `event-known`.",
         "failed_axis": "lint",
         "chart_unchanged": True,
+    }
+
+
+def test_axis_status_values_match_pcdn_sos_11_010() -> None:
+    """PCDN-SOS-11-010 (ratified 2026-05-27) freezes a three-value
+    enum: ``EVALUATED`` / ``DEFERRED`` / ``NOT_REQUESTED``. Standards-
+    Action registration policy — a fourth value requires a §15
+    amendment to SOS-11."""
+    assert [s.value for s in AxisStatus] == [
+        "evaluated",
+        "deferred",
+        "not_requested",
+    ]
+
+
+def test_validation_axis_report_default_status_is_evaluated() -> None:
+    """Backwards-compat: construction sites that do NOT name ``status``
+    default to ``AxisStatus.EVALUATED`` so legacy callers stay
+    substantive."""
+    rep = ValidationAxisReport(
+        axis=ValidationAxis.SCJSON_ROUND_TRIP,
+        passed=True,
+    )
+    assert rep.status == AxisStatus.EVALUATED
+
+
+def test_validation_axis_report_to_dict_carries_status() -> None:
+    """PCDN-SOS-11-010 result-contract amendment: ``to_dict()`` MUST
+    include the ``status`` field for every axis report."""
+    deferred = ValidationAxisReport(
+        axis=ValidationAxis.LINT,
+        passed=True,
+        diagnosis="deferred: SOS-01 lint runner not yet wired",
+        status=AxisStatus.DEFERRED,
+    )
+    not_req = ValidationAxisReport(
+        axis=ValidationAxis.BOUND_CONVERGES,
+        passed=True,
+        diagnosis="not requested",
+        status=AxisStatus.NOT_REQUESTED,
+    )
+
+    assert deferred.to_dict() == {
+        "axis": "lint",
+        "passed": True,
+        "status": "deferred",
+        "diagnosis": "deferred: SOS-01 lint runner not yet wired",
+    }
+    assert not_req.to_dict() == {
+        "axis": "bound_converges",
+        "passed": True,
+        "status": "not_requested",
+        "diagnosis": "not requested",
     }
 
 

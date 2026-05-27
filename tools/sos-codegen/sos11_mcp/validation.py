@@ -107,6 +107,7 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from sos11_mcp.contracts import (  # noqa: E402
+    AxisStatus,
     ValidationAxis,
     ValidationAxisReport,
     ValidationReport,
@@ -746,6 +747,7 @@ def validate_chart(
                 axis=axis,
                 passed=True,
                 diagnosis="not requested",
+                status=AxisStatus.NOT_REQUESTED,
             )
         return runner()
 

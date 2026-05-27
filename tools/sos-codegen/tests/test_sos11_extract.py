@@ -150,20 +150,32 @@ def test_successful_extraction_emits_three_boundary_vectors() -> None:
 
 def test_validation_report_marks_contract_match_passed_others_deferred() -> None:
     """Per the §15 Wave-1 'Still open' framing: the contract-match axis
-    (invariants_hold) is the only fully-wired axis at Wave-3 J; the other
-    three report ``passed=False`` with a 'deferred' diagnosis."""
+    (invariants_hold) is the only fully-wired axis at Wave-3 J; the
+    other three report ``status=DEFERRED`` with a 'deferred' diagnosis.
+
+    Per PCDN-SOS-11-010 (ratified 2026-05-27), deferred axes carry
+    ``passed=True`` (non-substantive — the substrate did not run, so
+    'failure' is not a meaningful claim); the ``status`` field tags
+    the non-substantive nature explicitly so callers filtering for
+    "axes that failed substantively" can use
+    ``status == EVALUATED and not passed``.
+    """
+    from sos11_mcp.contracts import AxisStatus
+
     result = _run_extract()
     assert isinstance(result, ExtractRegionResult)
 
     validation = result.tool_result.validation
     assert validation.invariants_hold.passed is True
+    assert validation.invariants_hold.status == AxisStatus.EVALUATED
     assert "PCDN-SOS-12-006" in (validation.invariants_hold.diagnosis or "")
     for axis in (
         validation.scjson_round_trip,
         validation.lint,
         validation.bound_converges,
     ):
-        assert axis.passed is False
+        assert axis.status == AxisStatus.DEFERRED
+        assert axis.passed is True  # non-substantive per PCDN-010
         assert "deferred" in (axis.diagnosis or "")
 
 
