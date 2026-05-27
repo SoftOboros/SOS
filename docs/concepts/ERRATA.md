@@ -15,7 +15,7 @@ Entries are permanent. Resolved entries stay as institutional memory; mark statu
 
 Open questions tied to errata entries appear here for at-a-glance visibility. Format: `EOQ-NNN-ERRATA-MMM`. See parent CLAUDE.md "EOQ identifiers" for the rule.
 
-*(none open — ERRATA-001, -002, -003 all resolved at intake.)*
+*(none open — ERRATA-001 through ERRATA-006 all resolved at intake.)*
 
 ## Status of this log
 
@@ -28,6 +28,9 @@ ERRATA is now actively used. SOS-00 ratified 2026-05-19; every subsequent phase 
 | ERRATA-001 | 🟢 | SOS-09-B implementation cite mismatch (stealth rename `svd_emit.py` → `transliterate_svd.py`) | 2026-05-27 | SOS-09-B |
 | ERRATA-002 | 🟢 | SOS-09-G implementation cite mismatch (stealth rename `mpu_emit.py` → `transliterate_mpu.py`) + missing SOS09G1 §16 entry | 2026-05-27 | SOS-09-G |
 | ERRATA-003 | 🟢 | wave-7 same-region-only writer RHS constraint hardened from implicit to explicit | 2026-05-25 | SOS-08-C |
+| ERRATA-004 | 🟢 | `sos:dir` value vocabulary inconsistent across SOS-09 family (`bidirectional` retracted in favour of `hw↔sw`) | 2026-05-27 | SOS-09-A |
+| ERRATA-005 | 🟢 | SOS-12 boundary-vector `kind` field plural/singular convention codified (plural for events, singular for invariants) | 2026-05-27 | SOS-12 |
+| ERRATA-006 | 🟢 | `VectorCategory.Boundary` name collision (SOS-03 legacy edge-case vs SOS-12 dispatch-boundary) — overload is intentional at v1, disambiguated by directory + subtype | 2026-05-27 | SOS-03 |
 
 ## ERRATA-001 — SOS-09-B implementation cite mismatch (stealth rename)
 
@@ -126,6 +129,134 @@ Wave-3 conformance audit §4 documents the closure. The wave-3 test suite passes
 - Wave-7 cleanup commit: `fb621ed`.
 - Wave-3 audit cross-reference: `docs/audits/wave-3/` §4 (closure documented there).
 - This entry exists so future readers of `fb621ed` understand the change was a deliberate hardening of an implicit invariant into an explicit guard, not a side-effect of unrelated fixture/fallback work bundled into the same commit.
+
+## ERRATA-004 — `sos:dir` value vocabulary inconsistent across SOS-09 family
+
+**Status:** 🟢 resolved
+**First seen:** 2026-05-27 (HEAD at first sighting: `038ed2d`)
+**Owning phase:** SOS-09-A
+
+### Symptom
+
+Two ratified SOS-09-family documents enumerated the `sos:dir` value vocabulary differently:
+
+- `docs/concepts/SOS-09-CONCEPTS.md` §5.2 channel → membrane-primitive mapping table — arrow form `{hw→sw, sw→hw, hw↔sw}` (three rows; third row uses `hw↔sw`). The §3 glossary entries for `queue channel` (`SOS-09-CONCEPTS.md:53`) and `shared channel` (`SOS-09-CONCEPTS.md:54`) corroborate the arrow form (`dir="hw↔sw"`).
+- `docs/concepts/SOS-09-A-CONCEPTS.md` §5.4 rule (3) (`SOS-09-A-CONCEPTS.md:138`) — word form `{hw→sw, sw→hw, bidirectional}` (three values; third value uses `bidirectional`).
+
+Both enumerations carry three values; only the third differs (`hw↔sw` vs `bidirectional`). The drift was surfaced by commit `4f33c1e` ("SOS01-09-W2N: §15 channel-annotation lint amendment (closes SOS-09 gate (i))") while authoring SCXML-LINT-CH-3 on SOS-01 §15 — the lint rule quotes the `sos:dir` enum verbatim from SOS-09 §5.2 (arrow form), inheriting the umbrella as canonical and surfacing the SOS-09-A restatement as the drifted copy.
+
+### Root cause
+
+SOS-09-A §5.4 was drafted in parallel with the umbrella SOS-09 §5.2 ratification (both ratified 2026-05-25 per `SOS-09-A-CONCEPTS.md:321` and the SOS-09 umbrella §15.5 entry). The drafter rendered the third `sos:dir` value in word form (`bidirectional`) as a natural-language clarification of the `hw↔sw` arrow shape, intending the two as synonyms. The intent was not documented; the synonym shape leaked into the validation-rule text where it became indistinguishable from a third-value enum drift. No PCDN was filed, no §16 amendment recorded the choice, and the umbrella's §5.2 canonical form was not re-cited in SOS-09-A §5.4.
+
+### Fix
+
+This errata commit + the SOS-09-A §16 amendment that co-lands:
+
+- Adds a dated entry to `docs/concepts/SOS-09-A-CONCEPTS.md` §16 (dated 2026-05-27, header "§5.4(3) `sos:dir` vocabulary alignment with SOS-09 §5.2 (ERRATA-004)") that:
+  - Retracts the word `bidirectional` as a synonym for `hw↔sw` across the SOS-09-A chart-annotation surface.
+  - Amends §5.4 rule (3) to enumerate the `sos:dir` value vocabulary verbatim from SOS-09 §5.2 (arrow form `{hw→sw, sw→hw, hw↔sw}`).
+  - Affirms SOS-09 umbrella §5.2 as canonical for the value vocabulary; the SOS-09-A restatement is the chart-author-facing mirror and carries no mutation rights.
+  - Cross-cites this ERRATA entry + commit `4f33c1e` as the discovery commit.
+- SCXML-LINT-CH-3 (already landed on SOS-01 §15 per commit `4f33c1e`) is correct as authored; no SOS-01 amendment is owed.
+
+### Verification
+
+`grep -n 'bidirectional' docs/concepts/SOS-09-A-CONCEPTS.md` returns zero hits in `§5.4` rule-(3) prose (the word may remain as a historical artifact in §16 ratification narrative pointing at this errata; the chart-author-facing rule text no longer carries it). `grep -n 'hw↔sw\|bidirectional' docs/concepts/SOS-09-A-CONCEPTS.md docs/concepts/SOS-09-CONCEPTS.md` shows the arrow form (`hw↔sw`) in both files as the chart-author-facing enum value. The SCXML-LINT-CH-3 rule text (in `docs/concepts/SOS-01-CONCEPTS.md` §15, commit `4f33c1e`) still quotes the arrow form unchanged.
+
+### Tracking
+
+- `docs/concepts/SOS-09-A-CONCEPTS.md` §16 dated 2026-05-27 ("§5.4(3) `sos:dir` vocabulary alignment with SOS-09 §5.2 (ERRATA-004)") cross-cites this entry.
+- Discovery commit: `4f33c1e` ("SOS01-09-W2N: §15 channel-annotation lint amendment (closes SOS-09 gate (i))") — the SCXML-LINT-CH-3 authoring surfaced the drift by quoting umbrella §5.2 verbatim.
+- Umbrella canonical source: `docs/concepts/SOS-09-CONCEPTS.md` §5.2 — the three-row mapping table whose dir-column carries `{hw→sw, sw→hw, hw↔sw}` as the canonical value set.
+- This entry is filed and resolved at intake; no follow-up work owed.
+
+## ERRATA-005 — SOS-12 boundary-vector `kind` field plural/singular drift
+
+**Status:** 🟢 resolved
+**First seen:** 2026-05-27 (HEAD at first sighting: `038ed2d`)
+**Owning phase:** SOS-12
+
+### Symptom
+
+The SOS-12 boundary-vector subtype vocabulary appeared in two shapes across the just-ratified SOS-03 §15 vector-framework extension (commit `cdc7f85`, "SOS03-09/12-W2O: §15 vector-framework extensions (Membrane + Boundary categories)"):
+
+- `docs/concepts/SOS-12-CONCEPTS.md` §5.1 sub-chart contract shape — contract-field names in plural form: `events_in`, `events_out`, `invariants.maintained_by_subchart`, `invariants.assumed_of_environment` (`SOS-12-CONCEPTS.md:135-139`); §7.2 boundary-vector class-of-vectors names collapse the latter two to `invariants_maintained` / `invariants_assumed` for symmetry with the event-side plural names.
+- `tools/sos-codegen/sos12_boundary_vectors.py` emitter — per-record `kind` field values in MIXED form: plural for events (`events_in` at line 323, `events_out` at line 371) and singular for invariants (`invariant_maintained` at line 422, `invariant_assumed` at line 454).
+
+The SOS-03 §15 W2O amendment ratified BOTH shapes as normative with an "Implementation note on plural-vs-singular" paragraph explaining the per-record-vs-class-of-vectors split, but the SOS-12 doc itself did not previously codify the convention; a reader landing on §7.2 + the emitter side-by-side could misread the plural-vs-singular mismatch as drift.
+
+The orchestrator brief that motivated this entry initially described all four per-record `kind` values as singular (`event_in`, `event_out`, `invariant_maintained`, `invariant_assumed`); the as-built emitter actually emits MIXED form (plural for events, singular for invariants). The convention codified by this entry reflects the as-built emitter, not the initial brief, per the SOS-03 §15 W2O Part B subtype table at `docs/concepts/SOS-03-CONCEPTS.md:980-986` (which already documents the mixed-form shape correctly).
+
+### Root cause
+
+The SOS12C1 emitter (commit landing per the [2026-05-27 SOS12C1 §15 entry on SOS-12](./SOS-12-CONCEPTS.md#change-log)) authored the per-record `kind` field values with cardinality-sensitive shapes: plural for events (because each emitted record covers one event drawn from the named SET, with the `kind` value naming the set the event was drawn from) and singular for invariants (because each emitted record covers one invariant directly, with the `kind` value naming the per-record invariant). The cardinality-rationale was implicit in the emitter implementation but was not documented in SOS-12 §7.2 prose; the SOS-03 §15 W2O amendment caught the as-built shape and documented it, but the convention's home doc (SOS-12) did not yet carry the codification.
+
+### Fix
+
+This errata commit + the SOS-12 §15 amendment that co-lands:
+
+- Adds a dated entry to `docs/concepts/SOS-12-CONCEPTS.md` §15 (dated 2026-05-27, header "Boundary-vector `kind` field plural/singular convention (ERRATA-005)") that:
+  - Codifies the plural/singular convention: contract-field names are plural (they name SETS); per-record `kind` values follow cardinality (plural for events; singular for invariants).
+  - Affirms the as-built SOS12C1 emitter as the source of truth for the per-record shape; no implementation change is owed.
+  - Cross-cites the SOS-03 §15 W2O amendment Part B (commit `cdc7f85`), the emitter line numbers, and this errata entry.
+  - Reaffirms the four §7.2 subtype names (`events_in`, `events_out`, `invariants_maintained`, `invariants_assumed`) as Standards Action per the SOS-03 §15 W2O Part B clause.
+- No SOS-12 §7.2 prose is modified; the amendment adds the convention rather than rewriting the subtype enumeration.
+- The SOS-03 §15 W2O amendment (commit `cdc7f85`) remains the cross-phase reference for the subtype + `kind`-field table; SOS-12 §15 now carries the convention's home-doc codification.
+
+### Verification
+
+`grep -n '"kind":' tools/sos-codegen/sos12_boundary_vectors.py` returns the four lines (323, 371, 422, 454) emitting `events_in`, `events_out`, `invariant_maintained`, `invariant_assumed` — confirming the as-built shape this entry ratifies. The SOS-12 §15 amendment's "convention (normative)" paragraph names plural events + singular invariants, matching the emitter; the SOS-03 §15 W2O Part B subtype table (`docs/concepts/SOS-03-CONCEPTS.md:980-986`) remains internally consistent.
+
+### Tracking
+
+- `docs/concepts/SOS-12-CONCEPTS.md` §15 dated 2026-05-27 ("Boundary-vector `kind` field plural/singular convention (ERRATA-005)") cross-cites this entry.
+- Discovery commit: `cdc7f85` ("SOS03-09/12-W2O: §15 vector-framework extensions (Membrane + Boundary categories)") — the SOS-03 §15 amendment that documented both shapes as normative without yet codifying the convention in SOS-12's own surface.
+- Emitter pins: `tools/sos-codegen/sos12_boundary_vectors.py` lines 323 (`events_in`), 371 (`events_out`), 422 (`invariant_maintained`), 454 (`invariant_assumed`) — the canonical per-record `kind` values.
+- Cross-phase reference: `docs/concepts/SOS-03-CONCEPTS.md` §15 W2O Part B subtype table — the §7.2-derived class-of-vectors names + the as-emitted `kind`-field column.
+- This entry is filed and resolved at intake; no follow-up work owed.
+
+## ERRATA-006 — `VectorCategory.Boundary` name collision (SOS-03 legacy edge-case vs SOS-12 dispatch-boundary)
+
+**Status:** 🟢 resolved
+**First seen:** 2026-05-27 (HEAD at first sighting: `038ed2d`)
+**Owning phase:** SOS-03
+
+### Symptom
+
+The `VectorCategory` enum at `docs/concepts/SOS-03-CONCEPTS.md` §5.1 carries a single value named `Boundary` that covers two distinct surfaces:
+
+- **Legacy surface (pre-Wave-2O):** edge-case-of-a-primitive's-contract vectors per the original SOS-03 §5.1 enum. On-disk subdirectory: `conformance/vectors/boundary/`.
+- **SOS-12 dispatch-boundary surface (Wave-2O):** per-dispatch-edge boundary vectors emitted by `tools/sos-codegen/sos12_boundary_vectors.py` per [SOS-12 §7.2](./SOS-12-CONCEPTS.md#72-boundary-vectors). Per the [2026-05-27 SOS-03 §15 W2O amendment Part B](./SOS-03-CONCEPTS.md#change-log) (commit `cdc7f85`), the emitter writes `"category": "Boundary"` verbatim, and the on-disk subdirectory is `conformance/vectors/boundary/sos12/<parent_chart_id>/<child_chart_id>/<NNNN>-<subtype>.json` to keep the directory tree distinguishable from the legacy `boundary/` subdirectory.
+
+The two surfaces collide on the literal string `"Boundary"` at the enum-value layer; the SOS-03 §15 W2O amendment Part B's "legacy-name disambiguation note" + the directory-disambiguation rule (`boundary/` legacy vs `boundary/sos12/` dispatch) + the per-record `subtype` field (`events_in` / `events_out` / `invariants_maintained` / `invariants_assumed` for SOS-12 dispatch-boundary, all distinct from any SOS-03 legacy `Boundary` subtype) together make the surfaces distinguishable at read time, but a reader who lands on a `category: Boundary` record without checking either the directory layer or the `subtype` field cannot tell which surface produced it.
+
+### Root cause
+
+When the SOS12C1 emitter (Wave-1C) chose `"category": "Boundary"` as the literal string for its emitted records, the §5.1 enum already carried a value named `Boundary` (legacy edge-case surface). The Wave-2O SOS-03 §15 amendment had three resolution options:
+
+- (a) Rename the SOS-12 dispatch-boundary surface's enum value to `DispatchBoundary` (and update the SOS12C1 emitter's literal-string output to match) — surfaces the distinction at the enum layer but requires an emitter-code change AND a downstream `.json` fixture migration if any fixtures had landed.
+- (b) Rename the SOS-03 legacy edge-case surface's enum value to (e.g.) `PrimitiveBoundary` — surfaces the distinction at the enum layer but breaks every existing reference to the legacy `Boundary` value across the SOS-03 / SOS-08 / SOS-09 corpus.
+- (c) Overload the existing `Boundary` value to cover both surfaces, disambiguated at (i) the on-disk directory layer (`boundary/` legacy vs `boundary/sos12/` dispatch) and (ii) the per-record `subtype` field (whose values are partitioned: SOS-12 dispatch-boundary subtypes are `{events_in, events_out, invariants_maintained, invariants_assumed}`, all distinct from any SOS-03 legacy `Boundary` subtype).
+
+Wave-2O chose option (c) — the disambiguation works structurally and avoids both the emitter-code change and the corpus-wide rename. The choice is documented in the §15 W2O amendment's "legacy-name disambiguation note" + the Part B sub-section. This errata exists to record the collision is KNOWN and INTENTIONAL, not accidental, and to give a future reader confused by a `category: Boundary` record a single in-tree authority to consult.
+
+### Fix
+
+ERRATA-only resolution per the spec-before-code "ERRATA-only resolution" pattern (no spec text changed → no §15 amendment owed). The SOS-03 §15 W2O amendment (commit `cdc7f85`) already carries the legacy-name disambiguation note + the Part B sub-section; no further §15 amendment is owed at v1.
+
+A future rename — promoting option (a) (rename SOS-12 dispatch-boundary surface to `DispatchBoundary`) or option (b) (rename SOS-03 legacy surface to `PrimitiveBoundary` or similar) — is left as a future amendment IF reviewer confusion emerges in practice. Both renames are §15 amendments at landing time; both require a co-amendment on the consumer side (option (a) on SOS-12; option (b) on the legacy-Boundary fixture authors).
+
+### Verification
+
+`grep -n 'category.*Boundary\|"Boundary"' tools/sos-codegen/sos12_boundary_vectors.py` confirms the emitter writes `"category": "Boundary"` verbatim. `docs/concepts/SOS-03-CONCEPTS.md` §5.1 + §15 W2O Part B together carry the canonical disambiguation: directory + `subtype` field. A reader who lands on a `category: Boundary` record can disambiguate by (i) the containing directory (`boundary/` legacy vs `boundary/sos12/` dispatch) OR (ii) the per-record `subtype` field (SOS-12 dispatch values are the four `events_in` / `events_out` / `invariants_maintained` / `invariants_assumed`; legacy values are anything else).
+
+### Tracking
+
+- SOS-03 §15 W2O amendment (commit `cdc7f85`, "SOS03-09/12-W2O: §15 vector-framework extensions (Membrane + Boundary categories)") — already documents the legacy-name disambiguation note + the Part B sub-section. No further §15 amendment is owed for ERRATA-006 at v1.
+- SOS-12 §7.2 boundary-vector emission + the SOS12C1 emitter at `tools/sos-codegen/sos12_boundary_vectors.py` — the consumers that write `"category": "Boundary"` verbatim, whose behaviour this errata ratifies as intentional under option (c).
+- Future amendment trigger: reviewer confusion in practice. If a reader files an issue or asks on a PR review which `Boundary` surface a record belongs to, that signal motivates promoting one of options (a) or (b) into a §15 amendment. Until then, the option-(c) overload + directory + `subtype` disambiguation stands.
+- This entry is filed and resolved at intake; ERRATA-only form per the spec-before-code "no spec text changed → no §15 amendment owed" pattern. No co-amendment on SOS-03 §15 is owed by this entry; the existing W2O amendment carries the disambiguation.
 
 ## How to add an entry
 

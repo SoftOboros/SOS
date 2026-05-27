@@ -98,7 +98,7 @@ A SOS-09 channel annotation is the set of `sos:`-prefixed keys inside the `other
 | `sos:id` | required | UUID (RFC 4122, canonical hyphenated form) | 8-4-4-4-12 hex digits with hyphens (e.g. `550e8400-e29b-41d4-a716-446655440000`); unique within chart per §5.4 (1); identity-only handle |
 | `sos:name` | required | SV identifier (string) | `[a-zA-Z_][a-zA-Z0-9_]*`; unique within the composed scope path (per PCDN-SOS-09-A-002 namespaced compose). Used as the emitted name in SVD register, RTL signal, and C macro emission |
 | `sos:kind` | required | enum (string) | `status` / `command` / `queue` / `shared` (mirrors SOS-09 §5.1) |
-| `sos:dir` | required | enum (string) | depends on `sos:kind`: `status` → `hw→sw`; `command` → `sw→hw`; `queue` → `sw→hw` / `hw→sw` / `bidirectional`; `shared` → `bidirectional` (mirrors SOS-09 §5.2) |
+| `sos:dir` | required | enum (string) | depends on `sos:kind`: `status` → `hw→sw`; `command` → `sw→hw`; `queue` → `sw→hw` / `hw→sw` / `hw↔sw`; `shared` → `hw↔sw` (mirrors SOS-09 §5.2; word `bidirectional` retracted as synonym per 2026-05-27 ERRATA-004) |
 | `sos:zone` | optional | enum (string) | `privileged` / `unprivileged` (mirrors SOS-09 §5.4); default `privileged` |
 | `sos:atomicity` | optional | enum (string) | `explicit` / `implicit`; default `implicit` (apply SOS-09 §5.3 inference rule per `kind`) |
 | `sos:width` | optional | integer | `1` ≤ width ≤ `64`; default `32` |
@@ -135,9 +135,9 @@ The chart loader MUST enforce the following validation rules at chart-load time.
 
 **(2) Required attributes present.** For every parent context carrying any `sos:`-prefixed key, the four required keys (`sos:id`, `sos:name`, `sos:kind`, `sos:dir`) MUST be present. Missing `sos:id`, `sos:name`, `sos:kind`, or `sos:dir` is a hard error.
 
-**(3) Enum value validity.** The `sos:kind` value MUST be one of `status` / `command` / `queue` / `shared`. The `sos:dir` value MUST be one of `hw→sw` / `sw→hw` / `bidirectional`. The `sos:zone` value (if present) MUST be one of `privileged` / `unprivileged`. The `sos:atomicity` value (if present) MUST be one of `explicit` / `implicit`. Typos (e.g. `kind="statu"`) MUST be caught at this rule; per PCDN-SOS-09-A-004 ratification 2026-05-25, the severity is hard error by default ("syntax error on any other compiler" — silent acceptance is prohibited).
+**(3) Enum value validity.** The `sos:kind` value MUST be one of `status` / `command` / `queue` / `shared`. The `sos:dir` value MUST be one of `hw→sw` / `sw→hw` / `hw↔sw` (per [SOS-09 §5.2](./SOS-09-CONCEPTS.md#52-channel--membrane-primitive-mapping) as canonical; the word `bidirectional` is retracted as a synonym per the 2026-05-27 §16 ERRATA-004 amendment). The `sos:zone` value (if present) MUST be one of `privileged` / `unprivileged`. The `sos:atomicity` value (if present) MUST be one of `explicit` / `implicit`. Typos (e.g. `kind="statu"`) MUST be caught at this rule; per PCDN-SOS-09-A-004 ratification 2026-05-25, the severity is hard error by default ("syntax error on any other compiler" — silent acceptance is prohibited).
 
-**(4) Cross-attribute consistency for `kind`/`dir`.** The `sos:dir` value MUST be valid for the declared `sos:kind` per the table in §5.2 (`status` → `hw→sw`; `command` → `sw→hw`; `queue` → any of the three; `shared` → `bidirectional`). A `status` channel with `dir="sw→hw"` is a hard error.
+**(4) Cross-attribute consistency for `kind`/`dir`.** The `sos:dir` value MUST be valid for the declared `sos:kind` per the table in §5.2 (`status` → `hw→sw`; `command` → `sw→hw`; `queue` → any of the three; `shared` → `hw↔sw`). A `status` channel with `dir="sw→hw"` is a hard error.
 
 **(5) Kind-gated attribute validity.** `sos:irq` MUST appear only when `sos:kind="status"` AND `sos:dir="hw→sw"`; appearance under any other `kind`/`dir` combination is a hard error. `sos:mutex` MUST appear only when `sos:kind="shared"`; appearance under any other `kind` is a hard error.
 
@@ -167,7 +167,7 @@ In addition to the cross-phase invariants INV-SOS-A through H (SOS-07 §6), the 
 
 - **INV-S-MEM-A-4 — `xmlns:sos` declarations in chart-author XML are errors.** Per §5.4 (9), a chart that declares `xmlns:sos="..."` on `<scxml>` or any descendant element is rejected at chart-load time. Specializes INV-S-MEM-A-3 to the chart-author-facing failure mode: the validator catches the mistake before any emitter runs, with an actionable error message naming the offending element and recommending the corrective edit.
 
-- **INV-S-MEM-A-5 — Cross-attribute consistency rejects illegal `kind`/`dir` pairs.** Per §5.4 (4), the `sos:dir` value MUST be valid for the declared `sos:kind` per the §5.2 table. A `status` channel with `dir="sw→hw"`, a `command` channel with `dir="bidirectional"`, or a `shared` channel with `dir="hw→sw"` is a hard error. This invariant guarantees that the channel→membrane-primitive mapping (SOS-09 §5.2) always lands on a defined row.
+- **INV-S-MEM-A-5 — Cross-attribute consistency rejects illegal `kind`/`dir` pairs.** Per §5.4 (4), the `sos:dir` value MUST be valid for the declared `sos:kind` per the §5.2 table. A `status` channel with `dir="sw→hw"`, a `command` channel with `dir="hw↔sw"`, or a `shared` channel with `dir="hw→sw"` is a hard error. This invariant guarantees that the channel→membrane-primitive mapping (SOS-09 §5.2) always lands on a defined row.
 
 - **INV-S-MEM-A-6 — Kind-gated attributes are kind-gated.** Per §5.4 (5), `sos:irq` MUST appear only on `kind="status"` with `dir="hw→sw"`; `sos:mutex` MUST appear only on `kind="shared"`. Misplaced kind-gated attributes are hard errors. This invariant guarantees that the downstream emitters can rely on the presence of `sos:irq` implying an interrupt-emitting status channel and the presence of `sos:mutex` implying a mutex-protected shared region.
 
@@ -373,3 +373,26 @@ Per the parent `CLAUDE.md` "Spec-Before-Code Planning Discipline / Execution dis
 - Downstream consumers: SOS-09-D (Rust borrow scope / shared `RegisterBlock`), SOS-09-E (HDL MPU privilege region / access-violation aggregation). Both consumers walk inheritance on the parser-surfaced `Optional[str]`; neither re-implements key parsing.
 
 Status: 🟢 **ratified**. The twelve-key set is now stable. SOS-09-D and SOS-09-E implementation work proceeds against the amended set.
+
+### 2026-05-27 — §5.4(3) `sos:dir` vocabulary alignment with SOS-09 §5.2 (ERRATA-004) (Ira)
+
+**Originating drift.** The SOS-09-W2N lint-amendment commit `4f33c1e` ("SOS01-09-W2N: §15 channel-annotation lint amendment") landed SCXML-LINT-CH-3 on SOS-01 §15, which quotes the `sos:dir` enum verbatim from [SOS-09 umbrella §5.2](./SOS-09-CONCEPTS.md#52-channel--membrane-primitive-mapping) — the arrow form `{hw→sw, sw→hw, hw↔sw}`. This authoring choice surfaced a pre-existing vocabulary drift inside the SOS-09 family: this doc's §5.4 rule (3) enumerated `sos:dir` as `{hw→sw, sw→hw, bidirectional}` (word form for the third value), while the umbrella §5.2 mapping table and §3 glossary both use the arrow form `{hw→sw, sw→hw, hw↔sw}`. Both enumerations carry three values; only the third differs (`hw↔sw` vs `bidirectional`). The drift is recorded under [ERRATA-004](./ERRATA.md#errata-004--sosdir-value-vocabulary-inconsistent-across-sos-09-family).
+
+**Resolution.** [SOS-09 umbrella §5.2](./SOS-09-CONCEPTS.md#52-channel--membrane-primitive-mapping) is the canonical source for the `sos:dir` value vocabulary; this doc is the chart-authoring-facing restatement and MUST mirror the umbrella verbatim. The word `bidirectional` is hereby **retracted** as a synonym for `hw↔sw` and MUST NOT appear in chart-author-facing tooling, lint diagnostics, parser error messages, or downstream emitter contracts. SCXML-LINT-CH-3 (already landed in SOS-01 §15 per commit `4f33c1e`) is correct as authored; no SOS-01 amendment is owed.
+
+**Spec amendment landing with this entry.** §5.4 validation rule (3) is amended to enumerate the `sos:dir` value vocabulary verbatim from SOS-09 §5.2:
+
+> The `sos:dir` value MUST be one of `hw→sw` / `sw→hw` / `hw↔sw` (per [SOS-09 §5.2](./SOS-09-CONCEPTS.md#52-channel--membrane-primitive-mapping); the word `bidirectional` is retracted as a synonym per the 2026-05-27 ERRATA-004 amendment).
+
+The other §5.4 rules are unchanged. The `sos:kind`, `sos:zone`, and `sos:atomicity` enums named in rule (3) are unaffected.
+
+**Frozen-enumeration registration policy.** The `sos:dir` enum's mutation rights remain with the SOS-09 umbrella §5.2 (Standards Action per the umbrella's §5.2 registration-policy clause). This sub-phase's amendments to the surface-level restatement do NOT confer mutation rights; future changes to the value set ratify at the umbrella, not here.
+
+**Cross-references.**
+
+- ERRATA log entry: [ERRATA-004](./ERRATA.md#errata-004--sosdir-value-vocabulary-inconsistent-across-sos-09-family) — names the drift and pins it to commit `4f33c1e` as the discovery commit.
+- Umbrella canonical source: [SOS-09 §5.2](./SOS-09-CONCEPTS.md#52-channel--membrane-primitive-mapping) — three-row mapping table whose dir-column values are the canonical `{hw→sw, sw→hw, hw↔sw}` enum.
+- Umbrella §3 glossary entries for `queue channel` and `shared channel` — both use `dir="hw↔sw"`, corroborating §5.2 as canonical.
+- SOS-01 §15 SCXML-LINT-CH-3 amendment (commit `4f33c1e`) — quotes the canonical arrow form; unaffected by this amendment.
+
+Status: 🟢 **ratified**. The §5.4(3) enumeration now mirrors SOS-09 §5.2 verbatim; `bidirectional` is retracted as a synonym across the SOS-09-A surface.

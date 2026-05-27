@@ -583,3 +583,29 @@ Six §5.3 clauses verified: `events_in`, `events_out`, `invariants_assumed`, `re
 Wave-3 extension points reserved at the module foot: Wave-3 J (`extract_region_to_subchart`) wires this verifier as the discharge gate after extraction; Wave-3 K (`inline_subchart`) calls it in reverse before allowing inline. Both consumers operate on `DispatchContractEdge` records the SOS-11 MCP tool already has materialised, so no inventory walk is needed at the tool-call boundary.
 
 Spec ambiguity resolved by interpretation: §5.2 does not pin write-before-read ordering precisely (it states the four-set algebra but defers structural enforcement to the parent's reachability analysis). The v1 verifier checks set-membership only (`child.reads ⊆ parent.writes_before_dispatch`; `child.writes ⊆ parent.reads_after_dispatch`); the ordering check is delegated to the parent's per-layer reachability vectors (SOS-03 §6.1) plus the SOS-12 §7.2 boundary vectors at dispatch entry. Documented in `_check_reads` / `_check_writes` docstrings.
+
+### 2026-05-27 — Boundary-vector `kind` field plural/singular convention (ERRATA-005) (Ira)
+
+**Originating drift.** The SOS-03 §15 vector-framework extension landed in commit `cdc7f85` ("SOS03-09/12-W2O: §15 vector-framework extensions (Membrane + Boundary categories)") documented two distinct shapes for the boundary-vector subtype vocabulary — the SOS-12 §5.1 contract-field names in plural form (`events_in`, `events_out`, `invariants_maintained`, `invariants_assumed`) and the per-record `kind` field emitted by [`tools/sos-codegen/sos12_boundary_vectors.py`](../../tools/sos-codegen/sos12_boundary_vectors.py) in MIXED form (plural for events: `events_in` at line 323, `events_out` at line 371; singular for invariants: `invariant_maintained` at line 422, `invariant_assumed` at line 454). The SOS-03 §15 "Implementation note on plural-vs-singular" paragraph names both shapes as normative and explains the per-record-vs-class-of-vectors split, but the SOS-12 doc itself did not previously codify the convention. ERRATA-005 records the drift; this amendment closes it inside SOS-12's own surface.
+
+**Resolution — convention (normative).** The plural/singular split is **intentional** and grounded in cardinality semantics:
+
+- **Contract-field names are plural** — they name SETS of events or invariants. The four contract-field names per [§5.1 sub-chart contract shape](#51-sub-chart-contract-shape) are `events_in`, `events_out`, `invariants.maintained_by_subchart`, `invariants.assumed_of_environment`; the §7.2 boundary-vector class-of-vectors names collapse the latter two to `invariants_maintained` and `invariants_assumed` for symmetry with the event-side names. All four are **plural** because each names a set.
+- **Per-record `kind` field values follow cardinality**:
+  - **Events**: per-record `kind` is **plural** (`events_in`, `events_out`) — each emitted record covers exactly one event drawn from its named set, but the `kind` value names the SET the event was drawn from, not the singular event. This matches the emitter's vector-id construction (one record per event in the set) where the cardinality information lives in the per-record `trigger` field, not in `kind`.
+  - **Invariants**: per-record `kind` is **singular** (`invariant_maintained`, `invariant_assumed`) — each emitted record covers exactly one invariant, and the `kind` value names the per-record invariant directly. This matches the emitter's vector construction where the `originating_invariant` metadata field carries the specific invariant id.
+
+The split is grandfathered from the SOS12C1 emitter's 2026-05-27 implementation; the v1 emitter is the source of truth for the as-built shape, and this amendment ratifies that shape rather than re-mapping it. Future SOS-12 / SOS-03 amendments MAY collapse to a single form (all-plural or all-singular) if downstream readers report confusion; v1 keeps the as-built mixed shape.
+
+**Frozen-enumeration registration policy.** The four boundary-vector subtype names (`events_in`, `events_out`, `invariants_maintained`, `invariants_assumed` at the §7.2 class-of-vectors level) remain **Standards Action** per the SOS-03 §15 W2O amendment's "frozen-enumeration registration policy for the four boundary-vector subtype set: Standards Action" clause. The per-record `kind` field values (plural events, singular invariants) are derived from the §7.2 subtypes by the emitter; changing the per-record shape is a co-amendment to BOTH this §15 entry AND the SOS-03 §15 W2O Part B subtype table.
+
+**No spec text in §7.2 is modified by this amendment.** §7.2's enumeration of the boundary-vector classes remains as authored (four bullet points, plural names). This amendment adds the convention explicitly so that future implementers reading §7.2 + the emitter side-by-side do not misread the plural-vs-singular mismatch as drift.
+
+**Cross-references.**
+
+- ERRATA log entry: [ERRATA-005](./ERRATA.md#errata-005--sos-12-boundary-vector-kind-field-pluralsingular-drift) — names the drift and pins it to discovery commit `cdc7f85`.
+- SOS-03 §15 W2O amendment Part B (commit `cdc7f85`) — the "Implementation note on plural-vs-singular" paragraph + the four-subtype table where the `kind`-field column names the as-emitted shape. This amendment ratifies the convention in SOS-12's own surface; SOS-03's table remains the cross-phase reference.
+- Emitter pins: `tools/sos-codegen/sos12_boundary_vectors.py` lines 323 (`events_in`), 371 (`events_out`), 422 (`invariant_maintained`), 454 (`invariant_assumed`) — the canonical per-record `kind` values.
+- Contract-field shape: [§5.1 sub-chart contract shape](#51-sub-chart-contract-shape) — the four plural contract-field names this amendment ratifies as the §7.2 class-of-vectors names.
+
+Status: 🟢 **ratified**. The plural/singular convention is now codified inside SOS-12; the SOS12C1 emitter's as-built shape is canonical; no implementation change is owed.
