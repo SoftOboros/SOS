@@ -609,3 +609,39 @@ The split is grandfathered from the SOS12C1 emitter's 2026-05-27 implementation;
 - Contract-field shape: [§5.1 sub-chart contract shape](#51-sub-chart-contract-shape) — the four plural contract-field names this amendment ratifies as the §7.2 class-of-vectors names.
 
 Status: 🟢 **ratified**. The plural/singular convention is now codified inside SOS-12; the SOS12C1 emitter's as-built shape is canonical; no implementation change is owed.
+
+### 2026-05-27 — SOS12L1: legibility + depth-cap lint landed (Ira)
+
+Wave-3 SOS-12 implementation fan-out, slice L. The two SOS-12 frozen thresholds now have a chart-validation-time lint surface at [`tools/sos-codegen/sos12_lint.py`](../../tools/sos-codegen/sos12_lint.py), exposing two pure-function rules with `LintDiagnostic` records as output:
+
+- `check_dispatch_depth(chart_path, *, max_depth=DEFAULT_MAX_DEPTH, loader=None)` — implements **SCXML-LINT-DISP-1** per [§6.5 + §10.3 + PCDN-SOS-12-005](#65-recursive-depth-bound). Rejects any chart whose `<sos:dispatch>` recursion exceeds the configured cap (default 8). The lint rule wraps the existing [`sos12_annotations.parse_dispatch_annotations`](../../tools/sos-codegen/sos12_annotations.py) depth-walk and translates its §6.5 `Sos12AnnotationError` into a chart-author-facing diagnostic.
+
+- `check_legibility(chart_path, *, legibility_threshold=DEFAULT_LEGIBILITY_THRESHOLD, loader=None)` — implements **SCXML-LINT-DISP-2** per [§9 + §10.2 + PCDN-SOS-12-003](#9-sos-11-integration--legibility-as-discipline). Counts peer states (the union of `<state>` + `<parallel>` immediate children) at each level of the chart and rejects any level whose count exceeds the configured threshold (default 15). The diagnostic message **recommends `extract_region_to_subchart`** (the [SOS-11 §5.1](./SOS-11-CONCEPTS.md) MCP tool) per the [§9.2 tool-surface behaviour clause](#92-sos-11-tool-surface-behaviour-at-the-threshold) — this is the operational realisation of [§9](#9-sos-11-integration--legibility-as-discipline)'s "discipline becomes a property the tooling enforces" intent.
+
+**Rule-id registration.** Both rules are registered in the SOS-01 [`LintRuleId`](./SOS-01-CONCEPTS.md#55-lintruleid--standards-action) namespace under the `SCXML-LINT-DISP-N` category-prefix series. The series was **reserved** by the [SOS-01 §15 SOS01-09-W2N amendment (commit `4f33c1e`)](./SOS-01-CONCEPTS.md) — see the "Future SOS-12 lint family (informative)" paragraph that pre-allocated the namespace shape; the reservation has now been filled by the co-landed [SOS-01 §15 SCXML-LINT-DISP-{1,2} amendment (this Wave-3L commit)](./SOS-01-CONCEPTS.md) that registers the two rule ids in the catalog. Per the category-prefix-convention precedent established by the `SCXML-LINT-CH-N` family, the implementation lives in `tools/sos-codegen/` next to the semantics owner module (not in a shared lint runner).
+
+**Defaults source-of-truth.** The `DEFAULT_MAX_DEPTH = 8` and `DEFAULT_LEGIBILITY_THRESHOLD = 15` constants in `sos12_lint.py` mirror the ratified PCDN values; both rules accept project-level overrides via the keyword argument surface (mirroring the [§9.1](#91-threshold-default--enforcement) / [§6.5](#65-recursive-depth-bound) chart-family override path).
+
+**Runtime safety net retained.** [`tools/sos-codegen/sos12_bound.py`](../../tools/sos-codegen/sos12_bound.py) (Wave-1B `SOS12B1`) independently enforces the same depth cap inside the bound-composition algorithm at vector-emission time. The two checks coexist intentionally: SCXML-LINT-DISP-1 catches the bug earlier at chart-validation time (with a chart-author-facing diagnostic naming the offending dispatch site), while `sos12_bound.py` provides a deeper safety net at the codegen pipeline's vector-emission stage. The lint rule does NOT modify or supersede `sos12_bound.py`; the bound module stays as the downstream backstop.
+
+**Test count.** [`tools/sos-codegen/tests/test_sos12_lint.py`](../../tools/sos-codegen/tests/test_sos12_lint.py) ships 21 tests, all passing:
+
+- 1 frozen-defaults sanity test.
+- 7 SCXML-LINT-DISP-1 tests (depth 7 pass; depth 8 at-cap pass; depth 9 fail; custom `max_depth=4` with depth 5 fail; custom `max_depth=4` with depth 4 pass; no-dispatches pass; missing-chart-path `FileNotFoundError`).
+- 9 SCXML-LINT-DISP-2 tests (15 peers at threshold pass; 16 peers fail; message cites §9 + PCDN-SOS-12-003; nested 16-peer breach at depth 3 names the correct location; custom `legibility_threshold=5` with 6 peers fail; custom threshold with 5 peers pass; threshold=0 `ValueError`; two breaching levels yield two diagnostics; `<parallel>` regions counted as peers).
+- 4 fixture-driven integration tests (skip cleanly when scjson is unavailable): existing 8-deep fixture passes; existing 9-deep overflow fixture fails; single-level dispatch fixture passes legibility; the `extract_region_to_subchart` recommendation appears verbatim in the legibility-breach diagnostic per the §9.2 normative requirement.
+
+Regression sweep across all `tools/sos-codegen/tests/test_sos12_*.py` (114 tests including the 93 from prior Wave-1A/1B/1C/2 landings + the 21 new tests) is clean.
+
+**Spec-text resolution on `<parallel>` peer-counting (informative).** §9.1 does not explicitly nail down what "peer states at one level" means in a chart containing `<parallel>` regions. The implementation interprets a `<parallel>` element's region children as peer states OF EACH OTHER (i.e. a `<parallel>` with 16 region children breaches the threshold at the parallel's own level), AND each region's own children are counted at the next level down (a region with 16 child states breaches at that region's level). This matches the "legible-at-every-individual-level" intuition of §9 — a `<parallel>` with too many regions is just as hard to read as a `<state>` with too many children. If a future chart-author reading suggests the parallel's regions should NOT count as peers (because they execute concurrently and are intuitively "parallel slices" rather than "alternatives"), a §15 amendment would refine the counting policy; the v1 lint codifies the conservative interpretation that catches the visual-clutter failure mode.
+
+**Cross-references.**
+
+- [SOS-01 §15 (2026-05-27 SCXML-LINT-DISP-{1,2})](./SOS-01-CONCEPTS.md) — the reciprocating SOS-01 amendment that registers the two rule ids in the `LintRuleId` namespace.
+- [SOS-01 §15 (2026-05-27 SOS01-09-W2N)](./SOS-01-CONCEPTS.md) — the originating reservation of the `SCXML-LINT-DISP-N` category-prefix series.
+- [§6.5 — recursive depth bound](#65-recursive-depth-bound) + [§10.3](#103-recursion-depth-bound) + PCDN-SOS-12-005 — depth-cap default.
+- [§9 — SOS-11 integration — legibility-as-discipline](#9-sos-11-integration--legibility-as-discipline) + [§9.2](#92-sos-11-tool-surface-behaviour-at-the-threshold) + [§10.2](#102-legibility-threshold) + PCDN-SOS-12-003 — legibility threshold default + tool-surface behaviour.
+- [`tools/sos-codegen/sos12_bound.py`](../../tools/sos-codegen/sos12_bound.py) — the downstream safety-net depth-cap check (Wave-1B SOS12B1).
+- [`tools/sos-codegen/sos12_annotations.py`](../../tools/sos-codegen/sos12_annotations.py) — the dispatch-tree walker SCXML-LINT-DISP-1 consumes.
+
+Status: 🟢 **ratified**. The two frozen SOS-12 thresholds now have callable lint surfaces; the SOS-11 `extract_region_to_subchart` MCP tool is named in every SCXML-LINT-DISP-2 diagnostic per §9.2; no further implementation work is owed for the two ratified thresholds at v1. SOS-12 stays 🟢 ratified.

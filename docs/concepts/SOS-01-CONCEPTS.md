@@ -1054,3 +1054,52 @@ Adding a thirteenth `sos:`-prefixed key (e.g. a hypothetical `sos:dma_chain`) re
 - [SOS-09 §15.7 (2026-05-26 PCDN-SOS-09-007)](./SOS-09-CONCEPTS.md) — `sos:channel_group` + `sos:privilege_region` additions completing the twelve-key set.
 
 No frozen-enum value modified at SOS-01 (the `ECMAScriptFeature`, `LintRuleSeverity`, `ExternalEventName`, `StateId`, and pre-existing `SCXML-LINT-001..018` portions of `LintRuleId` are unchanged). The `LintRuleId` namespace (§5.5) grows by three with `SCXML-LINT-CH-1`, `SCXML-LINT-CH-2`, `SCXML-LINT-CH-3`; the category-prefix convention is introduced for downstream-phase-owned lint families as documented above. No PCDN re-ratified. SOS-01 stays 🟢 ratified.
+
+### 2026-05-27 — SCXML-LINT-DISP-{1,2} rule additions (SOS-12 lint, fills Wave-2N reservation)
+
+Wave-3 SOS-12 implementation fan-out, slice L (dispatch + legibility lint). This amendment fills the `SCXML-LINT-DISP-N` category-prefix series reservation declared in the 2026-05-27 SOS01-09-W2N amendment (commit `4f33c1e`, the "Future SOS-12 lint family (informative)" paragraph). The reservation set the namespace policy; this amendment adds the first two concrete rules under it.
+
+**Lint rules introduced.** Two new rules under the `SCXML-LINT-DISP-N` category-prefix series (dispatch-element + chart-decomposition lint). The category is **owned by SOS-12**; this amendment defers semantics ownership to [SOS-12-CONCEPTS.md][sos-12] (the rules enforce SOS-12 §6.5 / §9 frozen thresholds) and registers the rule ids in SOS-01's `LintRuleId` namespace per §5.5 (Standards Action) per INV-S-LINT-5 (rule ids stable, append-only).
+
+- **SCXML-LINT-DISP-1 — Dispatch-tree depth cap (severity: `error`).**
+
+  **Statement.** A chart whose `<sos:dispatch>` recursion reaches a depth strictly greater than the configured cap (default 8 per [SOS-12-CONCEPTS.md §6.5 + §10.3 + PCDN-SOS-12-005][sos-12-pcdn-005]) is rejected. Projects MAY override the cap per chart-family via `chart-family.toml`'s `recursion_depth_limit` field; the override surfaces in chart-family metadata.
+
+  **Rationale.** The depth cap catches the `inline_subchart` ↔ `extract_region_to_subchart` round-trip cycle bug at lint time without constraining legitimate use (HTTP-stack worked example in [SOS-12 §8][sos-12-worked] is 3 levels; OAuth/OIDC + transport + framing is rarely > 6). Default 8 was ratified by PCDN-SOS-12-005 walkthrough. The rule's diagnostic cites both the spec sections and the configured cap so a chart author can re-derive the bound from the message alone.
+
+  **Implementation pin.** `tools/sos-codegen/sos12_lint.py` `check_dispatch_depth(chart_path, *, max_depth=8, loader=None)`. NOT a shared-lint-runner extension — sibling to the `SCXML-LINT-CH-N` rules' implementation pattern (each category-prefix family owns its own module under `tools/sos-codegen/`). The annotation parser at `tools/sos-codegen/sos12_annotations.py` provides the dispatch-tree walker the lint rule consumes; the bound-composition module at `tools/sos-codegen/sos12_bound.py` independently catches the same overflow at vector-emission time (the two checks coexist by design — lint at chart-validation time, bound composition at vector-emission time).
+
+- **SCXML-LINT-DISP-2 — Peer-state legibility threshold (severity: `error`).**
+
+  **Statement.** A chart with more peer states at any one level than the configured threshold (default 15 per [SOS-12-CONCEPTS.md §9.1 + §10.2 + PCDN-SOS-12-003][sos-12-pcdn-003]) is rejected. "Peer states at a level" = the immediate `<state>` + `<parallel>` children of the level's owner node (chart root, or any nested `<state>` / `<parallel>`). A `<parallel>` with N region children contributes N peers to its own level (each region is a peer state of every other region).
+
+  **Diagnostic message.** Per [SOS-12 §9.2][sos-12-tool-surface], the error message MUST recommend `extract_region_to_subchart` (the SOS-11 §5.1 MCP tool) as the structural-add alternative. This is the operational realisation of [SOS-12 §9][sos-12-discipline] — "the methodology stops being 'a thing the developer remembers to do' and becomes 'a thing the tooling enforces'". A chart author whose chart fails this rule reads the diagnostic, learns the canonical fix (call the SOS-11 tool), and the methodology's discipline loop closes by construction.
+
+  **Rationale.** 15 peer states at one level sits in the cognitive-load sweet spot for graphical review (4K viewer; transitions visible without zoom). Smaller thresholds (10) force premature factoring and produce many shallow sub-charts; larger thresholds (20+) regress to "this chart is too big to review at a glance". Default ratified by PCDN-SOS-12-003 walkthrough.
+
+  **Implementation pin.** `tools/sos-codegen/sos12_lint.py` `check_legibility(chart_path, *, legibility_threshold=15, loader=None)`. Same sibling-pattern to SCXML-LINT-CH as above; not in any shared lint runner.
+
+[sos-12-pcdn-005]: ./SOS-12-CONCEPTS.md#65-recursive-depth-bound
+[sos-12-pcdn-003]: ./SOS-12-CONCEPTS.md#91-threshold-default--enforcement
+[sos-12-worked]: ./SOS-12-CONCEPTS.md#8-protocol-stack-worked-example
+[sos-12-tool-surface]: ./SOS-12-CONCEPTS.md#92-sos-11-tool-surface-behaviour-at-the-threshold
+[sos-12-discipline]: ./SOS-12-CONCEPTS.md#9-sos-11-integration--legibility-as-discipline
+
+**Summary table additions (§6.8 update; informative).** Two rows appended to the §6.8 summary, both `error` severity, Chart-decomposition category. The original 18 numeric rules plus the three CH-N rules plus these two DISP-N rules brings the total to 23 (errors: 16 = 14 + 2; warnings: 7).
+
+**Registration policy.** The `SCXML-LINT-DISP-N` namespace remains **Standards Action** per the SOS01-09-W2N category-prefix-convention paragraph + INV-S-LINT-5 (rule ids stable, append-only). Adding a third DISP-N rule (e.g. a future SCXML-LINT-DISP-3 for contract-mismatch lint per [SOS-12 §5.3][sos-12-dispatch-semantics] / PCDN-SOS-12-006 if a project tightens from "Compile-time error" to "Lint warning") requires co-landed amendments on BOTH this doc (the SOS-01 catalog) AND SOS-12 (the semantics owner). The SOS-12 amendment is the source of truth for the lint semantics; SOS-01's amendment registers the rule id in the catalog.
+
+[sos-12-dispatch-semantics]: ./SOS-12-CONCEPTS.md#53-dispatch-semantics--contract-matching
+
+**Cross-references.**
+
+- [SOS-01 §15 (2026-05-27 SOS01-09-W2N)](#2026-05-27--sos01-09-channel-annotation-lint-amendment-ira) — the originating reservation of the `SCXML-LINT-DISP-N` category-prefix series (the "Future SOS-12 lint family (informative)" paragraph).
+- [SOS-12 §6.5][sos-12-pcdn-005] + [§10.3](./SOS-12-CONCEPTS.md#103-recursion-depth-bound) + PCDN-SOS-12-005 — depth-cap default + registration policy (Specification Required).
+- [SOS-12 §9][sos-12-discipline] + [§10.2](./SOS-12-CONCEPTS.md#102-legibility-threshold) + PCDN-SOS-12-003 — legibility threshold default + registration policy (Specification Required).
+- [SOS-12 §15 (2026-05-27 SOS12L1)](./SOS-12-CONCEPTS.md) — the reciprocating SOS-12 amendment recording this lint landing on its own change log.
+- [SOS-11 §5.1](./SOS-11-CONCEPTS.md) — the `extract_region_to_subchart` MCP tool the SCXML-LINT-DISP-2 diagnostic recommends.
+
+[sos-12]: ./SOS-12-CONCEPTS.md
+[sos-11]: ./SOS-11-CONCEPTS.md
+
+No frozen-enum value modified at SOS-01 in the value space (the four pre-existing frozen enums stay unchanged); the `LintRuleId` namespace (§5.5) grows by two with `SCXML-LINT-DISP-1`, `SCXML-LINT-DISP-2`. No PCDN re-ratified. SOS-01 stays 🟢 ratified.
