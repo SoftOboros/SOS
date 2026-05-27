@@ -617,3 +617,40 @@ dispatch surface. The §5 catalog itself was already frozen at Wave-1;
 INV-SOS-* relationships change; §13 rows unchanged. The change is
 pure code-hygiene, motivated by the observed `KeyError` against
 `inline_subchart`.
+### 2026-05-27 — SOS11U2: validation composer landed
+
+Closes the second of the three Wave-1 §15 "Still open" line items: *"`validation.py` composer. §6 axes (a)-(d) are typed in `contracts.py` as `ValidationReport` but no module wires scjson round-trip + SOS-01 lint + SOS-03 bound + invariant-check into a single pre-commit pipeline."* The composer at `tools/sos-codegen/sos11_mcp/validation.py` is now the single entry point for evaluating §6's four-axis surface against a chart path, returning a `ValidationReport` whose four typed fields map 1:1 to §6 axes (a)–(d).
+
+**Landed** (🟢):
+
+| Commit | Subject | Module | Tests |
+|---|---|---|---|
+| `SOS11U2` | four-axis validation composer + tests | `tools/sos-codegen/sos11_mcp/validation.py` | `tools/sos-codegen/tests/test_sos11_validation.py` (17 tests) |
+
+**Substrate map — which axis consumes which existing tree.** The composer is *composition*, not *re-implementation*: every axis delegates to a substrate already ratified-and-landed in a sibling SOS phase.
+
+| §6 axis | Substrate module / key function | Wired? |
+|---|---|---|
+| (a) `scjson_round_trip` | `scjson.SCXMLDocumentHandler.xml_to_json` / `.json_to_xml`, with the round-trip drift detected by `sos11_mcp.diffs.structured_scxml_diff` | **fully wired** |
+| (b) `lint` | `sos12_lint.check_dispatch_depth` (SCXML-LINT-DISP-1) + `sos12_lint.check_legibility` (SCXML-LINT-DISP-2) | **fully wired** for the DISP family; SCXML-LINT-CH-{1,2,3} reserved in SOS-01 §15 but no general runner module exists yet — composer reports `"deferred: SOS-01-CH-runner not yet wired"` in the lint-axis diagnosis without pretending to evaluate the CH rules |
+| (c) `bound_converges` | `sos12_annotations.parse_dispatch_annotations` → `sos12_bound.compose_bound` over a `BoundInputs` keyed off the parsed inventory | **fully wired**; v1 caveat — per-chart reachability bounds are state-count proxies pending the SOS-03 canonical bound computation. Convergence is structural (depth / DAG / missing child), so the proxy suffices for the §6 "bound converges within the declared bound" property |
+| (d) `invariants_hold` | `sos12_annotations.parse_dispatch_annotations` → `sos12_contract_match.verify_inventory` with the default `simple_edge_provider` | **fully wired** |
+
+All four axes are now exercised end-to-end against real fixtures (parent_for_extract, parent_for_inline, deep_chain_overflow, parent_two_level). The "deferred: …" diagnosis convention from Wave-3 J / Wave-3 K survives only inside axis (b) for the SOS-01 CH-rule family; axes (a), (c), (d) report substantive pass/fail and never `"deferred"`.
+
+**Follow-up not in this scope.** `extract.py` and `inline.py` currently populate axes (b)/(c)/(d) (or (a)/(b)/(c)/(d) respectively in inline) with hand-rolled "deferred" markers. A follow-up PR will wire both handlers to delegate to `validate_chart()` so the post-edit chart is run through the canonical composer instead. That PR also lands once Wave-4U1's `tool_catalog.py` harmonization settles the registry surface — registering the composer as a SOS-11 MCP tool (`validate_chart` callable, read-only per §10.1 since it only reads charts) is the natural next entry alongside the harmonized `TOOL_HANDLERS` / `HANDLER_BINDINGS` dictionaries.
+
+**Composer guarantees.**
+
+1. *Never raises.* Per §7 atomicity the composer converts every substrate exception (missing file, malformed SCXML, contract mismatch, bound overflow) into a `passed=False` axis report. A chart with a contract mismatch does not crash the validation call; the caller sees `invariants_hold.passed=False` and decides whether to roll back per §7.
+2. *Always returns the four-tuple.* `ValidationReport`'s `__post_init__` enforces the axis-to-field binding; the composer's `_resolve` helper guarantees every selected and unselected axis produces a `ValidationAxisReport` with the correct enum value, so a caller iterating `axis_reports()` never sees `None`.
+3. *Honest-partial reporting.* Unselected axes return `passed=True` with `diagnosis="not requested"`; the deferred SOS-01 CH-rule family is named explicitly in the lint-axis diagnosis. The distinction between substantive pass (None or substrate diagnosis) and deferred-or-skip pass (`"deferred"` / `"not requested"` text) lets callers filter for "axes we actually evaluated" without re-reading this doc.
+4. *Ratified defaults.* `DEFAULT_MAX_DEPTH=8` mirrors SOS-12 §6.5 / PCDN-005; `DEFAULT_LEGIBILITY_THRESHOLD=15` mirrors SOS-12 §9.1 / PCDN-003. The composer's default-keyword surface is the ratified contract; per-call overrides remain available for project-specific chart-family overrides per SOS-12 §10.
+
+**Invariants touched.** INV-SOS-C (`derive` — the validation composer IS the §7 pre-commit gate the structure-changing edit handlers MUST clear; this module is the operational realisation of "every commit passes all four §6 axes"). INV-SOS-G (`derive` — verified-codegen position: a chart that fails any of the four axes is by definition not commit-able, so generated code from a failing chart is impossible by construction once the extract/inline handlers wire through this composer). INV-SOS-H (`derive` — every axis diagnosis renders in chart vocabulary with chart-path-prefixed cites: rule ids for lint, `chart_path` for invariants, parent/child filenames for round-trip). INV-S-DISP-2 (`mirror` — the invariants axis IS the runtime invocation of SOS-12's mandatory contract-matching gate). No invariant relationships changed; no §13 row required restating.
+
+**Still open after SOS11U2.**
+
+- **`vector_delta` full-delta retrieval** (`get_vector_delta(call_id)` per PCDN-002 "both") — Wave-1 carry-forward item #3. Extract handler's `ExtractRegionResult.boundary_vectors` already carries the full vector list, so a future tool surface only needs a call-id-keyed cache. Out of scope for U2.
+- **Wiring extract.py and inline.py to delegate to `validate_chart()`** — the handlers still hand-roll their `ValidationReport` objects. The composer's surface is callable today; the wire-through is a follow-up cleanup PR that updates each handler's "step 8" / "step 6" validation-building block to call `validate_chart(chart_path)` instead. Out of scope for U2 per the Wave-4 dispatch contract.
+- **Tool-catalog registration** of `validate_chart` as a SOS-11 read-only MCP tool — Wave-4U1 has now harmonized the registry surface (`HANDLER_BINDINGS` canonical); a future small commit registers `validate_chart` as the first read-only handler binding.
