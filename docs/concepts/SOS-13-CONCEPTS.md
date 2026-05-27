@@ -453,3 +453,19 @@ User walked the chart-side discharge-annotation grammar in a follow-up PCDN sess
 **INV-SOS-G enforcement.** §7.5's load-bearing role is making discharge **explicit at the chart layer**. Silent stripping is prevented by construction: codegen cannot emit an unchecked op without a corresponding chart-side `<sos:discharged>` annotation (or, for VS-OP-5, a structural INV-S7 / INV-S8 invariant). This closes a previously-implicit gap between INV-SOS-G's intent and the wave-1 codegen behaviour.
 
 Status: 🟢 **ratified** (continuing). The wave-1 codegen implementation already uses the grammar; this entry brings the spec text into alignment with the implementation per the spec-before-code discipline (the grammar was implementation-led during the wave-1 PR; this §15 entry retroactively ratifies). No further code change required from this entry alone.
+
+### 2026-05-27 — SOS13F1: `INV-S-CHART-N` invariants generator landed (Ira)
+
+Wave-1 follow-on against §8.1. `tools/sos-codegen/sos13_invariants.py` is the pure-function generator that turns a chart's bounds-analysis output into the `INV-S-CHART-N` series artifacts:
+
+- `invariants.rs` — Rust source fragment with one `pub const INV_S_CHART_<N>: &str = "<text>";` per chart-derived invariant, plus a `pub fn cite(id: &str) -> &'static str` dispatch returning the invariant text (or `""` for unknown ids; intentionally non-panicking per §8 — verified-strip's whole job is to remove panic surfaces, so the cite-lookup surface stays panic-free too).
+- `INVARIANTS.md` — human-readable mirror with one `## INV-S-CHART-<N>` section per invariant carrying the text, originating chart-site, and status (`derived | declared | discharged`), plus a trailing `## Discharge registry` table cross-referencing each `<sos:discharged>` annotation (§7.5) to the invariant id it discharges.
+- An in-memory registry (`dict[str, list[str]]` keyed by `<state>:<check>`) returned to the caller, used by the future `transliterate_rust.py` SAFETY-comment generator (Wave-3) to look up the cite-string for a given discharge site.
+
+The generator's input shape (`BoundsAnalysisInput` dataclass with `chart_id`, `invariants: tuple[InvariantSpec, ...]`, `discharges: tuple[DischargeAnnotation, ...]`) is the minimum surface needed for artifact generation; the binding to SOS-02's host-simulator IR / SOS-03's vector schema is the subject of a follow-on SOS-02/SOS-03 integration commit. The `<sos:discharged>` `check` value enumeration is mirrored verbatim from §7.5's frozen four-value set (`bounds | div-by-zero | null | overflow`); the recognized-checks constant is duplicated in this module to keep it import-cycle-free.
+
+INV-SOS-G traceability: every emitted invariant carries its originating chart site (e.g. `boot.onentry`, `sched_dispatch.guard`) so Wave-3 SAFETY comments can cite both the invariant id AND the chart site that proves it — closing the "silent strip" surface by construction.
+
+Tests at `tools/sos-codegen/tests/test_sos13_invariants.py` (23 tests, all passing): frozen-enum guards, empty-input case, single/mixed invariant cases, explicit-vs-prefix discharge binding, orphan-discharge surface, markdown formatting, Rust source-level well-formedness (balanced braces, escaped quotes), and a `cargo check` round-trip that builds a scratch crate around the generated `invariants.rs` (skipped cleanly when cargo is missing from PATH).
+
+Status: 🟢 **landed**. Wave-3 `transliterate_rust.py` hook to embed the cite-string into SAFETY comments is the next step; no behaviour change in the existing `verified-strip` post-pass from this commit alone.
