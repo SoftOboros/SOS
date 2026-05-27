@@ -550,3 +550,9 @@ Wave-1 implementation slice — the per-dispatch-edge boundary-vector emitter sh
 - JSONL writer (`write_boundary_vectors_jsonl`) emits one record per line per SOS-03 §6 wire-format.
 
 Wave-2 integration boundary: the local `SubChartContract` / `DispatchEdge` input dataclasses are placeholders for the ratified `sos12_annotations` walker outputs (sibling Wave-1 agent's deliverable). The constructor surface is stable; Wave-2 wiring is a constructor-level adapter.
+
+### 2026-05-27 — SOS12B1: bound-composition algorithm landed (Ira)
+
+Wave-1B fan-out: `tools/sos-codegen/sos12_bound.py` + `tools/sos-codegen/tests/test_sos12_bound.py` implement the §6.1-§6.4 bound-composition algebra as a pure-function module. Per-layer SUM (not Cartesian product) per INV-SOS-F + §6.3; SCXML `<parallel>`-style independence axes surface separately from sequential composition per §6.2 / §6.4; INV-S-DISP-5 (per-layer vector count is local) verified by property test. DAG enforcement per INV-S-DISP-3 (self + mutual + n-cycle rejection). Recursion depth cap default 8 per §6.5 + PCDN-SOS-12-005, project-overridable. Worked-example test pins §8.4 HTTP family bounds (47 for the 5-chart top + per-method-only family). 25 tests passing.
+
+Wave-2 integrator wires the Wave-1A `DispatchInventory` (annotation parser) output into this module's `BoundInputs` shape; the integration boundary is documented in the module's top-of-file docstring.
