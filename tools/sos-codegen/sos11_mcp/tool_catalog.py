@@ -8,6 +8,7 @@ mutation semantics.
 
 from __future__ import annotations
 
+import importlib
 from enum import Enum
 from typing import Any, Callable
 
@@ -78,12 +79,21 @@ _ALL_TOOL_NAMES = READ_ONLY_QUERY_TOOLS + PRIMITIVE_TOOLS + HIGHER_INTENT_TOOLS
 _ALL_TOOL_NAME_SET = frozenset(_ALL_TOOL_NAMES)
 
 
-# Wave-3 handler bindings: maps each primitive tool name with an implemented
-# handler to its module path. Read at the MCP dispatch surface; not load-
-# bearing on the §5 catalog itself. Entries are added as handlers land; an
-# unbound name simply has no executable surface (the §15 wave entries name
-# which primitives have handlers).
+# Canonical SOS-11 handler registry — declarative dotted-path bindings.
+#
+# Maps each primitive (§5.1) or higher-intent (§5.2) tool name with an
+# implemented handler to its ``"module.path.callable"`` string. This is
+# the SOS-11U1 harmonized single source of truth; the legacy
+# ``TOOL_HANDLERS`` callable dict below is a resolution cache, not a
+# primary registry. Read at the MCP dispatch surface; not load-bearing
+# on the §5 catalog itself.
+#
+# Registration convention (post-SOS11U1): future Wave-N handler
+# landings add ONE line here and require NO modification to
+# :func:`get_handler`. An unbound name simply has no executable surface
+# (the §15 wave entries name which primitives have handlers).
 HANDLER_BINDINGS: dict[str, str] = {
+    "extract_region_to_subchart": "sos11_mcp.extract.extract_region_to_subchart",
     "inline_subchart": "sos11_mcp.inline.inline_subchart",
 }
 
@@ -187,57 +197,80 @@ def _ensure_known(name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tool-handler registry — Wave-3 J first entry (SOS11J1).
+# Tool-handler resolution cache — SOS11U1 harmonization.
 # ---------------------------------------------------------------------------
 #
-# The registry maps a frozen tool-name (§5.1 / §5.2) to its executable
-# handler callable. Wave-1 landed the catalog as data-only; this dict
-# is the first wiring point. Subsequent Wave-3 handlers (`inline_subchart`
-# = Wave-3 K, and the structure-preserving primitives Wave-3 owns) MUST
-# append a single entry here as part of their own commit — orchestration
-# convention per parent CLAUDE.md "Parallel-Agent Workflow" (C) file-
-# disjoint dispatch: each handler's commit touches its own entry only.
+# After the Wave-3J/Wave-3K cherry-pick auto-merge produced two parallel
+# registries (the original ``TOOL_HANDLERS`` callable dict + Wave-3K's
+# ``HANDLER_BINDINGS`` dotted-path dict), SOS11U1 collapses both to one:
+# ``HANDLER_BINDINGS`` is the canonical declarative source of truth, and
+# ``TOOL_HANDLERS`` is now a resolution cache populated on first lookup
+# by :func:`get_handler`. Direct mutation of ``TOOL_HANDLERS`` remains
+# supported for tests that want to inject a fake handler; production
+# code SHOULD register via ``HANDLER_BINDINGS``.
 #
 # Lazy / deferred imports protect callers that import the catalog
 # without needing the full SOS-12 dependency chain
-# (sos12_annotations + sos12_contract_match + sos12_boundary_vectors).
+# (sos12_annotations + sos12_contract_match + sos12_boundary_vectors)
+# or scjson — importing :mod:`sos11_mcp.tool_catalog` MUST NOT
+# transitively pull any handler module.
 TOOL_HANDLERS: dict[str, Callable[..., Any]] = {}
 
 
-def _lazy_register_extract_region_to_subchart() -> Callable[..., Any]:
-    """Lazy-import the Wave-3 J extract handler.
+def _resolve_binding(dotted_path: str) -> Callable[..., Any]:
+    """Resolve a ``"module.path.callable"`` dotted path to a callable.
 
-    Imports happen on first lookup so importing :mod:`sos11_mcp.tool_catalog`
-    does not transitively force the SOS-12 module chain to load.
+    Used by :func:`get_handler` to lazy-load handlers declared in
+    :data:`HANDLER_BINDINGS`. Splitting on the last ``.`` gives the
+    module-path / attribute boundary, then :func:`importlib.import_module`
+    loads the module on first lookup.
     """
-    from sos11_mcp.extract import extract_region_to_subchart as _handler
-    return _handler
+    module_name, _, attr_name = dotted_path.rpartition(".")
+    if not module_name or not attr_name:
+        raise ValueError(
+            f"HANDLER_BINDINGS entry {dotted_path!r} is not a valid "
+            "'module.path.callable' dotted path."
+        )
+    module = importlib.import_module(module_name)
+    return getattr(module, attr_name)
 
 
 def get_handler(tool_name: str) -> Callable[..., Any]:
     """Return the executable handler for a registered SOS-11 tool name.
 
-    Raises :class:`KeyError` for unknown names AND for known names whose
-    handlers have not yet landed (the SOS-11 §15 Wave-1 "Still open"
-    list — `inline_subchart`, the four-axis validation composer, etc.).
+    Resolution order (SOS11U1):
+
+      1. If ``tool_name`` is in :data:`TOOL_HANDLERS` (either pre-cached
+         from a prior lookup or test-injected), return that callable.
+      2. Otherwise consult :data:`HANDLER_BINDINGS`; if a binding
+         exists, lazy-import via :func:`_resolve_binding`, cache in
+         ``TOOL_HANDLERS``, and return.
+      3. Raise :class:`KeyError` for unknown catalog names AND for known
+         catalog names whose handlers have not yet landed (the SOS-11
+         §15 Wave-1 "Still open" list — the four-axis validation
+         composer, the higher-intent decomposer, etc.).
+
     Callers SHOULD treat the absence of a handler as a permissions-
     rejected outcome per §10, not as a chart-author error.
     """
     _ensure_known(tool_name)
-    if tool_name not in TOOL_HANDLERS:
-        # Lazy registration for the Wave-3 J entry.
-        if tool_name == "extract_region_to_subchart":
-            TOOL_HANDLERS[tool_name] = _lazy_register_extract_region_to_subchart()
-            return TOOL_HANDLERS[tool_name]
-        raise KeyError(
-            f"Tool {tool_name!r} is registered in the SOS-11 catalog but no "
-            "executable handler has landed yet (see SOS-11-CONCEPTS §15 "
-            "'Still open' list)."
-        )
-    return TOOL_HANDLERS[tool_name]
+    cached = TOOL_HANDLERS.get(tool_name)
+    if cached is not None:
+        return cached
+    binding = HANDLER_BINDINGS.get(tool_name)
+    if binding is not None:
+        handler = _resolve_binding(binding)
+        TOOL_HANDLERS[tool_name] = handler
+        return handler
+    raise KeyError(
+        f"Tool {tool_name!r} is registered in the SOS-11 catalog but no "
+        "executable handler has landed yet (see SOS-11-CONCEPTS §15 "
+        "'Still open' list)."
+    )
 
 
 __all__ = [
+    "HANDLER_BINDINGS",
     "HIGHER_INTENT_TOOLS",
     "PRIMITIVE_TOOLS",
     "READ_ONLY",

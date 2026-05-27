@@ -548,3 +548,72 @@ Closes the `inline_subchart` half of the wave-1 entry's "Still open" item #1 (ex
 **Tool-catalog binding.** `tool_catalog.py` gains a `HANDLER_BINDINGS: dict[str, str]` mapping primitive tool names to handler module paths. The Wave-3K registration is `"inline_subchart": "sos11_mcp.inline.inline_subchart"`. The dict shape is non-load-bearing on §5 (the catalog name itself was already frozen at wave-1); it's the MCP-dispatch surface that lets a downstream HTTP/MCP transport resolve a tool call by name.
 
 **Invariants touched.** INV-SOS-C (`derive` — `inline_subchart` is the structure-changing-edit modification path the §10.3 graphical-diff-preview gate guards; this handler IS that gate's downstream invocation site). INV-SOS-H (`derive` — `summary` + `vector_delta.summary` + the §15 cite shape all render in chart vocabulary). INV-S-DISP-2 (SOS-12 §10.1 — contract-matching is mandatory at every dispatch boundary; this handler invokes the operational gate at the moment the boundary retires). No invariant relationships changed; no §13 row required restating.
+
+### 2026-05-27 — SOS11U1: tool-catalog registry harmonization
+
+Wave-4 cleanup of the dual-registry mess flagged in the SOS11J1 entry's
+"Tool-catalog wiring" paragraph ("both coexist after the cherry-pick
+auto-merge; harmonization to a single registry is a Wave-4 cleanup
+item"). After Wave-3J and Wave-3K cherry-picks auto-merged, two
+parallel mechanisms coexisted in `tools/sos-codegen/sos11_mcp/tool_catalog.py`:
+
+- Wave-3J's `TOOL_HANDLERS: dict[str, Callable]` + `get_handler(tool_name)`
+  with a hardcoded lazy-import branch for `extract_region_to_subchart`.
+- Wave-3K's `HANDLER_BINDINGS: dict[str, str]` mapping tool name →
+  `"sos11_mcp.inline.inline_subchart"` dotted-path string, with no
+  lookup function.
+
+`get_handler` only knew about extract via its hardcoded branch; it did
+not consult `HANDLER_BINDINGS`. So `get_handler("inline_subchart")`
+raised `KeyError` despite the binding existing in the dict — a silent
+wedge against Wave-3K's deliverable.
+
+**Resolution — option (a) chosen.** `HANDLER_BINDINGS` is the canonical
+declarative source of truth (string-based dotted paths). `TOOL_HANDLERS`
+demotes to a resolution cache, populated lazily on first lookup by
+`get_handler` via `importlib.import_module` + `getattr`. Strings are
+easier to scan in a catalog than callable references, the lazy-import
+optimization is preserved (importing `tool_catalog` still does NOT
+transitively pull `extract.py` or `inline.py`), and test-injected fakes
+via direct `TOOL_HANDLERS[...]` assignment continue to work.
+
+**Post-harmonization registration convention.** Future Wave-N handler
+landings add ONE line to `HANDLER_BINDINGS` and require NO modification
+to `get_handler`. The orchestration convention from parent CLAUDE.md
+"Parallel-Agent Workflow" (C) (file-disjoint dispatch) is now trivially
+honoured for tool-catalog wiring: each handler's commit touches its own
+single-line `HANDLER_BINDINGS` entry plus its own handler module.
+
+**Landed** (🟢):
+
+| Commit | Subject | Module |
+|---|---|---|
+| `SOS11U1` | harmonize tool_catalog registry (HANDLER_BINDINGS canonical) | `tools/sos-codegen/sos11_mcp/tool_catalog.py` + `tools/sos-codegen/tests/test_sos11_tool_catalog.py` (5 new harmonization test cases) |
+
+**Test count.** `test_sos11_tool_catalog.py` grows from N to N+5;
+new assertions cover (1) both Wave-3J + Wave-3K bindings declared,
+(2) `get_handler("inline_subchart")` returns the K handler,
+(3) `get_handler("extract_region_to_subchart")` returns the J handler,
+(4) catalog-registered but unbound names (e.g. `factor_dispatch`) raise
+the helpful KeyError, and (5) a subprocess-isolated import probe
+confirms `import sos11_mcp.tool_catalog` does NOT load
+`sos11_mcp.extract` or `sos11_mcp.inline`.
+
+**Stale assertion in `test_sos11_extract.py` — follow-up.** The Wave-3J
+test `test_tool_catalog_raises_for_still_unimplemented_tool` was
+authored under the assumption that Wave-3K's handler would be visible
+in `HANDLER_BINDINGS` but invisible to `get_handler` (the dual-registry
+bug being fixed here). Post-SOS11U1 it asserts the wrong post-condition
+(`get_handler("inline_subchart")` now succeeds). The orchestrator
+SHOULD land a follow-up commit retargeting that test to a still-
+unimplemented name (`factor_dispatch` is the natural pick — higher-
+intent, no Wave-3 handler landed yet). SOS11U1 left `extract.py` and
+its test file untouched per the fan-out scope; the retarget is a
+trivial one-line edit but belongs outside this commit's scope.
+
+**Invariants touched.** None — this is a refactor of a non-normative
+dispatch surface. The §5 catalog itself was already frozen at Wave-1;
+`HANDLER_BINDINGS` is the MCP-dispatch surface, not the catalog. No
+INV-SOS-* relationships change; §13 rows unchanged. The change is
+pure code-hygiene, motivated by the observed `KeyError` against
+`inline_subchart`.
