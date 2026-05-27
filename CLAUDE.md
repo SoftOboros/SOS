@@ -68,3 +68,36 @@ When SOS-04 / SOS-05 reaches bench validation, agents follow the per-round autho
 ## NVIC priority discipline
 
 The parent-repo durable rule `feedback_freertos_nvic_priority_0` ("FreeRTOS + NVIC priority 0 = wedge") applies to SOS by extension. The SOS kernel-aware ISR set (PendSV, SVC, SysTick, plus any user-installed `*_from_isr`-driving sources) MUST follow the priority discipline ratified in SOS-00 §6. **Priority 0 is reserved** (highest) and SOS kernel-aware ISRs MUST be at priority `≥ 0xA0` on the M7 (mirroring the value documented at `disco-analyzer/analyzer-cm7/src/hsem.rs:158` for HSEM0). The SOS-00 §6 binding restates this; do not rely on memory alone.
+
+## Spec-before-code discipline
+
+SOS follows the spec-before-code planning discipline ratified in the parent `softoboros.com/CLAUDE.md` §"Spec-Before-Code Planning Discipline". Locally:
+
+- **Phase docs** live at `docs/concepts/SOS-NN-*.md`. SOS-00 is the foundational concepts doc; later phase docs cite SOS-00 invariants (INV-SOS-A through H) and the AuthorityRelationship matrix (SOS-07-CONCEPTS §0.1).
+- **Normative keywords** (MUST / MUST NOT / SHALL / SHOULD / MAY / RECOMMENDED) in concepts and phase docs are interpreted per RFC 2119 + RFC 8174 when capitalised. Lowercase is ordinary English.
+- **PCDN convention** per parent §16: any phase doc choosing between ≥2 named alternatives MUST surface a `PCDN-SOS-<phase>-NNN` entry naming alternatives + decision + rationale before downstream implementation consumes the choice.
+- **Frozen enumerations** declare a registration policy (Standards Action / Specification Required / Expert Review) in their owning phase doc. Adding to a Standards Action enum requires a §15 amendment AND a ratification signoff comment per the parent CLAUDE.md PCDN-style protocol.
+- **Errata log** at `docs/concepts/ERRATA.md` per parent §"Errata logs (per spec family)". Stable `ERRATA-NNN` ids; user-input questions carry `EOQ-NNN-<ERRATA-id>` handles.
+- **Stealth-revert prohibition** applies — see parent §"Errata logs" for the exact protocol.
+- **Commit-subject prefixes**: `SOS-NN[a-z]:` for behaviour PRs citing a ratified phase. PCDNs cited in the body per the parent protocol.
+
+The `.scxml` IS the spec — phase docs ratify the cross-port invariants and the conformance-vector surface; the SCXML kernel spec at `rtos_kernel.scxml` is the canonical source for behaviour. Ports adapt; they do not amend.
+
+## Worktree hygiene between waves
+
+Per parent `softoboros.com/CLAUDE.md` §(J): when fanning out parallel agents — either harness-allocated parent worktrees (`isolation: "worktree"`) or pre-allocated `/tmp/sos-wt-*` worktrees per `feedback_cd_into_subrepo_before_worktree_dispatch` — clean leftover worktrees + their branches between waves so the harness allocates fresh from current HEAD:
+
+```sh
+# from the parent repo root (/Users/iraabbott/softoboros), BEFORE the next wave
+for wt in $(git worktree list | awk '$3 ~ /^\[worktree-agent-/ {print $1}'); do
+  git worktree remove --force "$wt"
+done
+git branch | awk '/worktree-agent-/ {print $1}' | xargs -r git branch -D
+
+# additionally, for SOS-fanout /tmp worktrees:
+for wt in /tmp/sos-wt-*; do
+  [ -d "$wt" ] && git -C streamz/submodules/SOS worktree remove --force "$wt"
+done
+```
+
+Eliminates the stale-base recovery dance that botched lane PPP in the 2026-05-27 SIS wave.
