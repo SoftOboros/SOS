@@ -537,3 +537,16 @@ All 6 PCDNs walked and resolved:
 | **006 — Contract-mismatch handling** | ✅ **Compile-time error**. Chart compiler refuses to emit code if a `<sos:dispatch>` references a sub-chart whose contract doesn't match the parent's expectations. Matches INV-SOS-G's verified-codegen discipline; runtime checks would defeat the verified-codegen story. |
 
 Status: 🟢 **ratified**. SOS-12 implementation work (extending `tools/sos-codegen/` with the `<sos:dispatch>` walker + per-layer bound-composition + contract-matching verifier) unblocked. SOS-11's MCP tool surface adds `extract_region_to_subchart` and `inline_subchart` operations that emit SOS-12-shape `<sos:dispatch>` references on extraction.
+
+### 2026-05-27 — SOS12C1: boundary-vector emitter landed (Ira)
+
+Wave-1 implementation slice — the per-dispatch-edge boundary-vector emitter ships at `tools/sos-codegen/sos12_boundary_vectors.py` with 16 pytest tests at `tools/sos-codegen/tests/test_sos12_boundary_vectors.py`. The emitter realises §7.2 (boundary-vector emission) end-to-end:
+
+- Constant-size vector set per edge: `|events_in| + |events_out| + |invariants_maintained| + |invariants_assumed|` records, NO replay across layers (INV-S-DISP-1 honoured by construction — no sub-chart-internal state references).
+- INV-SOS-H metadata block (`chart_path` / `trigger` / `expected` / `originating_invariant`) on every vector.
+- Sum-not-product realised at the tree-emitter surface (`emit_dispatch_tree_boundary_vectors`) per §6.3 INV-SOS-F.
+- PCDN-SOS-12-006 contract-mismatch handling: compile-time error via `BoundaryVectorError` with `pcdn="PCDN-SOS-12-006"` and `invariant="INV-S-DISP-2"`.
+- Vector-id shape `sos12-boundary-<parent>-<child>-NNNN` (4-digit zero-padded seq) mirrors SOS-09-F's `MV-<UUID>-<family>-<seq>` traceability convention.
+- JSONL writer (`write_boundary_vectors_jsonl`) emits one record per line per SOS-03 §6 wire-format.
+
+Wave-2 integration boundary: the local `SubChartContract` / `DispatchEdge` input dataclasses are placeholders for the ratified `sos12_annotations` walker outputs (sibling Wave-1 agent's deliverable). The constructor surface is stable; Wave-2 wiring is a constructor-level adapter.
