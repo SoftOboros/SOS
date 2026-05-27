@@ -40,6 +40,7 @@ from transliterate_rust import (  # noqa: E402
 )
 from verified_audit import (  # noqa: E402
     AuditEntry,
+    AUDIT_SCHEMA_VERSION,
     read_audit_log,
     write_audit_log,
 )
@@ -230,11 +231,13 @@ def test_audit_log_jsonl_round_trip(tmp_path: Path):
     for line in raw:
         # Each line is independently valid JSON.
         d = json.loads(line)
+        assert d["schema_version"] == AUDIT_SCHEMA_VERSION
         assert "operation" in d
         assert "chart_state" in d
     # The reader returns the same records (in order).
     records = read_audit_log(log)
     assert len(records) == 2
+    assert records[0]["schema_version"] == AUDIT_SCHEMA_VERSION
     assert records[0]["operation"] == "bounds_check_strip"
     assert records[1]["operation"] == "null_check_strip"
 
@@ -346,6 +349,7 @@ def test_cli_profile_defaults_to_dev_keep():
         "--chart", str(FIXTURE_CHART),
     ])
     assert args.profile == "dev-keep"
+    assert args.verified_audit == Path("verified-strip-audit.jsonl")
 
 
 def test_cli_profile_verified_strip_is_rust_only(capsys):
@@ -378,5 +382,6 @@ def test_cli_profile_verified_strip_emits_audit(tmp_path: Path):
     assert rc == 0
     records = read_audit_log(audit_path)
     assert len(records) == 1
+    assert records[0]["schema_version"] == AUDIT_SCHEMA_VERSION
     assert records[0]["operation"] == "bounds_check_strip"
     assert records[0]["chart_state"] == "boot_bounded"

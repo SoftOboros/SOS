@@ -179,10 +179,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--verified-audit",
         type=Path,
-        default=Path("verified_audit.jsonl"),
+        default=Path("verified-strip-audit.jsonl"),
         help=(
             "Path to the JSONL audit log (PCDN-SOS-13-002). Default "
-            "`verified_audit.jsonl` in the current directory. The file "
+            "`verified-strip-audit.jsonl` in the current directory. The file "
             "is written only when at least one verified-strip "
             "elimination is emitted."
         ),

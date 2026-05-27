@@ -17,6 +17,7 @@ the artifact's serialization surface.
 The audit record shape (one JSON object per line):
 
     {
+        "schema_version":    1,
         "region_id":         "<state-id-or-transition-region>",
         "chart_state":       "<state id from SCXML>",
         "operation":         "bounds_check_strip"
@@ -35,9 +36,12 @@ that PCDN-SOS-13-002's ratification rests on.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator
+
+
+AUDIT_SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -54,6 +58,7 @@ class AuditEntry:
 
     def to_dict(self) -> dict:
         d = {
+            "schema_version": AUDIT_SCHEMA_VERSION,
             "region_id": self.region_id,
             "chart_state": self.chart_state,
             "operation": self.operation,
@@ -62,7 +67,9 @@ class AuditEntry:
             "safety_citation": self.safety_citation,
         }
         if self.extra:
-            d.update(self.extra)
+            d.update(
+                {k: v for k, v in self.extra.items() if k != "schema_version"}
+            )
         return d
 
 
