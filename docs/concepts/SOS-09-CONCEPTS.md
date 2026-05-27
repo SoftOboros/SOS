@@ -313,15 +313,15 @@ This phase does NOT:
 
 A conforming SOS-09 umbrella ratification satisfies:
 
-- (a) ⏸ PCDN-SOS-09-001 through 006 resolved.
-- (b) ⏸ Each sub-phase SOS-09-A through SOS-09-G has its own concept doc drafted and ratified.
-- (c) ⏸ At least one chart channel (recommended: a `kind="status"` channel) emits all six artifacts (CMSIS-SVD entry, SystemRDL entry, C HAL header, Rust HAL trait, HDL register-file RTL, membrane vector set) as a worked example.
-- (d) ⏸ The SVD output passes `svd2rust` round-trip and the generated Rust HAL trait compiles under `cargo check --target thumbv7em-none-eabihf`.
-- (e) ⏸ The HDL register-file RTL synthesizes via Yosys + nextpnr (per SOS-08 PCDN-008 / EOQ-004 Lattice ECP5 target) and passes the membrane-vector cocotb tests against the simulated bitstream.
-- (f) ⏸ Cross-phase invariants INV-SOS-A through H cited correctly in each sub-phase doc; cross-sub-phase invariants INV-S-MEM-1 through 6 cited correctly per sub-phase.
-- (g) ⏸ SOS-03 §15 amendment co-landed extending the vector framework to the six membrane-vector shapes.
-- (h) ⏸ SOS-04 §15 amendment co-landed recording the SOS-09 emission / SOS-04 runtime boundary.
-- (i) ⏸ SOS-01 §15 amendment co-landed adding the channel-annotation lint rules (chart-error on missing `kind`, `dir`, or unmappable `kind`/`dir` pair per §5.2).
+- (a) ✅ PCDN-SOS-09-001 through 006 resolved (ratified 2026-05-23; PCDN-001 amended 2026-05-25; PCDN-007 ratified 2026-05-26 — see §15.7 and §16 entries).
+- (b) ✅ Each sub-phase SOS-09-A through SOS-09-G has its own concept doc drafted and ratified (A 🟢 2026-05-25; B 🟢 2026-05-25; C 🟢 2026-05-26; D 🟢 2026-05-26; E 🟢 2026-05-26; F 🟢 2026-05-26; G 🟢 2026-05-25 — see each sub-phase doc's §16 ratification entry).
+- (c) ⏸ At least one chart channel (recommended: a `kind="status"` channel) emits all six artifacts (CMSIS-SVD entry, SystemRDL entry, C HAL header, Rust HAL trait, HDL register-file RTL, membrane vector set) as a worked example. Remaining work: the per-sub-phase fixtures under `tools/sos-codegen/tests/fixtures/sos_09_{c,d,e,f}/` each drive their own emitter in isolation; no single chart channel currently threads end-to-end through all six emitters. A unified worked-example fixture (single `.scxml` consumed by every emit path) is the gate-(c) deliverable.
+- (d) ⏸ The SVD output passes `svd2rust` round-trip and the generated Rust HAL trait compiles under `cargo check --target thumbv7em-none-eabihf`. Remaining work: cross-compile CI gate not yet wired; depends on gate (c)'s unified fixture.
+- (e) ⏸ The HDL register-file RTL synthesizes via Yosys + nextpnr (per SOS-08 PCDN-008 / EOQ-004 Lattice ECP5 target) and passes the membrane-vector cocotb tests against the simulated bitstream. Mirrors SOS-09-E §12 (i) (Yosys synth coverage still pending) and SOS-09-F §12 (i) (cocotb access-violation observation still pending).
+- (f) ✅ Cross-phase invariants INV-SOS-A through H cited correctly in each sub-phase doc; cross-sub-phase invariants INV-S-MEM-1 through 6 cited correctly per sub-phase (verified by grep — A: 12 cites, B: 13, C: 9, D: 28, E: 22, F: 27, G: 18).
+- (g) ⏸ SOS-03 §15 amendment co-landed extending the vector framework to the six membrane-vector shapes. Remaining work: SOS-03-CONCEPTS.md §15 carries no SOS-09 cross-amendment as of base SHA `38d1ed9`; co-land obligation outstanding.
+- (h) ⏸ SOS-04 §15 amendment co-landed recording the SOS-09 emission / SOS-04 runtime boundary. Remaining work: SOS-04-CONCEPTS.md §15 carries no SOS-09 cross-amendment as of base SHA `38d1ed9`; co-land obligation outstanding.
+- (i) ⏸ SOS-01 §15 amendment co-landed adding the channel-annotation lint rules (chart-error on missing `kind`, `dir`, or unmappable `kind`/`dir` pair per §5.2). Remaining work: SOS-01-CONCEPTS.md §15 carries no SOS-09 cross-amendment as of base SHA `38d1ed9`; co-land obligation outstanding.
 
 (j) and onward are implementation gates that ratify when the sub-phase landings happen.
 
@@ -492,3 +492,30 @@ The `sos:` prefix is purely a JSON-key string convention SOS-09 owns; the surrou
 **Authority.** The six features are owned by the scjson project per SOS-07 §7 AuthorityRelationship (row "scjson AST" — relationship `adapt`; mutation rights upstream). This entry does not promote, demote, or alter that row. Local SOS-side mechanization of any feature would create a new row (e.g. a future `scjson help_text → emitted Rust doc-comment` row with relationship `derive`) in the affected phase's §8 matrix.
 
 **Honest framing.** The verification work across language bindings is non-trivial (Python + JavaScript today; Rust binding non-existent at scjson 0.4.0). The validation pipeline (round-trip fidelity across all bindings) requires investment. The current `tools/sos-codegen/` template surface does not consume any of the six features. None of this is promised for any specific calendar window — it is roadmap-tracked institutional acknowledgment, nothing more.
+
+### 2026-05-27 — Umbrella §12 acceptance roll-up
+
+**Status: 🟡 informative — bookkeeping pass on §12 acceptance gates; no normative spec text changed.**
+
+This entry rolls up the §12 acceptance checklist against the SOS-09 sub-phase ratifications and landed implementation that accumulated through 2026-05-26. Three gates flip ⏸ → ✅; six remain ⏸ with the remaining work named explicitly. No frozen vocabulary, no PCDN resolution, no AuthorityRelationship row, and no invariant is touched by this entry.
+
+**Gates flipped ⏸ → ✅ (3):**
+
+- **(a)** — all umbrella PCDNs (001 through 006) ratified 2026-05-23; PCDN-001 amended 2026-05-25; PCDN-007 ratified 2026-05-26 (§15.7). Every umbrella PCDN now carries a 🟢 status marker.
+- **(b)** — all seven sub-phase concept docs (SOS-09-A through SOS-09-G) are 🟢 ratified. A and G landed 2026-05-25; B landed 2026-05-25; C, D, E, F landed 2026-05-26. Each carries its own §16 ratification entry.
+- **(f)** — INV-SOS-A through H and INV-S-MEM-1 through 6 citations verified present across all seven sub-phase docs (grep counts: A=12, B=13, C=9, D=28, E=22, F=27, G=18). No sub-phase doc is silent on the cross-phase or cross-sub-phase invariant surface.
+
+**Gates remaining ⏸ (6) with named remaining work:**
+
+- **(c)** — worked-example threshold. The per-sub-phase fixtures under `tools/sos-codegen/tests/fixtures/sos_09_{c,d,e,f}/` each drive their own emitter in isolation; SOS-09-C uses `sos09_c_hal_chart.scxml`, SOS-09-D uses `worked_example.scxml` and `worked_example_alt_ids.scxml`, SOS-09-E uses `regfile_demo.scxml`, SOS-09-F uses `sos09f_worked_example.scxml`. No single chart channel currently threads end-to-end through all six emit paths (CMSIS-SVD + SystemRDL + C HAL + Rust HAL + HDL RTL + membrane vectors). The gate-(c) deliverable is a unified worked-example fixture (single `.scxml`) consumed by every emit path with cross-emitter consistency assertions. Interpretation note: gate (c) text says "one chart channel … emits all six artifacts as a worked example" — the per-sub-phase fixtures satisfy each emitter individually but do not satisfy "one channel through all six", which is the load-bearing demonstration of single-source-of-truth across the membrane. Keeping ⏸ is the honest reading.
+- **(d)** — `svd2rust` round-trip + `cargo check --target thumbv7em-none-eabihf` CI gate. Depends on gate (c)'s unified fixture. Bench-tooling-gated; no passing CI gate as of base SHA `38d1ed9`.
+- **(e)** — Yosys + nextpnr ECP5 synth + cocotb bitstream tests. Mirrors SOS-09-E §12 (i) (Yosys synth coverage open) and SOS-09-F §12 (i) (cocotb access-violation observation open). Synth-tool / bench-gated.
+- **(g)** — SOS-03 §15 co-amendment extending the vector framework to the six membrane-vector shapes. `docs/concepts/SOS-03-CONCEPTS.md` §15 carries no SOS-09 entry as of base SHA `38d1ed9`; co-land obligation outstanding.
+- **(h)** — SOS-04 §15 co-amendment recording the SOS-09 emission / SOS-04 runtime boundary. `docs/concepts/SOS-04-CONCEPTS.md` §15 carries no SOS-09 entry as of base SHA `38d1ed9`; co-land obligation outstanding.
+- **(i)** — SOS-01 §15 co-amendment adding the channel-annotation lint rules. `docs/concepts/SOS-01-CONCEPTS.md` §15 carries no SOS-09 entry as of base SHA `38d1ed9`; co-land obligation outstanding.
+
+**Implementation landings cited (informative).** Per sub-phase: SOS-09-A → `tools/sos-codegen/sos09_annotations.py` + `tests/test_sos09_annotations.py`. SOS-09-B → `tools/sos-codegen/transliterate_svd.py` (the as-built filename; sibling Wave-1F is filing the SOS-09-B §16 amendment recording the rename from the originally-specified filename). SOS-09-C → `tools/sos-codegen/c_hal_emit.py` + tests. SOS-09-D → `tools/sos-codegen/transliterate_rust.py` + tests. SOS-09-E → `tools/sos-codegen/transliterate_hdl_{vhdl,sv}.py`, `transliterate_regfile.py`, plus the SOS-09-E templates directory. SOS-09-F → `tools/sos-codegen/vectors_emit.py` + the `tools/sos-codegen/vectors/families/` directory. SOS-09-G → `tools/sos-codegen/transliterate_mpu.py` (sibling Wave-1F is filing the rename amendment).
+
+**Cross-references.** Sibling Wave-1 agents in this wave own (a) the SOS-09-B §16 filename-rename amendment and (b) the SOS-09-G §16 filename-rename amendment; if those landings produce ERRATA entries in `docs/concepts/ERRATA.md`, future revisions of this roll-up SHOULD back-cite the resulting `ERRATA-NNN` ids (the ERRATA log is empty as of base SHA `38d1ed9`). The three remaining gate-(g)/(h)/(i) co-amendments to SOS-03 / SOS-04 / SOS-01 are tracked as outstanding obligations against the umbrella; closing them flips three more ⏸ → ✅ in a future roll-up.
+
+**Frozen-enumeration registration policy.** None — this entry is a bookkeeping pass against §12. It adds no enumeration values, no PCDN resolutions, no AuthorityRelationship rows, and no invariants. Flipping a §12 gate from ⏸ → ✅ in light of already-ratified sub-phase content and already-landed implementation is not itself a normative spec change.
