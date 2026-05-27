@@ -365,3 +365,27 @@ All four PCDNs walked and resolved in a ratification session 2026-05-25. PCDN-SO
 - **§5.5 `sos_mpu_install()` step 4.** Updated to read `sos:mpu_background` from the chart instead of hard-coding `PRIVDEFENA=1`.
 
 Status: 🟢 **ratified**. SOS-09-G's MPU configuration emission contract is stable; the protection end-to-end claim (INV-S-MEM-3) is now codified across both the HW gate (SOS-09-E) and the SW MPU fence (this sub-phase). Implementation work on `tools/sos-codegen/mpu_emit.py` is unblocked.
+
+### 2026-05-27 — SOS09G1 implementation entry + cite reconciliation (ERRATA-002)
+
+The 2026-05-25 ratification entry's closing line forecast the implementation path as `tools/sos-codegen/mpu_emit.py`. The SOS09G1 implementation (commit `1759cb1`, "SOS09G1: implement MPU configuration emitter (SOS-09-G foundation)") shipped as `tools/sos-codegen/transliterate_mpu.py` to align with the sibling family convention (`transliterate_c.py`, `transliterate_rust.py`, `transliterate_hdl_*.py`, `transliterate_cocotb.py`, `transliterate_svd.py`). The rename — and the implementation landing itself — were not recorded in §16 at landing time; this entry reconciles both.
+
+SOS09G1 as-built surface (commit `1759cb1`):
+
+- `tools/sos-codegen/transliterate_mpu.py` — module API:
+  - `MpuRegion` dataclass — language-agnostic region descriptor (`name`, `base_address`, `size_log2`, `attr`, `access`, `xn`, `enable`, `channel_id`, `srd`).
+  - `derive_mpu_regions(annotations, *, base_address=0x40000000)` — walks `annotations.channels` in document order; computes per-channel `attr` (`device-nGnRnE` for register channels; `normal-wb-wa` for shared-datamodel scopes; `sos:mpu_attr` override per PCDN-SOS-09-G-003), `access` (zone → AP encoding per §5.2), and aligned addresses; runs the INV-S-MEM-G-2 / G-4 overlap check at the end.
+  - `emit_mpu_c(regions, *, table_name)` — C source emission with `SOS_MPU_ATTR_*` / `SOS_MPU_AP_*` macro references; satisfies §5.3 C-array shape.
+  - `emit_mpu_rust(regions, *, const_name)` — Rust module fragment with `MpuAttr` / `MpuAccess` enum references against a sibling `sos_mpu` crate; satisfies §5.3 Rust constant shape.
+  - `emit_mpu_background_setting(annotations)` — translates `annotations.mpu_background` (`kernel_default` / `strict`) into paired C `#define` + Rust `pub const` for `PRIVDEFENA` per §5.5 `sos_mpu_install()` step 4.
+- `tools/sos-codegen/tests/test_transliterate_mpu.py` — test module covering the derivation rules, the C/Rust emission shapes, the override semantics, and the overlap check.
+
+§13 amendment (this entry):
+
+- The original ratification line "Implementation work on `tools/sos-codegen/mpu_emit.py` is unblocked" is superseded. The as-built path is `tools/sos-codegen/transliterate_mpu.py` (landed `1759cb1`); the test module is `tools/sos-codegen/tests/test_transliterate_mpu.py`. The §13 Files-cited table did not previously enumerate `mpu_emit.py` (the only `tools/sos-codegen/` cite in §13 is the per-doc-assertion test module), so no row in §13 requires editing — the rename lives in the §16 narrative.
+
+No §5 frozen decision changes. No invariant amendment. The §5.2 region descriptor shape, the §5.4 SRD policy, and the §5.5 install-hook step ordering remain normative; the implementation satisfies them.
+
+Acceptance gate progression: §9 (a) "Codegen output compiles" — the C and Rust emissions are landed and exercised by `test_transliterate_mpu.py`; full `clang -Wall -Wextra -Wpedantic -std=c11` + `cargo check --target thumbv7em-none-eabihf` integration is deferred to the runtime-side composition phase. §9 (b) (c) (d) remain ⏸ pending the cocotb framework (SOS-09-F) and bench access.
+
+Cross-cite: `docs/concepts/ERRATA.md` ERRATA-002 cross-cites this entry.

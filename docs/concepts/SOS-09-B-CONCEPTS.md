@@ -325,9 +325,9 @@ A conforming SOS-09-B *without side-effect-bearing or IRQ-bearing channels* (i.e
 | `docs/concepts/SOS-09-F-CONCEPTS.md` | Membrane vectors; consumes SOS-09-B's SVD. |
 | `docs/concepts/SOS-09-G-CONCEPTS.md` | MPU configuration emission; companion. |
 | `docs/concepts/SOS-08-A-CONCEPTS.md` | Precedent shape for per-sub-phase concept doc layout. |
-| `tools/sos-codegen/` | Codegen tool; SOS-09-B emit path lives under `tools/sos-codegen/svd_emit.py` (forthcoming). |
-| `tools/sos-codegen/schemas/CMSIS-SVD-1.3.xsd` | Pinned CMSIS-SVD 1.3.x XSD (forthcoming; ships with the build wrapper). |
-| `tools/sos-codegen/svd_validate.py` | Validation gate wrapper (forthcoming). |
+| `tools/sos-codegen/transliterate_svd.py` | Codegen tool; SOS-09-B emit path. Landed `b0b69c7` (SOS09B1) — see §16 2026-05-27 entry for the rename from the original `svd_emit.py` forecast (ERRATA-001). |
+| `tools/sos-codegen/schemas/CMSIS-SVD-1.3.xsd` | 🟡 deferred — pinned CMSIS-SVD 1.3.x XSD (not yet bundled; §5.6 validation gate cites this path but no XSD has shipped). See ERRATA-001. |
+| `tools/sos-codegen/svd_validate.py` | 🟡 deferred — validation gate wrapper (not yet authored; §5.6 / §9 (a) (b) cite this path but no wrapper has shipped). See ERRATA-001. |
 | `build/svd/<chart_id>.svd` | Emitted SVD artifact (forthcoming; per INV-S-MEM-2 lives under `build/`, not tracked source). |
 | Parent `CLAUDE.md` | Spec-Before-Code Planning Discipline; Phase document shape. |
 
@@ -389,3 +389,16 @@ All five PCDNs walked and resolved cleanly in a ratification session 2026-05-25.
 **No spec amendments required** beyond the PCDN status markers in §15. Every recommendation in the original §15 was ratified as-is; the §5 frozen-decisions surface (schema pin, top-level structure, per-register emission, side-effect mapping, bit-field/IRQ-table emission, validation gate) is unchanged. The §15 entries now carry 🟢 ratified markers; the recommendation language inside each PCDN body is preserved as institutional context.
 
 Status: 🟢 **ratified**. SOS-09-B's CMSIS-SVD emission contract is stable. Downstream sub-phases (SOS-09-C C HAL, SOS-09-D Rust HAL, SOS-09-E HDL register-file RTL, SOS-09-F membrane vectors, SOS-09-G MPU configuration) MAY proceed against the frozen SVD shape. Implementation of `tools/sos-codegen/svd_emit.py` is unblocked.
+
+### 2026-05-27 — Implementation-cite reconciliation (ERRATA-001)
+
+The 2026-05-25 ratification forecast §13's emit-path file as `tools/sos-codegen/svd_emit.py`. The SOS09B1 implementation (commit `b0b69c7`, "SOS09B1: implement CMSIS-SVD emitter (SOS-09-B foundation)") shipped as `tools/sos-codegen/transliterate_svd.py` to align with the sibling family convention (`transliterate_c.py`, `transliterate_rust.py`, `transliterate_hdl_*.py`, `transliterate_cocotb.py`). The rename was not recorded in §16 at landing time; this entry reconciles the cite.
+
+§13 amendment (this entry):
+
+- Row `tools/sos-codegen/svd_emit.py (forthcoming)` → `tools/sos-codegen/transliterate_svd.py` (landed `b0b69c7`).
+- Rows `tools/sos-codegen/svd_validate.py` and `tools/sos-codegen/schemas/CMSIS-SVD-1.3.xsd` re-annotated as 🟡 deferred — neither has landed. The §5.6 validation gate ("`xmllint --schema CMSIS-SVD.xsd <file>.svd`" plus "`svd2rust --strict --input <file>.svd`") and the §9 (a) (b) acceptance gates that cite these paths remain spec-only until the deferred follow-ups land. Public emit surface is unaffected — `transliterate_svd.py` produces conformant CMSIS-SVD 1.3 XML; only the in-tree gate wrapper is missing.
+
+No §5 frozen decision changes. No invariant amendment. The §5.6 validation gate's wire-level contract (`xmllint` + `svd2rust --strict`) remains normative; the bundling of the XSD and the convenience wrapper script are deferred operational surface, not a spec retraction.
+
+Cross-cite: `docs/concepts/ERRATA.md` ERRATA-001 cross-cites this entry.
