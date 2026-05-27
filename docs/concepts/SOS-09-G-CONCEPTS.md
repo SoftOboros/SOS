@@ -389,3 +389,26 @@ No §5 frozen decision changes. No invariant amendment. The §5.2 region descrip
 Acceptance gate progression: §9 (a) "Codegen output compiles" — the C and Rust emissions are landed and exercised by `test_transliterate_mpu.py`; full `clang -Wall -Wextra -Wpedantic -std=c11` + `cargo check --target thumbv7em-none-eabihf` integration is deferred to the runtime-side composition phase. §9 (b) (c) (d) remain ⏸ pending the cocotb framework (SOS-09-F) and bench access.
 
 Cross-cite: `docs/concepts/ERRATA.md` ERRATA-002 cross-cites this entry.
+
+### 2026-05-27 — PCDN-SOS-09-G-005 ratification: apply_mpu_config() call-timing ownership
+
+Ratified by Ira at the 2026-05-27 multi-PCDN session. **Option (a) chosen**: SOS-04 owns *when* `apply_mpu_config()` is invoked during the boot sequence; SOS-09-G owns *what* the MPU configuration table contains, the data shape of the table, and the body of the `apply_mpu_config()` function that applies the table to the MPU registers. This ratifies the read of the spec that was previously surfaced as an "Open boundary item" in [SOS-04 §15] amendment "2026-05-27 — SOS04-09 runtime-boundary amendment" (co-landed with the 2026-05-27 SOS09W1 umbrella roll-up commit `43c45bf`).
+
+**Ownership split (normative).**
+
+- **SOS-09-G OWNS** — the MPU configuration table (which regions, which permissions, which memory attributes per region) as ratified across PCDN-SOS-09-G-001 through -004; the body of `apply_mpu_config()` (the register-write sequence currently codified as `sos_mpu_install()` in §5.5 step ordering); the data shape of the emitted table; the `sos:mpu_background` chart-root key wiring for `PRIVDEFENA`.
+- **SOS-04 OWNS** — the call site (*when* during boot `apply_mpu_config()` is invoked). The natural placement is post-clock-tree, pre-task-start; the precise sequencing is a SOS-04 runtime concern that the SOS-04 port spec resolves in the same amendment that wires MPU enforcement in.
+
+**Cross-reference (co-authored in this commit).** [SOS-04 §15] amendment "2026-05-27 — Cross-reference: PCDN-SOS-09-G-005 ratified (apply_mpu_config timing owned by SOS-04)" records the SOS-04 side of this ownership split. The two entries cite each other bidirectionally — neither phase's surface shifts; both phases now read consistently on the boundary.
+
+**AS-BUILT v1 acknowledgement.** Per the [SOS-04 §15] "2026-05-27 — SOS04-09 runtime-boundary amendment" (commit `38699f4` co-landed with `43c45bf`), the v1 firmware in `sos-m7-rust` does NOT yet call `apply_mpu_config()` — MPU enforcement is deferred to the future SOS-04-B production-hardening amendment per INV-S-PORT-8. This PCDN ratifies the *contract* for the boundary when MPU enforcement does wire in; the AS-BUILT v1 unprotected-runtime state is documented on the SOS-04 side and is unchanged by this ratification. No code change is required at v1; this is a spec-clarification ratification only.
+
+**Frozen-enumeration registration policy: Standards Action** for the ownership boundary itself. Moving the timing surface into SOS-09-G — e.g. amending §5.5 to specify "`apply_mpu_config()` MUST be called as a boot-stage marker post-clock-tree and pre-task-start" — would require a §16 amendment to this doc AND a co-landing §15 amendment to SOS-04 narrowing or removing SOS-04's timing surface. The current split keeps each phase's authority narrow: SOS-09-G's normative surface stays scoped to emission shape + install-hook body; SOS-04's normative surface stays scoped to runtime sequencing.
+
+**INV-SOS-E `compose` relationship confirmed.** Per [SOS-07 §7] AuthorityRelationship matrix, the SOS-09 → SOS-04 boundary is `compose`: SOS-04 composes SOS-09-emitted artifacts as inputs. This ratification confirms the relationship stays `compose` — neither phase claims ownership of the other's surface. SOS-09-G emits the table + the `apply_mpu_config()` body; SOS-04's runtime invokes the function at a runtime-determined boot stage. No upstream-vs-downstream ownership shift occurs; the table is upstream to the call site, and the call site is downstream of the table, in the natural emit-then-consume direction enumerated in the [SOS-04 §15] four-artifact boundary set.
+
+**Cross-reference: ERRATA-002 (filename rename context).** ERRATA-002 (commit `d24528f`) reconciled the SOS-09-G implementation filename rename from the original `mpu_emit.py` forecast to the as-built `tools/sos-codegen/transliterate_mpu.py`. The naming context for `apply_mpu_config()` as the entry-point identifier — as used in the [SOS-04 §15] four-artifact boundary set table — supersedes the §5.5 prose identifier `sos_mpu_install()` for the cross-boundary contract surface; the two names refer to the same function. Reconciling §5.5's identifier prose to match the boundary-set identifier is a future minor amendment (no behaviour change) and is NOT in scope for this PCDN ratification.
+
+No §5 frozen decision changes. No INV-S-MEM-G-N invariant amendment. The §5.5 install-hook step ordering remains normative and unchanged; this entry ratifies the boundary between SOS-09-G's normative surface (table shape + function body) and SOS-04's normative surface (call timing).
+
+Status: 🟢 **PCDN-SOS-09-G-005 ratified**. The boundary contract for `apply_mpu_config()` is stable across SOS-04 and SOS-09-G.
