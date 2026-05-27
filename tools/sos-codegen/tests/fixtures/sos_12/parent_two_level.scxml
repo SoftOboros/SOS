@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 fixture: two-level nested dispatch. The parent dispatches into
+  `middle_layer.scxml` which itself dispatches into `child_leaf.scxml`.
+  Resulting dispatch-tree is parent → middle → child (depth 2 from
+  the root). Exercises recursion through one intermediate node.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="dispatching">
+  <state id="dispatching">
+    <sos:dispatch ref="middle_layer.scxml"/>
+  </state>
+</scxml>

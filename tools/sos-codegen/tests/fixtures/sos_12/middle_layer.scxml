@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 fixture: middle layer of a two-level dispatch. Declares its
+  own `<sos:contract>` (per PCDN-SOS-12-004), and itself dispatches
+  into `child_leaf.scxml` from its `inner` state.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="inner">
+  <sos:contract reads="ctx" writes="ctx_out">
+    <sos:events-in>
+      <sos:event>m.in</sos:event>
+    </sos:events-in>
+    <sos:events-out>
+      <sos:event>m.out</sos:event>
+    </sos:events-out>
+  </sos:contract>
+  <state id="inner">
+    <sos:dispatch ref="child_leaf.scxml"/>
+  </state>
+</scxml>

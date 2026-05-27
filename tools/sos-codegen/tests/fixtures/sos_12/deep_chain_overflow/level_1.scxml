@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SOS-12 depth-overflow fixture: level 1 → level 2. Chain
+     extends one level past the default 8-level cap; level_9 is a leaf,
+     so walking from level_0 with max_depth=8 must reject at the
+     level_8 → level_9 boundary. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="s">
+  <state id="s">
+    <sos:dispatch ref="level_2.scxml"/>
+  </state>
+</scxml>

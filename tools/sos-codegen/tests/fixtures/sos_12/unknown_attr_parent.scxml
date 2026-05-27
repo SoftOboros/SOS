@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 negative fixture: `<sos:dispatch>` carrying an unknown attribute
+  `bogus`. Per PCDN-SOS-12-001 the frozen attribute set is {"ref"};
+  adding a new attribute requires a §15 amendment. The parser MUST
+  reject this with a Sos12AnnotationError citing PCDN-SOS-12-001.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="s1">
+  <state id="s1">
+    <sos:dispatch ref="child_leaf.scxml" bogus="oops"/>
+  </state>
+</scxml>

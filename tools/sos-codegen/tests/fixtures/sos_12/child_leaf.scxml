@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 leaf sub-chart. Declares a `<sos:contract>` at chart root per
+  PCDN-SOS-12-004 with `reads`/`writes` attributes per PCDN-SOS-12-002
+  and the three contract sub-elements (events-in / events-out /
+  invariants) per §5.1 + §8.2 (informative) example.
+
+  No `<sos:dispatch>` here — the leaf is a terminal node in the
+  dispatch-tree (this is how recursion bottoms out under the depth cap).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="parsing">
+  <sos:contract reads="parsed_uri parsed_method" writes="response_status">
+    <sos:events-in>
+      <sos:event>tcp.bytes_received</sos:event>
+      <sos:event>timer.body_timeout</sos:event>
+    </sos:events-in>
+    <sos:events-out>
+      <sos:event>method.complete</sos:event>
+      <sos:event>method.error</sos:event>
+    </sos:events-out>
+    <sos:invariants>
+      <sos:maintained-by-subchart>INV-GET-1-headers-bounded</sos:maintained-by-subchart>
+      <sos:maintained-by-subchart>INV-GET-2-body-absent</sos:maintained-by-subchart>
+      <sos:assumed-of-environment>INV-HTTP-1-request-line-parsed</sos:assumed-of-environment>
+    </sos:invariants>
+  </sos:contract>
+  <state id="parsing">
+    <transition event="tcp.bytes_received" target="done"/>
+  </state>
+  <state id="done"/>
+</scxml>

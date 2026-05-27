@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SOS-12 deep-chain fixture: level 7 dispatches into level 8.
+     Chain forms an 8-deep dispatch-tree: level_0 → level_1 → ... → level_8
+     where level_8 is a leaf. Walking from level_0 the root sits at depth 0
+     and level_8 sits at depth 8 (the cap). -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="s">
+  <state id="s">
+    <sos:dispatch ref="level_8.scxml"/>
+  </state>
+</scxml>

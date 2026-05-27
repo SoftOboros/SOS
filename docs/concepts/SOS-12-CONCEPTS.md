@@ -538,6 +538,17 @@ All 6 PCDNs walked and resolved:
 
 Status: 🟢 **ratified**. SOS-12 implementation work (extending `tools/sos-codegen/` with the `<sos:dispatch>` walker + per-layer bound-composition + contract-matching verifier) unblocked. SOS-11's MCP tool surface adds `extract_region_to_subchart` and `inline_subchart` operations that emit SOS-12-shape `<sos:dispatch>` references on extraction.
 
+### 2026-05-27 — SOS12A1: dispatch+contract parser landed (Ira)
+
+Wave-1A of the SOS-12 implementation fan-out: `tools/sos-codegen/sos12_annotations.py` + `tools/sos-codegen/tests/test_sos12_annotations.py` (27 tests, all passing). The module reads a scjson 0.4.0 chart AST and emits a typed `DispatchInventory` covering:
+
+- Every `<sos:dispatch ref="…"/>` element (PCDN-001 ratified shape; frozen attribute set `{"ref"}`; unknown attrs rejected per Standards Action).
+- Every chart-root `<sos:contract>` element (PCDN-004 inline-in-SCXML shape) with `reads`/`writes` attributes (PCDN-002 per-sub-chart explicit-field-lists) plus `<sos:events-in>` / `<sos:events-out>` / `<sos:invariants>` sub-elements.
+- Depth-cap enforcement (PCDN-005 / §6.5 / INV-S-DISP-5 — default 8, project-overridable via `max_depth` keyword).
+- INV-S-DISP-3 acyclicity check at the parser layer (self-dispatch and cycle-via-loader caught with chart-author-friendly diagnostic).
+
+The parser stops at parsing + structural validation. Bound-composition (Wave-1B / §6 algebra) and contract-matching (Wave-2 / §5.3 + INV-S-DISP-2) are scoped to subsequent waves; extension-point hooks are documented at the foot of the module.
+
 ### 2026-05-27 — SOS12C1: boundary-vector emitter landed (Ira)
 
 Wave-1 implementation slice — the per-dispatch-edge boundary-vector emitter ships at `tools/sos-codegen/sos12_boundary_vectors.py` with 16 pytest tests at `tools/sos-codegen/tests/test_sos12_boundary_vectors.py`. The emitter realises §7.2 (boundary-vector emission) end-to-end:

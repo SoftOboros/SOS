@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SOS-12 depth-overflow fixture: terminal leaf at depth 9 (just past
+     the cap). Reaching this node is the reject condition. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="s">
+  <state id="s"/>
+</scxml>

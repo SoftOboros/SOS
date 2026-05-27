@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 fixture: single-level dispatch. The parent chart's `handle_get`
+  state dispatches into `child_leaf.scxml`. The leaf carries a
+  `<sos:contract>` per PCDN-SOS-12-004 ratified shape; the parent does
+  NOT declare its own contract (the top-level chart in a chart-family
+  is not itself dispatched-into).
+
+  Exercises: §5.1 PCDN-001 `<sos:dispatch ref="…">` shape; §5.1
+  PCDN-002 / PCDN-004 contract shape on the sub-chart; depth-1
+  recursion under the default 8-level cap.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="idle">
+  <state id="idle">
+    <transition event="req.received" target="handle_get"/>
+  </state>
+  <state id="handle_get">
+    <sos:dispatch ref="child_leaf.scxml"/>
+  </state>
+</scxml>

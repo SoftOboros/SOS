@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 fixture: chart with a richly-populated `<sos:contract>` and no
+  `<sos:dispatch>`. Exercises the contract-only parse path (every field
+  of the four-tuple populated): reads/writes attributes (PCDN-002),
+  events-in/out (§5.1), and both invariant flavours
+  (maintained-by-subchart / assumed-of-environment).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="s">
+  <sos:contract reads="input_buf header_count" writes="output_buf status">
+    <sos:events-in>
+      <sos:event>ingest.bytes</sos:event>
+      <sos:event>ingest.eof</sos:event>
+    </sos:events-in>
+    <sos:events-out>
+      <sos:event>frame.emitted</sos:event>
+      <sos:event>parse.error</sos:event>
+    </sos:events-out>
+    <sos:invariants>
+      <sos:maintained-by-subchart>INV-CO-1</sos:maintained-by-subchart>
+      <sos:maintained-by-subchart>INV-CO-2</sos:maintained-by-subchart>
+      <sos:assumed-of-environment>INV-ENV-1</sos:assumed-of-environment>
+      <sos:assumed-of-environment>INV-ENV-2</sos:assumed-of-environment>
+    </sos:invariants>
+  </sos:contract>
+  <state id="s"/>
+</scxml>
