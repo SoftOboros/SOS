@@ -128,6 +128,80 @@ This section is **normative**. The catalogue is a **frozen enumeration** with re
 
 VS-OP-1 through VS-OP-5 are the v1 catalogue. Every emitted `unsafe { ... }` block under `verified-strip` MUST correspond to exactly one VS-OP-* identifier, carried in the SAFETY comment per §8.
 
+The illustrative emit examples below show, per VS-OP, the `dev-keep` form (safe, panic-on-violation) paired with the `verified-strip` form (`unsafe { ... }` + SAFETY comment per §8). Examples are informative; the table above is the normative catalogue. Discharging-invariant citations follow §8's `INV-S-CHART-N` / `INV-S<N>` / `INV-S-PORT-N` namespacing per [SOS-07 INV-SOS-G](./SOS-07-CONCEPTS.md). Chart-vocabulary rationales (state-id, transition-id, region-id) are mandatory per [SOS-07 INV-SOS-H](./SOS-07-CONCEPTS.md); raw RTL / memory-address / register-name rationales are forbidden.
+
+**VS-OP-1 — `slice.get_unchecked(i)` (index-bounds elimination).** Discharges via `<sos:discharged check="bounds"/>` on the enclosing scope per §7.5.
+
+```rust
+// dev-keep profile (safe form)
+let tcb = TCB_POOL[tid as usize];  // bounds-checked: panic if tid >= MAX_TASKS
+
+// verified-strip profile (eligible per §7.3 bounds analysis)
+// SAFETY: INV-S-CHART-3 — tid < MAX_TASKS at every script_* entry
+// (proved at sys_yield.onentry's ready-queue scan bound).
+let tcb = unsafe { *TCB_POOL.get_unchecked(tid as usize) };
+```
+
+**VS-OP-2 — `option.unwrap_unchecked()` (Option discharge).** Discharges via `<sos:discharged check="null"/>` on the enclosing scope per §7.5.
+
+```rust
+// dev-keep profile
+let current = CURRENT_TID.get().unwrap();  // panic on None
+
+// verified-strip profile (eligible per §7.3 Option-Some analysis)
+// SAFETY: INV-S-CHART-7 — CURRENT_TID is Some on every entry to
+// state 'running' (proved at sched_dispatch.onentry's task-pick guard).
+let current = unsafe { CURRENT_TID.get().unwrap_unchecked() };
+```
+
+**VS-OP-3 — `result.unwrap_unchecked()` (Result discharge).** Discharges via `<sos:discharged check="null"/>` on the enclosing scope per §7.5 (shares the `null` value with VS-OP-2 per the §7.5 enumeration).
+
+```rust
+// dev-keep profile
+let next = pick_next_ready(p).unwrap();  // panic on Err
+
+// verified-strip profile (eligible per §7.3 Result-Ok analysis)
+// SAFETY: INV-S-CHART-9 — pick_next_ready(p) returns Ok at every
+// sched_dispatch.guard entry where ready[p] is non-empty
+// (proved at sched_dispatch.guard's wait-queue invariant check).
+let next = unsafe { pick_next_ready(p).unwrap_unchecked() };
+```
+
+**VS-OP-4 — `core::hint::unreachable_unchecked()` (reachability discharge).** Discharges by the chart's bound analysis proving the branch is not in the reachable-state set; no explicit `<sos:discharged>` is required because the discharge is structural (the unreachable branch carries no operations to attribute).
+
+```rust
+// dev-keep profile
+match task_state {
+    TaskState::Ready   => requeue_ready(tid),
+    TaskState::Running => suspend_running(tid),
+    TaskState::Blocked => block_waitqueue(tid),
+    TaskState::Exited  => unreachable!("INV-S-CHART-12: exited tasks never re-enter sched_dispatch"),
+}
+
+// verified-strip profile (eligible per §7.3 reachable-state analysis)
+match task_state {
+    TaskState::Ready   => requeue_ready(tid),
+    TaskState::Running => suspend_running(tid),
+    TaskState::Blocked => block_waitqueue(tid),
+    // SAFETY: INV-S-CHART-12 — TaskState::Exited is unreachable at
+    // sched_dispatch.onentry per chart bound analysis (Exited tasks
+    // are filtered out of the ready-queue at task_exit.onexit).
+    TaskState::Exited  => unsafe { core::hint::unreachable_unchecked() },
+}
+```
+
+**VS-OP-5 — non-empty heapless access (INV-S7 / INV-S8 discharge).** Discharges via the chart's wait-queue / ready-queue structural invariants from [SOS-00 §9](./SOS-00-CONCEPTS.md) (INV-S7 ready-queue integrity, INV-S8 wait-queue ordering). Per §7.5 cross-reference (line 209), VS-OP-5 does not require an explicit `<sos:discharged>` because the discharging invariant is structural rather than per-scope.
+
+```rust
+// dev-keep profile
+let next = READY_POOL[p].pop_front().unwrap();  // panic on empty queue
+
+// verified-strip profile (eligible per §7.3 non-empty analysis)
+// SAFETY: INV-S7 — READY_POOL[p] is non-empty before pick_next dequeues
+// (proved at sched_dispatch.guard — guard ready[p].len() > 0 gates entry).
+let next = unsafe { READY_POOL[p].pop_front().unwrap_unchecked() };
+```
+
 ### 7.2 NOT emitted under `verified-strip`
 
 - `unsafe` arithmetic intrinsics (`unchecked_add`, `unchecked_sub`, etc.) — chart bound analysis does not currently certify arithmetic non-overflow. Deferred to a future amendment.
