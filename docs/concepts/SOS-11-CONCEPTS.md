@@ -432,6 +432,98 @@ First wave of SOS-11 implementation commits landed under `tools/sos-codegen/sos1
 
 **Invariants touched.** The six wave-1 commits exercise INV-SOS-C (`derive` — the tool surface is the modification path; `chart_query.py` + `permissions.py` are the read-side; `tool_catalog.py` is the registry binding all writes through named tools) and INV-SOS-H (`derive` — `diffs.py` + `history.py` carry chart-vocabulary summaries into commit subjects / bodies). No invariant relationships changed; no §13 row required restating.
 
+### 2026-05-27 — SOS11J1: extract_region_to_subchart handler landed
+
+Wave-3 J implementation closes the first half of the Wave-1 "Still open"
+line item *"`extract_region_to_subchart` + `inline_subchart` handler
+implementations"*. The handler at `tools/sos-codegen/sos11_mcp/extract.py`
+operationalises the §5.1 primitive: it loads the parent chart's scjson
+AST, infers the parent's expected event routing surface from
+transitions targeting / originating-from the named region state,
+constructs a child [SOS-12][sos-12] `Contract` from the supplied
+events/invariants/datamodel-boundary, and gates the extraction on
+Wave-2I's [`verify_contract_match`][cm] — the canonical PCDN-SOS-12-006
+compile-time gate per INV-S-DISP-2.
+
+[cm]: ../../tools/sos-codegen/sos12_contract_match.py
+[sos-12]: ./SOS-12-CONCEPTS.md
+
+**Landed** (🟢):
+
+| Commit | Subject | Spec deliverable | Module |
+|---|---|---|---|
+| SOS11J1 | `extract_region_to_subchart` handler + tests | §5.1 primitive ratified semantics + §6 four-tuple result + SOS-12 §5.3 contract-match discharge | `tools/sos-codegen/sos11_mcp/extract.py` + `tools/sos-codegen/sos11_mcp/tool_catalog.py` (Wave-3 J registration entry: `TOOL_HANDLERS` dict + lazy-loaded `get_handler` lookup) |
+
+**Test count.** 18 new tests in `tools/sos-codegen/tests/test_sos11_extract.py` — all passing; 189 SOS-11+SOS-12 tests passing total (no regressions on the 171-test baseline established by Wave-2I).
+
+**Wave-2I gate-keeper citation.** The handler invokes
+`sos12_contract_match.verify_contract_match` as the discharge step
+before authoring the new sub-chart. A `ContractMismatchError` becomes a
+`ToolCallError` with `code=FailureCode.INVARIANT_VIOLATION`,
+`failed_axis=ValidationAxis.INVARIANTS_HOLD`, and a diagnosis citing
+PCDN-SOS-12-006 + INV-S-DISP-2 plus the failing clause's missing/extra
+sets — rendered in chart vocabulary per INV-SOS-H.
+
+**Deferred validation axes.** Per §6 the result tuple's `validation`
+field carries four axes. Wave-3 J populates `invariants_hold` (the
+contract-match check IS the §6 axis (d) prerequisite at the extraction
+boundary) and reports the other three as `passed=False` with diagnosis
+`"deferred: <module>-not-yet-wired"`:
+
+- `scjson_round_trip` — deferred until the validation composer
+  (Wave-1 "Still open" line item) lands. The test suite exercises the
+  round-trip end-to-end against the handler's outputs as proxy
+  coverage; the composer will lift this from in-test assertion to
+  in-result axis.
+- `lint` — deferred until SOS-01 lint runner is wired into the SOS-11
+  composer.
+- `bound_converges` — deferred until SOS-03 bound computation is
+  wired in.
+
+This honest-partial reporting matches the Wave-1 §15 framing: typed
+contract surface exists, composer doesn't.
+
+**Tool-catalog wiring.** `tool_catalog.py` gains a `TOOL_HANDLERS` dict
+(initialised empty) and a `get_handler(tool_name)` lookup that
+lazy-imports the handler on first call (so importing the catalog
+doesn't transitively force SOS-12 + scjson into the import graph for
+callers that only need permission classification). The Wave-3 J entry
+is the first one; the Wave-3 K `inline_subchart` registration shipped a
+parallel `HANDLER_BINDINGS: dict[str, str]` string-based mechanism —
+both coexist after the cherry-pick auto-merge; harmonization to a
+single registry is a Wave-4 cleanup item (orchestrator note).
+
+**Boundary vector emission.** The handler invokes
+`sos12_boundary_vectors.emit_boundary_vectors` against the new dispatch
+edge; the resulting constant-size vector set (`|events_in| +
+|events_out| + |invariants|`) is bundled in `ExtractRegionResult` and
+summarised in the §6 `vector_delta` field per INV-SOS-H traceability +
+PCDN-SOS-11-002 (summary embedded, full delta retrievable separately —
+the dataclass carries the full list so the future `get_vector_delta`
+tool surface has its source of truth).
+
+**Invariants touched.** INV-SOS-C (`derive` — first executable
+write-side handler; permissions classifier is the gate, tool registry
+is the dispatch surface, contract-match is the safety property),
+INV-SOS-G (`derive` — verified-codegen position upheld: the chart
+cannot extract into a contract-mismatched sub-chart family), INV-SOS-H
+(`derive` — chart-vocabulary summary + chart-path-prefixed diagnostic
+on failure), INV-S-DISP-2 (`mirror` — the SOS-12 mandatory contract-
+match check is the gate the handler MUST clear). No invariant
+relationships changed; §13 rows unchanged.
+
+**Still open after SOS11J1.**
+
+- `inline_subchart` handler — Wave-3 K (also landing in this same
+  spec-coherence batch; see the next §15 entry).
+- `validation.py` composer — Wave-1 carry-forward. Once landed,
+  `extract.py`'s `validation` field will populate all four axes
+  instead of three-deferred.
+- `vector_delta` full-delta retrieval (`get_vector_delta(call_id)` per
+  PCDN-002 "both") — Wave-1 carry-forward. The `ExtractRegionResult`
+  bundle already carries the full vector list so the future tool
+  surface only needs a call-id-keyed cache, not a new computation.
+
 ### 2026-05-27 — SOS11K1: inline_subchart handler landed
 
 Closes the `inline_subchart` half of the wave-1 entry's "Still open" item #1 (extract/inline handler implementations gated on SOS-12). The complementary `extract_region_to_subchart` half lands separately under Wave-3J.

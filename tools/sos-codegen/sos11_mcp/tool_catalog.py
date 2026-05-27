@@ -9,6 +9,7 @@ mutation semantics.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any, Callable
 
 
 class Permission(str, Enum):
@@ -185,6 +186,57 @@ def _ensure_known(name: str) -> None:
         raise KeyError(f"Unknown SOS-11 MCP tool: {name!r}")
 
 
+# ---------------------------------------------------------------------------
+# Tool-handler registry — Wave-3 J first entry (SOS11J1).
+# ---------------------------------------------------------------------------
+#
+# The registry maps a frozen tool-name (§5.1 / §5.2) to its executable
+# handler callable. Wave-1 landed the catalog as data-only; this dict
+# is the first wiring point. Subsequent Wave-3 handlers (`inline_subchart`
+# = Wave-3 K, and the structure-preserving primitives Wave-3 owns) MUST
+# append a single entry here as part of their own commit — orchestration
+# convention per parent CLAUDE.md "Parallel-Agent Workflow" (C) file-
+# disjoint dispatch: each handler's commit touches its own entry only.
+#
+# Lazy / deferred imports protect callers that import the catalog
+# without needing the full SOS-12 dependency chain
+# (sos12_annotations + sos12_contract_match + sos12_boundary_vectors).
+TOOL_HANDLERS: dict[str, Callable[..., Any]] = {}
+
+
+def _lazy_register_extract_region_to_subchart() -> Callable[..., Any]:
+    """Lazy-import the Wave-3 J extract handler.
+
+    Imports happen on first lookup so importing :mod:`sos11_mcp.tool_catalog`
+    does not transitively force the SOS-12 module chain to load.
+    """
+    from sos11_mcp.extract import extract_region_to_subchart as _handler
+    return _handler
+
+
+def get_handler(tool_name: str) -> Callable[..., Any]:
+    """Return the executable handler for a registered SOS-11 tool name.
+
+    Raises :class:`KeyError` for unknown names AND for known names whose
+    handlers have not yet landed (the SOS-11 §15 Wave-1 "Still open"
+    list — `inline_subchart`, the four-axis validation composer, etc.).
+    Callers SHOULD treat the absence of a handler as a permissions-
+    rejected outcome per §10, not as a chart-author error.
+    """
+    _ensure_known(tool_name)
+    if tool_name not in TOOL_HANDLERS:
+        # Lazy registration for the Wave-3 J entry.
+        if tool_name == "extract_region_to_subchart":
+            TOOL_HANDLERS[tool_name] = _lazy_register_extract_region_to_subchart()
+            return TOOL_HANDLERS[tool_name]
+        raise KeyError(
+            f"Tool {tool_name!r} is registered in the SOS-11 catalog but no "
+            "executable handler has landed yet (see SOS-11-CONCEPTS §15 "
+            "'Still open' list)."
+        )
+    return TOOL_HANDLERS[tool_name]
+
+
 __all__ = [
     "HIGHER_INTENT_TOOLS",
     "PRIMITIVE_TOOLS",
@@ -192,10 +244,12 @@ __all__ = [
     "READ_ONLY_QUERY_TOOLS",
     "STRUCTURE_CHANGING_EDIT",
     "STRUCTURE_PRESERVING_EDIT",
+    "TOOL_HANDLERS",
     "Permission",
     "all_tool_names",
     "classify_tool",
     "decomposition_for",
+    "get_handler",
     "is_higher_intent",
     "is_primitive",
 ]

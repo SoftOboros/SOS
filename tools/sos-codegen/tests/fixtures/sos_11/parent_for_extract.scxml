@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-11 Wave-3 J fixture: parent chart with a region state suitable
+  for `extract_region_to_subchart`.
+
+  Authority: docs/concepts/SOS-11-CONCEPTS.md §5.1
+  (`extract_region_to_subchart` primitive) + SOS-12 §5.3
+  (contract-matching algebra exercised at the extraction boundary).
+
+  The chart's `handle_request` state carries internal substates and an
+  internal datamodel (`status`); the parent has a transition INTO the
+  region (event `request.received`) and a transition OUT (event
+  `request.completed`) — these become, respectively, the boundary
+  events_in and events_out for the extracted sub-chart's contract.
+
+  The chart-level datamodel field `request_body` is the field the
+  extracted region reads at v1 (parent writes it before dispatch); the
+  region writes `response_status` which the parent reads after dispatch
+  (so it's in the parent's chart-level datamodel too).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0" datamodel="ecmascript" initial="idle">
+  <datamodel>
+    <data id="request_body" expr="''"/>
+    <data id="response_status" expr="0"/>
+  </datamodel>
+  <state id="idle">
+    <transition event="request.received" target="handle_request"/>
+  </state>
+  <state id="handle_request" initial="parsing">
+    <datamodel>
+      <data id="bytes_consumed" expr="0"/>
+    </datamodel>
+    <state id="parsing">
+      <transition event="parse.done" target="responding"/>
+    </state>
+    <state id="responding">
+      <transition event="response.sent" target="parsing"/>
+    </state>
+    <transition event="request.completed" target="idle"/>
+  </state>
+</scxml>
