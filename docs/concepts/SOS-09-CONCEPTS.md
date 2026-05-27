@@ -315,7 +315,7 @@ A conforming SOS-09 umbrella ratification satisfies:
 
 - (a) ✅ PCDN-SOS-09-001 through 006 resolved (ratified 2026-05-23; PCDN-001 amended 2026-05-25; PCDN-007 ratified 2026-05-26 — see §15.7 and §16 entries).
 - (b) ✅ Each sub-phase SOS-09-A through SOS-09-G has its own concept doc drafted and ratified (A 🟢 2026-05-25; B 🟢 2026-05-25; C 🟢 2026-05-26; D 🟢 2026-05-26; E 🟢 2026-05-26; F 🟢 2026-05-26; G 🟢 2026-05-25 — see each sub-phase doc's §16 ratification entry).
-- (c) ⏸ At least one chart channel (recommended: a `kind="status"` channel) emits all six artifacts (CMSIS-SVD entry, SystemRDL entry, C HAL header, Rust HAL trait, HDL register-file RTL, membrane vector set) as a worked example. Remaining work: the per-sub-phase fixtures under `tools/sos-codegen/tests/fixtures/sos_09_{c,d,e,f}/` each drive their own emitter in isolation; no single chart channel currently threads end-to-end through all six emitters. A unified worked-example fixture (single `.scxml` consumed by every emit path) is the gate-(c) deliverable.
+- (c) ✅ At least one chart channel (recommended: a `kind="status"` channel) emits all six artifacts (CMSIS-SVD entry, SystemRDL entry, C HAL header, Rust HAL trait, HDL register-file RTL, membrane vector set) as a worked example. Delivered 2026-05-27: the unified worked-example fixture is `tools/sos-codegen/tests/fixtures/sos_09/worked_example/six_emitter_chart.scxml` (single `kind="status"` channel `telemetry_status`, sos:id `11111111-1111-4111-8111-111111111111`); the integration test `tools/sos-codegen/tests/test_sos_09_six_emitter_end_to_end.py` drives every active emit path with the single chart and cross-validates the channel-name + UUID trace across all outputs. Five of the six emit paths execute end-to-end (CMSIS-SVD via `transliterate_svd.emit_svd_from_chart`, C HAL via `c_hal_emit.emit_c_hal_from_chart`, Rust HAL via `transliterate_rust.emit_rust_hal_from_chart`, HDL register-file VHDL+SV via `transliterate_regfile.emit_regfile_from_chart`, membrane vectors via `vectors_emit.emit_vectors`); the SystemRDL emit path is deferred per PCDN-SOS-09-B-005(a) (future sibling sub-phase `SOS-09-B2-SYSTEMRDL` when a non-Cortex-M target enters the SOS bench substrate) and the integration test marks that emit path explicitly skipped with the deferral citation as the skip reason. See the §16 2026-05-27 SOS09U5 entry for the full landing record.
 - (d) ⏸ The SVD output passes `svd2rust` round-trip and the generated Rust HAL trait compiles under `cargo check --target thumbv7em-none-eabihf`. Remaining work: cross-compile CI gate not yet wired; depends on gate (c)'s unified fixture.
 - (e) ⏸ The HDL register-file RTL synthesizes via Yosys + nextpnr (per SOS-08 PCDN-008 / EOQ-004 Lattice ECP5 target) and passes the membrane-vector cocotb tests against the simulated bitstream. Mirrors SOS-09-E §12 (i) (Yosys synth coverage still pending) and SOS-09-F §12 (i) (cocotb access-violation observation still pending).
 - (f) ✅ Cross-phase invariants INV-SOS-A through H cited correctly in each sub-phase doc; cross-sub-phase invariants INV-S-MEM-1 through 6 cited correctly per sub-phase (verified by grep — A: 12 cites, B: 13, C: 9, D: 28, E: 22, F: 27, G: 18).
@@ -519,3 +519,56 @@ This entry rolls up the §12 acceptance checklist against the SOS-09 sub-phase r
 **Cross-references.** Sibling Wave-1 agents in this wave own (a) the SOS-09-B §16 filename-rename amendment and (b) the SOS-09-G §16 filename-rename amendment; if those landings produce ERRATA entries in `docs/concepts/ERRATA.md`, future revisions of this roll-up SHOULD back-cite the resulting `ERRATA-NNN` ids (the ERRATA log is empty as of base SHA `38d1ed9`). The three remaining gate-(g)/(h)/(i) co-amendments to SOS-03 / SOS-04 / SOS-01 are tracked as outstanding obligations against the umbrella; closing them flips three more ⏸ → ✅ in a future roll-up.
 
 **Frozen-enumeration registration policy.** None — this entry is a bookkeeping pass against §12. It adds no enumeration values, no PCDN resolutions, no AuthorityRelationship rows, and no invariants. Flipping a §12 gate from ⏸ → ✅ in light of already-ratified sub-phase content and already-landed implementation is not itself a normative spec change.
+
+### 2026-05-27 — SOS09U5: §12(c) six-emitter worked-example landed
+
+**Status: 🟢 informative landing record — flips §12 gate (c) ⏸ → ✅; no normative spec text changed.**
+
+This entry records the landing of the unified worked-example fixture and integration test that closes umbrella §12 acceptance gate (c). The gate-(c) text — "At least one chart channel (recommended: a `kind=\"status\"` channel) emits all six artifacts (CMSIS-SVD entry, SystemRDL entry, C HAL header, Rust HAL trait, HDL register-file RTL, membrane vector set) as a worked example" — is now satisfied by a single chart channel threaded through every active emit path, materialising the umbrella's load-bearing "single source of truth across the membrane" claim as a concrete cross-validated artifact set.
+
+**The chart channel.** One `kind="status"` channel `telemetry_status`, sos:id `11111111-1111-4111-8111-111111111111`, carrying the maximum-surface annotation set permitted by SOS-09-A §5.2's twelve-key set:
+
+- `sos:kind="status"` (§5.1 — recommended by gate (c))
+- `sos:dir="hw→sw"` (§5.2 arrow form per ERRATA-004 alignment)
+- `sos:zone="privileged"` (§5.4 v1 enumeration; PCDN-SOS-09-006)
+- `sos:atomicity="atomic"` (§5.3; default for status, declared explicitly)
+- `sos:width=32` (single-cycle bus access)
+- `sos:irq="telemetry_ready"` (PCDN-SOS-09-004 logical IRQ name)
+- `sos:channel_group="telemetry"` (PCDN-SOS-09-007 Rust borrow scope)
+- `sos:privilege_region="telemetry"` (PCDN-SOS-09-007 HDL MPU scope; inherits from channel_group)
+- `sos:bit_layout` (three fields: `ready` bit 0 RO clear-on-read, `count` bits 1..7 RO, `reserved_hi` bits 8..31 reserved)
+
+**The six emit paths.** Each path is invoked by `test_sos_09_six_emitter_end_to_end.py` with the same fixture; assertions verify the channel-name + UUID trace surfaces in each output as the load-bearing single-source-of-truth demonstration:
+
+| # | Emit path | Module / entry point | Trace in output |
+|---|---|---|---|
+| 1 | CMSIS-SVD | `tools/sos-codegen/transliterate_svd.py::emit_svd_from_chart` | `<name>telemetry_status</name>` register + `<name>telemetry_ready</name>` interrupt |
+| 2 | SystemRDL | DEFERRED — PCDN-SOS-09-B-005(a) | Test cleanly skips with the deferral citation as skip reason |
+| 3 | C HAL | `tools/sos-codegen/c_hal_emit.py::emit_c_hal_from_chart` | `SOS_C_telemetry_status_consume(...)` accessor in `sos_<chart>__telemetry.h` (clear-on-read drives `_consume` naming per SOS-09-C §5.3 gate (f)) |
+| 4 | Rust HAL | `tools/sos-codegen/transliterate_rust.py::emit_rust_hal_from_chart` | `telemetry_status` typed accessor in `src/lib.rs` plus the channel's sos:id UUID in SAFETY-citation discharge text (INV-SOS-G gate (g)) |
+| 5 | HDL register-file RTL | `tools/sos-codegen/transliterate_regfile.py::emit_regfile_from_chart` | `telemetry_status` register port in BOTH `sos_regfile_<peripheral>.vhd` AND `sos_regfile_<peripheral>.sv` (INV-S-MEM-E-1 single-source) |
+| 6 | Membrane vectors | `tools/sos-codegen/vectors_emit.py::emit_vectors` | `plans.json` carries both `channel_name` + `channel_id`; per-family test files (`test_initial_value.py`, `test_clear_on_read.py`, `test_protection.py`) emitted from the channel's family set |
+
+**Cross-validation assertion shape.** The test `test_channel_id_trace_appears_across_all_active_emitters` is the load-bearing assertion that closes gate (c): the single channel's `sos:name` (`telemetry_status`) MUST appear in every active emitter's output, and the channel's `sos:id` UUID MUST additionally appear in the Rust HAL output (SAFETY-citation discipline) and the membrane-vector plans.json. Per INV-S-MEM-1 (single-source register definition): every artifact that mentions `telemetry_status` traces back to this one chart channel — there is no other chart in the worktree that emits a channel with this name, so the trace is unambiguous.
+
+**Companion IRQ assertion.** `test_svd_carries_chart_declared_irq_name` pins the chart-declared `irq="telemetry_ready"` to the SOS-09-B SVD `<interrupt>` table. Per PCDN-SOS-09-004, the SVD is the canonical IRQ surface; downstream Rust HAL / C HAL consumers compose against the SVD-derived NVIC table per the per-target mapping, so they do not re-declare the IRQ name in their own emit output — the test does not over-assert.
+
+**ERRATA-004 cite.** The channel's `sos:dir` uses the canonical arrow form `hw→sw` per the SOS-09 ERRATA-004 alignment that landed wave-2. The fixture is consistent with the §5.2 mapping table without any direction-string ambiguity.
+
+**Deferred sub-phase output.** SystemRDL is the one emit path of the six that is not wired in this worktree. The deferral is authoritative per `docs/concepts/SOS-09-B-CONCEPTS.md` §16 (2026-05-25 ratification of PCDN-SOS-09-B-005(a)): "future sibling sub-phase (e.g. `SOS-09-B2-SYSTEMRDL-CONCEPTS.md`) when a non-Cortex-M target enters the SOS bench substrate. SOS-09-B at v1 authors CMSIS-SVD only." The integration test's `test_emit_path_2_systemrdl_is_deferred` marks this skip cleanly with the deferral citation, so the gate-(c) worked-example accounting remains complete: 5 of 6 emitters wired in this worktree, 1 of 6 explicitly deferred to a future sibling sub-phase.
+
+**Materialisation of the umbrella claim.** The umbrella's §1 unlock — *"when a chart declares a hardware/software channel, the codegen emits the software-side accessor, the hardware-side register-file RTL, the register-map artifact (CMSIS-SVD primary; SystemRDL secondary), and the membrane vectors that test the read/write pairing across the boundary — all from one source, all consistent by construction"* — is now backed by a runnable, passing, cross-validated test. The "PDF cannot lie because the PDF is generated" framing of the umbrella's §14 unblocks list is concrete: edit the fixture, re-run the test, and every artifact moves together.
+
+**Test count.** 10 tests total: 9 PASS, 1 SKIP (SystemRDL deferral). Regression: full SOS-09 test surface remains 948 passed / 2 skipped (the pre-existing skip plus this entry's SystemRDL skip) — no breakage of any sub-phase's existing coverage.
+
+**Cross-references.**
+- Fixture: `tools/sos-codegen/tests/fixtures/sos_09/worked_example/six_emitter_chart.scxml`
+- Integration test: `tools/sos-codegen/tests/test_sos_09_six_emitter_end_to_end.py`
+- SystemRDL deferral authority: `docs/concepts/SOS-09-B-CONCEPTS.md` §16 (2026-05-25 PCDN-SOS-09-B-005(a) resolution)
+- ERRATA-004 (arrow form `sos:dir`): closed wave-2 per `docs/concepts/ERRATA.md`
+- SOS-09 umbrella §16 prior entry (2026-05-27 roll-up): gate (c) was the load-bearing ⏸ entry this commit flips ✅
+- Cross-phase invariants honoured: INV-SOS-A (chart-as-source), INV-SOS-B (vectors-as-deliverable), INV-SOS-H (vector-to-chart traceability), INV-S-MEM-1 (single-source register definition), INV-S-MEM-2 (register-map artifact is a build output — none of the emitter outputs are tracked source; the test materialises them to temp directories or in-memory dicts).
+
+**Outstanding ⏸ gates after this landing.** §12 (d) (`svd2rust` round-trip + `cargo check` CI gate — bench-tooling-dependent), (e) (Yosys + nextpnr ECP5 synth — synth-tool-dependent), (g) (SOS-03 §15 co-amendment), (h) (SOS-04 §15 co-amendment), (i) (SOS-01 §15 co-amendment). Five gates remain; the worked-example unification this entry records was the prerequisite for (d) and (e) (both depended on the unified fixture per the 2026-05-27 roll-up entry above), so this landing also unblocks them downstream.
+
+**Frozen-enumeration registration policy.** None — this entry is a worked-example landing record. It adds no enumeration values, no PCDN resolutions, no AuthorityRelationship rows, no invariants, and no normative section content. The §12 (c) status flip from ⏸ → ✅ is bookkeeping against an already-ratified gate text; the gate-text itself is unchanged.

@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-09 umbrella §12 gate (c) worked-example fixture: ONE chart channel
+  threaded end-to-end through all six SOS-09 emit paths. Closes the
+  load-bearing demonstration of "single source of truth across the
+  hardware/software membrane".
+
+  Channel under test:
+
+    sos:id              11111111-1111-4111-8111-111111111111
+    sos:name            telemetry_status
+    sos:kind            status            (§5.1 — recommended by gate (c))
+    sos:dir             hw→sw             (§5.2 arrow form; ERRATA-004 alignment)
+    sos:zone            privileged        (§5.4 v1 enumeration; PCDN-SOS-09-006)
+    sos:atomicity       atomic            (§5.3 default for status; declared explicitly)
+    sos:width           32                (single-register, atomic single-cycle)
+    sos:irq             telemetry_ready   (PCDN-SOS-SOS-09-004 logical IRQ name)
+    sos:channel_group   telemetry         (PCDN-SOS-09-007 Rust borrow scope)
+    sos:privilege_region telemetry        (PCDN-SOS-09-007 HDL MPU scope;
+                                           inherits from channel_group)
+    sos:bit_layout      {ready: bit 0 RO clear-on-read; count: bits 1..7 RO;
+                         reserved_hi: bits 8..31 reserved}
+
+  Six emit paths the single channel drives (gate (c) acceptance surface):
+
+    1. SOS-09-B CMSIS-SVD   → tools/sos-codegen/transliterate_svd.py
+                              emits <peripheral><registers><register name="telemetry_status">
+                              plus <interrupt name="telemetry_ready">
+    2. SOS-09-B SystemRDL   → DEFERRED per SOS-09-B §16 + PCDN-SOS-09-B-005(a):
+                              "future sibling sub-phase (e.g. SOS-09-B2-SYSTEMRDL)
+                              when a non-Cortex-M target enters the SOS bench
+                              substrate". Test cleanly skips with the deferral
+                              citation as reason.
+    3. SOS-09-C C HAL       → tools/sos-codegen/c_hal_emit.py
+                              emits sos_<chart>__telemetry.h with
+                              SOS_C_telemetry_status_* accessors (clear-on-read
+                              field drives _consume_* naming per gate (f)).
+    4. SOS-09-D Rust HAL    → tools/sos-codegen/transliterate_rust.py
+                              emits src/lib.rs with a ClearOnRead<u32> newtype
+                              for the channel (gate (d) family completeness)
+                              and the SOS_MPU_TELEMETRY_STATUS_REGION const.
+    5. SOS-09-E HDL regfile → tools/sos-codegen/transliterate_regfile.py
+                              emits sos_regfile_<peripheral>.{vhd,sv} with
+                              the channel as an output register + strobe-latch
+                              aggregated into the "telemetry" privilege region.
+    6. SOS-09-F membrane    → tools/sos-codegen/vectors_emit.py
+       vectors                emits per-family test_*.py files; the channel's
+                              UUID appears in the MV-<UUID>-<family>-<seq>
+                              trace-key chain.
+
+  Cross-validation property (the gate-(c) deliverable):
+
+    The single sos:id UUID `11111111-1111-4111-8111-111111111111` and the
+    single sos:name `telemetry_status` MUST appear as a recognizable trace
+    in every emitted artifact. The companion test
+    `test_sos_09_six_emitter_end_to_end.py` asserts this end-to-end.
+
+  Per SOS-09 umbrella §16 (2026-05-27 acceptance roll-up): "no single chart
+  channel currently threads end-to-end through all six emit paths" was
+  the explicit ⏸ reason for gate (c). This fixture is the unification
+  that flips the gate ✅. (ERRATA-004 cite: sos:dir uses the arrow form
+  `hw→sw` per the SOS-09-A §5.2 alignment.)
+
+  Per SOS-09-A §5.1, allowed parent contexts for channel annotations are
+  <state> and <parallel>; this chart uses <state> for the single channel
+  (the umbrella demonstration does not require a parallel region — one
+  channel is the gate-(c) minimum).
+
+  Per PCDN-SOS-09-001 amended 2026-05-25: sos: keys are JSON-key strings
+  inside other_attributes JSON, not XML namespace declarations. NO
+  xmlns:sos declaration appears in this chart.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="TELEMETRY_STATUS_CH"
+       other_attributes='{"sos:mpu_background": "kernel_default"}'>
+
+  <state id="TELEMETRY_STATUS_CH"
+         other_attributes='{
+           "sos:id": "11111111-1111-4111-8111-111111111111",
+           "sos:name": "telemetry_status",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:zone": "privileged",
+           "sos:atomicity": "atomic",
+           "sos:width": 32,
+           "sos:irq": "telemetry_ready",
+           "sos:channel_group": "telemetry",
+           "sos:privilege_region": "telemetry",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "ready", "start_bit": 0, "width": 1, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0},
+               {"name": "count", "start_bit": 1, "width": 7, "access": "RO", "side_effect": null, "reset_value": 0},
+               {"name": "reserved_hi", "start_bit": 8, "width": 24, "access": "reserved", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="reset" target="TELEMETRY_STATUS_CH"/>
+  </state>
+
+</scxml>
