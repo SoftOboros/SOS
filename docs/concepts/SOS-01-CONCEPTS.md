@@ -1103,3 +1103,7 @@ Wave-3 SOS-12 implementation fan-out, slice L (dispatch + legibility lint). This
 [sos-11]: ./SOS-11-CONCEPTS.md
 
 No frozen-enum value modified at SOS-01 in the value space (the four pre-existing frozen enums stay unchanged); the `LintRuleId` namespace (§5.5) grows by two with `SCXML-LINT-DISP-1`, `SCXML-LINT-DISP-2`. No PCDN re-ratified. SOS-01 stays 🟢 ratified.
+
+### 2026-05-27 — SCXML-LINT-DISP-2 kwarg amendment (PCDN-SOS-12-008)
+
+Wave-5 SOS-12 ratification, slice B. The SCXML-LINT-DISP-2 implementation pin in the 2026-05-27 SCXML-LINT-DISP-{1,2} amendment above now accepts a third keyword-only argument, `count_parallel_regions: bool = True`, per the user ratification of [PCDN-SOS-12-008 recorded in SOS-12 §15 (2026-05-27 SOS12B-PCDN-008)](./SOS-12-CONCEPTS.md). The default is `True` (strict mode — Wave-3L semantics: a `<parallel>` with N region children breaches at the parallel's own level when N > threshold); `count_parallel_regions=False` opts the level out of the threshold check at the parallel's own level only (region descent and threshold checks at other levels are unchanged). The kwarg's existence and default are Specification-Required per SOS-12 §15 SOS12B-PCDN-008; adding a third counting mode would require Standards Action. The semantics ownership stays at SOS-12; this amendment updates the SOS-01 catalog's implementation-pin signature in `tools/sos-codegen/sos12_lint.py` only — no rule id added or removed, no severity change. SOS-01 stays 🟢 ratified.

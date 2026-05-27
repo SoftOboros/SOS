@@ -685,3 +685,46 @@ Each per-method sub-chart declares a root-level `<sos:contract>` per PCDN-SOS-12
 - [`tools/sos-codegen/sos12_lint.py`](../../tools/sos-codegen/sos12_lint.py) (Wave-3L SOS12L1) — depth + legibility lint.
 
 Status: 🟢 **ratified**. The §8.4 worked example has graduated from narrative-only to verified-on-disk fixture; SOS-12 stays 🟢 ratified.
+
+### 2026-05-27 — SOS12B-PCDN-008: parallel-region peer-counting configurable
+
+Wave-5 SOS-12 ratification, slice B. Multi-PCDN session on 2026-05-27 surfaced an ambiguity in the SCXML-LINT-DISP-2 spec text first noted by the Wave-3L SOS12L1 §15 entry above ("Spec-text resolution on `<parallel>` peer-counting (informative)" paragraph): §9.1 does not nail down whether a `<parallel>` element's region children should count as peer states at the parallel's own level. The Wave-3L implementation chose the conservative interpretation (count them — strict mode), and that choice has now been **ratified as the default** alongside an opt-out for chart families whose regions are intuitively concurrent slices rather than alternatives.
+
+**User ratification (2026-05-27).** Option (c) — configurable per project via rule keyword. The user's reasoning: the strict default catches the visual-clutter failure mode the original PCDN-SOS-12-003 walkthrough was aimed at, AND a non-trivial class of chart families (those whose `<parallel>` regions encode concurrent slices rather than alternative branches) reads the count differently and SHOULD have a clean opt-out. A single global mode would either silently regress one of the two reading communities or force them to mutate the threshold to a contrived value.
+
+**Kwarg surface.** [`tools/sos-codegen/sos12_lint.py`](../../tools/sos-codegen/sos12_lint.py) `check_legibility` now accepts:
+
+```
+check_legibility(chart_path, *,
+    legibility_threshold: int = DEFAULT_LEGIBILITY_THRESHOLD,
+    count_parallel_regions: bool = True,
+    loader: Callable[[Path], dict] | None = None,
+) -> list[LintDiagnostic]
+```
+
+- **`count_parallel_regions=True`** (default, strict). The Wave-3L semantics. A `<parallel>` with N region children breaches the threshold at the parallel's OWN level when N > `legibility_threshold` (each region is a peer state of every other region). Behaviour-preserving — no existing caller observes a regression.
+- **`count_parallel_regions=False`** (liberal). The `<parallel>`'s region children do NOT count as peers at the parallel's own level; the threshold check is skipped for the parallel itself. The `<parallel>` ITSELF still counts as one peer at its parent's level (this is unchanged — a parent with 16 `<parallel>` children still breaches). Each region's own children are counted at the next level down regardless of mode — the opt-out applies AT the parallel's level, not below it.
+
+**Disambiguation: what "peer" means under `count_parallel_regions=False`.** "Peer states at a level" still means the union of immediate `<state>` + `<parallel>` children of the level's owner node, but the threshold-breach predicate is gated: when the level's owner is a `<parallel>` and the kwarg is `False`, the predicate evaluation is skipped at that level only. The recursive descent into each region (each region IS itself a `<state>`) still happens, and within a region the strict-mode rules apply unmodified. The opt-out narrows what triggers a diagnostic; it does NOT redefine "peer state" anywhere in the chart tree.
+
+**Frozen-enumeration policy.** **Specification Required** for the keyword's existence and default per the SOS-12 §10 registration-policy convention (this matches the policy already in force for the `legibility_threshold` integer kwarg). Changing the default flip would silently re-classify every existing caller and is prohibited without a §15 amendment. **Standards Action** for adding a third counting mode (e.g. a hypothetical `"weighted"` mode that counts regions at a discount factor, or a `"region_count_at_parent_level"` mode that hoists region peers up one level) — a third mode encodes an additional invariant interpretation across phases and the §15 ratification cycle is the right place to debate it.
+
+**Tests added.** [`tools/sos-codegen/tests/test_sos12_lint.py`](../../tools/sos-codegen/tests/test_sos12_lint.py) ships four new tests covering the kwarg surface:
+
+- `test_disp2_count_parallel_regions_default_is_strict` — asserts the keyword exists, is keyword-only, and defaults to `True` (the Specification-Required default).
+- `test_disp2_liberal_mode_admits_parallel_with_16_regions` — a `<parallel>` with 16 region children passes under `count_parallel_regions=False`.
+- `test_disp2_strict_mode_rejects_parallel_with_16_regions` — the same shape fails under the strict default (both implicit and explicit `count_parallel_regions=True`).
+- `test_disp2_liberal_mode_still_rejects_alternatives_inside_region` — a region carrying 16 `<state>` alternatives still breaches at the region's level under liberal mode (the opt-out applies AT the parallel, not below it).
+
+Test count climbs from 21 → 25 in `test_sos12_lint.py`; the regression sweep across `tools/sos-codegen/tests/test_sos12_*.py` + `tools/sos-codegen/tests/test_sos11_*.py` remains clean at 263 tests.
+
+**Reciprocating SOS-01 amendment.** [SOS-01 §15 (2026-05-27 SCXML-LINT-DISP-2 kwarg amendment)](./SOS-01-CONCEPTS.md) records the new kwarg surface in the SOS-01 lint catalog. SOS-12 stays the semantics owner; SOS-01 records the implementation-pin update.
+
+**Cross-references.**
+
+- [SOS-12 §15 (2026-05-27 SOS12L1)](#2026-05-27--sos12l1-legibility--depth-cap-lint-landed-ira) — the originating Wave-3L lint landing whose "Spec-text resolution on `<parallel>` peer-counting" paragraph surfaced the ambiguity this amendment resolves.
+- [SOS-12 §9 — SOS-11 integration — legibility-as-discipline](#9-sos-11-integration--legibility-as-discipline) + [§9.1](#91-threshold-default--enforcement) + [§10.2](#102-legibility-threshold) — the threshold's normative authority chain (default unchanged).
+- [SOS-01 §15 (2026-05-27 SCXML-LINT-DISP-2 kwarg amendment)](./SOS-01-CONCEPTS.md) — the reciprocating SOS-01 catalog update.
+- [`tools/sos-codegen/sos12_lint.py`](../../tools/sos-codegen/sos12_lint.py) `check_legibility` — the implementation pin.
+
+Status: 🟢 **ratified**. The kwarg surface lands behaviour-preserving (default `True`); chart families that want the liberal interpretation opt in per call. SOS-12 stays 🟢 ratified.

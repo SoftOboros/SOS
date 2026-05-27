@@ -400,6 +400,116 @@ def test_disp2_missing_chart_path_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# SCXML-LINT-DISP-2 — count_parallel_regions kwarg (PCDN-SOS-12-008,
+# SOS-12 §15 2026-05-27 SOS12B-PCDN-008)
+# ---------------------------------------------------------------------------
+
+
+def test_disp2_count_parallel_regions_default_is_strict():
+    """The kwarg's default MUST be `True` (strict mode, Wave-3L semantics).
+
+    Frozen-enumeration policy: Specification Required for the keyword's
+    existence and default per SOS-12 §15 2026-05-27 SOS12B-PCDN-008.
+    Changing the default would silently flip every existing caller into
+    a more-permissive mode and is prohibited without a §15 amendment.
+    """
+    import inspect
+
+    sig = inspect.signature(check_legibility)
+    assert "count_parallel_regions" in sig.parameters
+    param = sig.parameters["count_parallel_regions"]
+    assert param.default is True
+    # Keyword-only — mirrors the rest of the kwargs surface.
+    assert param.kind == inspect.Parameter.KEYWORD_ONLY
+
+
+def test_disp2_liberal_mode_admits_parallel_with_16_regions(tmp_path):
+    """A `<parallel>` with 16 region children PASSES under
+    `count_parallel_regions=False` (liberal mode) even though the strict
+    default would reject it.
+
+    Per PCDN-SOS-12-008 ratification: under liberal mode the
+    `<parallel>`'s region children do NOT count as peers at the
+    parallel's own level. The `<parallel>` ITSELF still counts as one
+    peer at its parent's level (here the wrapping state — well below
+    threshold).
+    """
+    anchor = _make_anchor_file(tmp_path)
+
+    def fake_loader(path: Path) -> dict:
+        par = _parallel("p", regions=_peer_states(16, prefix="r"))
+        return _chart([_state("wrapper", parallels=[par])])
+
+    diags = check_legibility(
+        anchor, count_parallel_regions=False, loader=fake_loader
+    )
+    assert diags == []
+
+
+def test_disp2_strict_mode_rejects_parallel_with_16_regions(tmp_path):
+    """The same 16-region parallel still FAILS under the strict default.
+
+    Companion to the liberal-mode case — pins that the two modes
+    actually disagree on the contentious shape (a `<parallel>` with
+    many regions). Without this pin the liberal-mode test could pass
+    trivially if the strict mode were also silently passing.
+    """
+    anchor = _make_anchor_file(tmp_path)
+
+    def fake_loader(path: Path) -> dict:
+        par = _parallel("p", regions=_peer_states(16, prefix="r"))
+        return _chart([_state("wrapper", parallels=[par])])
+
+    # Default (strict) — should fail.
+    diags_default = check_legibility(anchor, loader=fake_loader)
+    assert len(diags_default) == 1
+    assert diags_default[0].rule_id == "SCXML-LINT-DISP-2"
+    assert "p" in diags_default[0].location
+
+    # Explicit strict — same result (pins the kwarg=True path).
+    diags_strict = check_legibility(
+        anchor, count_parallel_regions=True, loader=fake_loader
+    )
+    assert len(diags_strict) == 1
+    assert diags_strict[0].location == diags_default[0].location
+
+
+def test_disp2_liberal_mode_still_rejects_alternatives_inside_region(tmp_path):
+    """Liberal mode disables the threshold check AT the parallel's own
+    level only — alternatives INSIDE a region still count normally.
+
+    Concretely: a `<parallel>` whose single region carries 16 `<state>`
+    children breaches the threshold at that region's level (16 peer
+    `<state>` alternatives) regardless of `count_parallel_regions`. The
+    liberal-mode opt-out applies to the parallel-level count, not to
+    the recursive descent.
+    """
+    anchor = _make_anchor_file(tmp_path)
+
+    def fake_loader(path: Path) -> dict:
+        # The region itself is a `<state>` (per scjson shape) carrying
+        # 16 child `<state>`s — those 16 are alternatives, not regions.
+        region = _state("region", children=_peer_states(16, prefix="alt"))
+        par = _parallel("p", regions=[region])
+        return _chart([_state("wrapper", parallels=[par])])
+
+    diags = check_legibility(
+        anchor, count_parallel_regions=False, loader=fake_loader
+    )
+    assert len(diags) == 1
+    d = diags[0]
+    assert d.rule_id == "SCXML-LINT-DISP-2"
+    # The breach is at `region`, NOT at `p` — the parallel-level count
+    # is skipped under liberal mode but the in-region alternatives still
+    # exceed the threshold.
+    assert "region" in d.location
+    # And `p` should appear in the ancestor path because it's part of
+    # the prefix walk; the breach owner is `region`.
+    assert d.location.endswith("region")
+    assert "extract_region_to_subchart" in d.message
+
+
+# ---------------------------------------------------------------------------
 # Fixture-driven integration tests (require scjson on PATH)
 # ---------------------------------------------------------------------------
 

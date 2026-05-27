@@ -62,6 +62,7 @@ Public surface
 
     check_legibility(chart_path: str | Path, *,
         legibility_threshold: int = DEFAULT_LEGIBILITY_THRESHOLD,
+        count_parallel_regions: bool = True,
         loader: Callable[[Path], dict] | None = None,
     ) -> list[LintDiagnostic]
 
@@ -249,28 +250,34 @@ def check_dispatch_depth(
 # ---------------------------------------------------------------------------
 
 
-def _peer_children(node: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the immediate peer-state children of an scjson node.
+def _peer_children(node: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
+    """Return the immediate peer-state children of an scjson node, tagged.
 
     "Peer states" at a level means the union of `<state>` and `<parallel>`
     elements that share an immediate parent. The scjson shape carries
     these in two parallel lists; we concatenate so a node with three
-    `<state>` and one `<parallel>` child reports four peers.
+    `<state>` and one `<parallel>` child reports four peers. Each entry
+    is returned as a `(child_dict, kind)` tuple where `kind` is `"state"`
+    or `"parallel"` — the kind tag is load-bearing for the recursive
+    walker which needs to honour the `count_parallel_regions` kwarg
+    (PCDN-SOS-12-008 / SOS-12 §15 2026-05-27 SOS12B-PCDN-008 amendment).
 
     Note on `<parallel>` regions: a `<parallel>` element's own children
     (the regions) are themselves peer states **at the next level down**,
     not at the parallel's parent's level. This function returns only the
     immediate children of the given node, so the recursive caller in
     `check_legibility` walks each `<parallel>` separately and counts its
-    region children against the threshold at the parallel's own level.
+    region children against the threshold at the parallel's own level
+    when `count_parallel_regions=True` (default, strict mode preserving
+    Wave-3L semantics).
     """
-    children: list[dict[str, Any]] = []
+    children: list[tuple[dict[str, Any], str]] = []
     for kind in ("state", "parallel"):
         sub = node.get(kind) or []
         if isinstance(sub, list):
             for child in sub:
                 if isinstance(child, dict):
-                    children.append(child)
+                    children.append((child, kind))
     return children
 
 
@@ -292,6 +299,7 @@ def check_legibility(
     chart_path: str | Path,
     *,
     legibility_threshold: int = DEFAULT_LEGIBILITY_THRESHOLD,
+    count_parallel_regions: bool = True,
     loader: Optional[Callable[[Path], dict]] = None,
 ) -> list[LintDiagnostic]:
     """Run SCXML-LINT-DISP-2 against a chart's peer-state inventory.
@@ -301,6 +309,29 @@ def check_legibility(
     SOS-12 §9.1 / PCDN-SOS-12-003 ratified value (15 peer states);
     projects MAY override via the keyword argument (mirroring
     per-chart-family overrides per §9.1 / §10.2).
+
+    The ``count_parallel_regions`` kwarg (default ``True``, strict mode)
+    selects how a ``<parallel>`` element's region children participate
+    in peer-counting at the parallel's own level. This kwarg was added
+    per [PCDN-SOS-12-008 ratification (2026-05-27 SOS12B-PCDN-008)](
+    ../../docs/concepts/SOS-12-CONCEPTS.md) — see SOS-12 §15 for the
+    user-ratified rationale.
+
+    - ``count_parallel_regions=True`` (default, strict): a ``<parallel>``
+      with N region children breaches the threshold at the parallel's
+      own level when N > threshold (each region is a peer state of every
+      other region). This preserves the Wave-3L semantics (the SOS12L1
+      §15 entry codifies this as the conservative default).
+    - ``count_parallel_regions=False`` (liberal): the region children of
+      a ``<parallel>`` do NOT count as peers at the parallel's own
+      level; the threshold check is skipped for the parallel itself.
+      The ``<parallel>`` element ITSELF still counts as one peer at its
+      parent's level (this is unchanged), and each region's own children
+      are counted at the next level down regardless of the mode. Use
+      case: chart families whose regions execute concurrently rather
+      than as alternatives, and where the legibility intuition is
+      "this many concurrent slices is fine — just don't put too many
+      alternatives inside any one slice".
 
     Each diagnostic's ``message`` MUST recommend
     ``extract_region_to_subchart`` (the SOS-11 §5.1 MCP tool) — this is
@@ -319,13 +350,14 @@ def check_legibility(
         ValueError if ``legibility_threshold`` < 1.
 
     Counting semantics:
-        Peer states at a level = immediate `<state>` + `<parallel>`
-        children of the level's owner node. The chart root (`<scxml>`)
-        owns the top-level peers; each `<state>` / `<parallel>` owns its
-        own peers in turn. A `<parallel>` with N region children
-        contributes N peers to its **own** level (each region is a peer
-        state of the parallel's other regions). Each region's children
-        are counted at the next level down via recursion.
+        Peer states at a level = immediate ``<state>`` + ``<parallel>``
+        children of the level's owner node. The chart root (``<scxml>``)
+        owns the top-level peers; each ``<state>`` / ``<parallel>`` owns
+        its own peers in turn. A ``<parallel>`` with N region children
+        contributes N peers to its **own** level under the strict
+        default; under ``count_parallel_regions=False`` the parallel's
+        own level is skipped for the threshold check (its region
+        children's peer counts apply at the next level down only).
     """
     if legibility_threshold < 1:
         raise ValueError(
@@ -343,7 +375,16 @@ def check_legibility(
     def _walk(node: dict[str, Any], prefix: str, node_id: Optional[str], kind: str) -> None:
         peers = _peer_children(node)
         peer_count = len(peers)
-        if peer_count > legibility_threshold:
+        # Liberal mode: when the current node is a `<parallel>` and the
+        # caller has opted out of parallel-region peer-counting, skip the
+        # threshold check at this level. Recursion into the region
+        # children still happens — each region's OWN children are still
+        # counted at the next level down (the liberal mode disables the
+        # count AT the parallel's level, not below it).
+        skip_threshold_at_this_level = (
+            kind == "parallel" and not count_parallel_regions
+        )
+        if peer_count > legibility_threshold and not skip_threshold_at_this_level:
             location = _location_path(prefix, node_id, kind)
             diagnostics.append(
                 LintDiagnostic(
@@ -363,16 +404,14 @@ def check_legibility(
                 )
             )
         next_prefix = _location_path(prefix, node_id, kind) if node_id else prefix
-        for child in peers:
+        for child, child_kind in peers:
             child_id = child.get("id")
-            # Decide whether the child is a parallel by checking which
-            # list it came from. Re-derive cheaply: a node with regions
-            # of its own (parallel) carries `state` children that are
-            # the regions; we treat both kinds uniformly for recursion.
-            child_kind = "parallel" if child.get("parallel") or child.get("state") else "state"
-            # Distinguish kind for diagnostic location naming only when
-            # the node is the chart root or anonymous; otherwise the id
-            # is sufficient.
+            # `child_kind` comes from the scjson list the child was drawn
+            # from (`"state"` or `"parallel"`), so the liberal-mode
+            # detection in the recursive call is structural rather than
+            # heuristic. This is load-bearing for PCDN-SOS-12-008 —
+            # mis-tagging a `<parallel>` as a `<state>` would silently
+            # opt the wrong level out of the threshold check.
             _walk(child, next_prefix, str(child_id) if child_id else None, child_kind)
 
     _walk(ast, prefix="", node_id=None, kind="scxml")
