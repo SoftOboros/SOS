@@ -144,16 +144,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     # SOS-13 verified-strip profile flags. Per SOS-13-CONCEPTS.md §15
     # 2026-05-23 ratification entry:
     #   - PCDN-SOS-13-001 — BOTH profile + per-region opt-in.
-    #   - PCDN-SOS-13-003 — `dev-keep` is the default (so --verified-strip
-    #     defaults to False).
+    #   - PCDN-SOS-13-003 — `dev-keep` is the default.
     #   - PCDN-SOS-13-002 — audit log is JSONL.
+    p.add_argument(
+        "--profile",
+        choices=("dev-keep", "verified-strip"),
+        default="dev-keep",
+        help=(
+            "SOS-13 Rust codegen profile. `dev-keep` is the default; "
+            "`verified-strip` enables chart-discharged unchecked Rust "
+            "emission and audit logging."
+        ),
+    )
     p.add_argument(
         "--verified-strip",
         action="store_true",
         default=False,
+        dest="legacy_verified_strip",
         help=(
-            "Enable SOS-13 verified-strip profile across all regions. "
-            "Default is dev-keep (PCDN-SOS-13-003)."
+            "Deprecated compatibility alias for `--profile verified-strip`."
         ),
     )
     p.add_argument(
@@ -250,6 +259,12 @@ def validate_args(args: argparse.Namespace) -> None:
                 sys.exit(3)
     if not args.chart.exists():
         sys.stderr.write(f"sos-codegen: chart not found: {args.chart}\n")
+        sys.exit(3)
+    if args.profile == "verified-strip" and args.target != "rust":
+        sys.stderr.write(
+            "sos-codegen: --profile verified-strip is Rust-only at v1; "
+            f"--target={args.target} is not supported.\n"
+        )
         sys.exit(3)
     # SOS-08-C: validate guard-depth budget is sane.
     budget = getattr(args, "guard_depth_budget", DEFAULT_GUARD_DEPTH_BUDGET)
@@ -699,7 +714,10 @@ def main(argv: list[str]) -> int:
     # so the per-site decorator can consult them. Off the Rust path,
     # this loader is a no-op observer — its return value is only
     # consulted when `target == "rust"`.
-    verified_strip_enabled = bool(getattr(args, "verified_strip", False))
+    verified_strip_enabled = (
+        getattr(args, "profile", "dev-keep") == "verified-strip"
+        or bool(getattr(args, "legacy_verified_strip", False))
+    )
     verified_regions = frozenset(getattr(args, "verified_region", []) or [])
     discharges_by_state: dict = {}
     if verified_strip_enabled or verified_regions:

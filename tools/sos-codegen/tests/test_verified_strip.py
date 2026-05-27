@@ -43,6 +43,7 @@ from verified_audit import (  # noqa: E402
     read_audit_log,
     write_audit_log,
 )
+import main as codegen_main  # noqa: E402
 
 pytestmark = pytest.mark.verified_strip
 
@@ -330,3 +331,52 @@ def test_apply_verified_strip_active_replaces_indexed_access():
     assert "// SAFETY:" in out
     assert len(audit) == 1
     assert audit[0]["operation"] == "bounds_check_strip"
+
+
+# ---------------------------------------------------------------
+# CLI profile surface — SOS-13 §12(a), §12(h).
+# ---------------------------------------------------------------
+
+
+def test_cli_profile_defaults_to_dev_keep():
+    """`--profile` defaults to `dev-keep` per SOS-13 §5.2 / §12(a)."""
+    args = codegen_main.parse_args([
+        "--target", "rust",
+        "--dry-run",
+        "--chart", str(FIXTURE_CHART),
+    ])
+    assert args.profile == "dev-keep"
+
+
+def test_cli_profile_verified_strip_is_rust_only(capsys):
+    """`--target c --profile verified-strip` is rejected at v1 per
+    SOS-13 §5.4 / §12(h)."""
+    args = codegen_main.parse_args([
+        "--target", "c",
+        "--dry-run",
+        "--chart", str(FIXTURE_CHART),
+        "--profile", "verified-strip",
+    ])
+    with pytest.raises(SystemExit) as excinfo:
+        codegen_main.validate_args(args)
+    assert excinfo.value.code == 3
+    assert "Rust-only" in capsys.readouterr().err
+
+
+def test_cli_profile_verified_strip_emits_audit(tmp_path: Path):
+    """Driving `main()` with the ratified `--profile verified-strip`
+    path writes a JSONL audit file when a discharged site strips a
+    bounds check."""
+    audit_path = tmp_path / "verified-strip-audit.jsonl"
+    rc = codegen_main.main([
+        "--target", "rust",
+        "--dry-run",
+        "--chart", str(FIXTURE_CHART),
+        "--profile", "verified-strip",
+        "--verified-audit", str(audit_path),
+    ])
+    assert rc == 0
+    records = read_audit_log(audit_path)
+    assert len(records) == 1
+    assert records[0]["operation"] == "bounds_check_strip"
+    assert records[0]["chart_state"] == "boot_bounded"

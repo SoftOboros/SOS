@@ -25,6 +25,14 @@ Or emit both in one invocation:
 python tools/sos-codegen/main.py --target both --out-rust ports/m7-rust/sos-m7-rust/src/scripts.rs --out-c ports/m7-c/sos-m7-c/src/scripts.c
 ```
 
+SOS-13 adds the Rust-only verified-strip profile:
+
+```bash
+python tools/sos-codegen/main.py --target rust --profile verified-strip --out ports/m7-rust/sos-m7-rust/src/scripts.rs --verified-audit verified-strip-audit.jsonl
+```
+
+When `--profile` is omitted, the tool defaults to `dev-keep`.
+
 ## Pipeline
 
 ```
