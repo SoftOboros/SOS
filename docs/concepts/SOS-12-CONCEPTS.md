@@ -645,3 +645,43 @@ Regression sweep across all `tools/sos-codegen/tests/test_sos12_*.py` (114 tests
 - [`tools/sos-codegen/sos12_annotations.py`](../../tools/sos-codegen/sos12_annotations.py) — the dispatch-tree walker SCXML-LINT-DISP-1 consumes.
 
 Status: 🟢 **ratified**. The two frozen SOS-12 thresholds now have callable lint surfaces; the SOS-11 `extract_region_to_subchart` MCP tool is named in every SCXML-LINT-DISP-2 diagnostic per §9.2; no further implementation work is owed for the two ratified thresholds at v1. SOS-12 stays 🟢 ratified.
+
+### 2026-05-27 — SOS12U7: §8.4 HTTP worked-example chart landed (Ira)
+
+The §8.4 HTTP-family worked example is now an on-disk SCXML chart family at [`tools/sos-codegen/tests/fixtures/sos_12/http/`](../../tools/sos-codegen/tests/fixtures/sos_12/http/). The fixture set materialises what Wave-1B's [`test_sos12_section_8_4_http_worked_example_bounds`](../../tools/sos-codegen/tests/test_sos12_bound.py) pinned synthetically: the 5-chart family (1 top + 4 per-method) whose `composed_bound` is exactly **47** under §6.3 sum-not-product composition.
+
+**Fixture family.** Five SCXML files materialise the §8.1–§8.5 narrative:
+
+- [`http_top.scxml`](../../tools/sos-codegen/tests/fixtures/sos_12/http/http_top.scxml) — 8 reachable states per §8.1 (`idle`, `awaiting_request_line`, `dispatching_get`, `dispatching_post`, `dispatching_put`, `dispatching_delete`, `dispatching_unknown_method`, `responding`). Four states carry `<sos:dispatch>` elements pointing at the per-method sub-charts; `dispatching_unknown_method` is a no-op pass-through per §8.1.
+- [`http_get.scxml`](../../tools/sos-codegen/tests/fixtures/sos_12/http/http_get.scxml) — 5 reachable states matching `bound(http_get) = 5` per §8.4.
+- [`http_post.scxml`](../../tools/sos-codegen/tests/fixtures/sos_12/http/http_post.scxml) — 15 reachable states matching `bound(http_post) = 15` per §8.4. Sits **exactly at** the §9.1 / PCDN-SOS-12-003 default legibility threshold per the §8.5 narrative ("a 16th peer state will fail lint until the author factors via `extract_region_to_subchart`"). The 15-state count is the load-bearing case for SCXML-LINT-DISP-2's `peer_count > threshold` breach predicate (`>`, not `≥`) — the fixture proves the boundary case admits cleanly.
+- [`http_put.scxml`](../../tools/sos-codegen/tests/fixtures/sos_12/http/http_put.scxml) — 12 reachable states matching `bound(http_put) = 12` per §8.4.
+- [`http_delete.scxml`](../../tools/sos-codegen/tests/fixtures/sos_12/http/http_delete.scxml) — 7 reachable states matching `bound(http_delete) = 7` per §8.4.
+
+Each per-method sub-chart declares a root-level `<sos:contract>` per PCDN-SOS-12-004 with `reads` / `writes` attributes per PCDN-SOS-12-002 and the three sub-elements (events-in / events-out / invariants) per §5.1. Per §8.3 the per-handler decomposition is **deferred** at v1 — the 47-vector pin specifically covers the 5-chart top + per-method shape.
+
+**Integration test.** [`tools/sos-codegen/tests/test_sos12_http_worked_example.py`](../../tools/sos-codegen/tests/test_sos12_http_worked_example.py) threads the chart family end-to-end through every ratified SOS-12 module:
+
+1. **Annotations parsing** ([`sos12_annotations.parse_dispatch_annotations`](../../tools/sos-codegen/sos12_annotations.py)) — verifies the 4-dispatch top-level + 4 depth-1 sub-inventories each carrying a parsed contract.
+2. **Bound composition** ([`sos12_bound.compose_bound`](../../tools/sos-codegen/sos12_bound.py)) — verifies `composed_bound == 47` and 4 single-member None-axis independence axes, matching the Wave-1B pin exactly.
+3. **Boundary-vector emission** ([`sos12_boundary_vectors.emit_dispatch_tree_boundary_vectors`](../../tools/sos-codegen/sos12_boundary_vectors.py)) — verifies the per-§7.2 sum-across-edges yields 31 boundary vectors (GET 6 + POST 9 + PUT 9 + DELETE 7 — each per-edge count being the constant `|events_in| + |events_out| + |invariants_maintained| + |invariants_assumed|`) and that every vector carries an INV-SOS-H `chart_path` metadata pointing at the originating dispatch edge.
+4. **Contract matching** ([`sos12_contract_match.verify_inventory`](../../tools/sos-codegen/sos12_contract_match.py)) — verifies all 4 parent → child contract pairs pass `verify_contract_match` under a custom per-dispatch `edge_provider` (the default `simple_edge_provider` is inadequate for a multi-dispatch parent per its own docstring; the custom provider derives parent-side expectations from each child's contract as the minimal-conforming shape).
+5. **Lint** ([`sos12_lint.check_dispatch_depth`](../../tools/sos-codegen/sos12_lint.py) + `check_legibility`) — both at default thresholds pass: depth-1 ≤ 8 cap; every chart ≤ 15 peers (http_post at exactly 15 admits per the `>` breach predicate).
+
+**Adapter shape.** `DispatchInventory` (Wave-1A) and `BoundInputs` (Wave-1B) are different data shapes; this test ships an inline private helper `_inventory_to_bound_inputs` (≈30 LOC) that walks the inventory and counts top-level `<state>` peer children per chart. The HTTP fixtures are intentionally flat (no nested `<state>`) so peer-count equals reachable-state count; a future Wave-5 may lift this adapter into a shared integration module if a second consumer materialises. A similar inline `_inventory_to_boundary_edges` adapts the inventory to `sos12_boundary_vectors.DispatchEdge` records, and a `_per_dispatch_edge_provider` plays the same role for contract-match — keeping the multi-dispatch case correct without coupling it to the v1 `simple_edge_provider`.
+
+**Spec ambiguity surfaced.** §8.1 narrates 8 top-level states but does not name which states own dispatches. The fixture interpretation (4 of the 5 `dispatching_<METHOD>` states own dispatches; `dispatching_unknown_method` is a no-op pass-through) matches Wave-1B's pin of 4 single-member independence axes; no §15 amendment is needed.
+
+**Test count.** 8 new tests in `test_sos12_http_worked_example.py` all passing; regression sweep across `tools/sos-codegen/tests/test_sos12_*.py` clean at **122 tests** (114 from prior landings + 8 new). The §8.4 worked example is now a verified-end-to-end fixture, not an informative narrative pin.
+
+**Cross-references.**
+
+- [§8.1](#81-top-level-dispatch-chart-http_topscxml) / [§8.2](#82-per-method-sub-charts) / [§8.4](#84-bound-composition-for-the-family) / [§8.5](#85-legibility-as-discipline-check) — the informative HTTP narrative the fixture materialises.
+- [`tools/sos-codegen/tests/test_sos12_bound.py::test_sos12_section_8_4_http_worked_example_bounds`](../../tools/sos-codegen/tests/test_sos12_bound.py) — Wave-1B's synthetic 47-vector pin; this fixture is the on-disk SCXML companion.
+- [`tools/sos-codegen/sos12_annotations.py`](../../tools/sos-codegen/sos12_annotations.py) (Wave-1A SOS12A1) — annotation parser.
+- [`tools/sos-codegen/sos12_bound.py`](../../tools/sos-codegen/sos12_bound.py) (Wave-1B SOS12B1) — bound-composition algebra.
+- [`tools/sos-codegen/sos12_boundary_vectors.py`](../../tools/sos-codegen/sos12_boundary_vectors.py) (Wave-1C SOS12C1) — boundary-vector emitter.
+- [`tools/sos-codegen/sos12_contract_match.py`](../../tools/sos-codegen/sos12_contract_match.py) (Wave-2 SOS12I1) — contract-matching verifier.
+- [`tools/sos-codegen/sos12_lint.py`](../../tools/sos-codegen/sos12_lint.py) (Wave-3L SOS12L1) — depth + legibility lint.
+
+Status: 🟢 **ratified**. The §8.4 worked example has graduated from narrative-only to verified-on-disk fixture; SOS-12 stays 🟢 ratified.

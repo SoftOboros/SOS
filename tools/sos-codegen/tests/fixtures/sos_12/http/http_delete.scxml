@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 §8.4 worked example: DELETE method sub-chart.
+
+  Authority: docs/concepts/SOS-12-CONCEPTS.md §8.2 + §8.4 (bound pin:
+  bound(http_delete) = 7). DELETE is the simplest method: no body
+  parsing, idempotent target removal (RFC 7231 §4.3.5); 7 states
+  reflects the lean decomposition (header parse + auth + remove).
+
+  States (7):
+    1. parse_request_headers
+    2. validate_target_uri
+    3. authenticate
+    4. authorize
+    5. remove_resource
+    6. finalize_response
+    7. error
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="parse_request_headers">
+  <sos:contract reads="parsed_method parsed_uri request_id"
+                writes="response_status method.complete">
+    <sos:events-in>
+      <sos:event>tcp.bytes_received</sos:event>
+      <sos:event>auth.granted</sos:event>
+    </sos:events-in>
+    <sos:events-out>
+      <sos:event>method.complete</sos:event>
+      <sos:event>method.error</sos:event>
+    </sos:events-out>
+    <sos:invariants>
+      <sos:maintained-by-subchart>INV-HTTP-3-idempotency</sos:maintained-by-subchart>
+      <sos:maintained-by-subchart>INV-HTTP-4-auth-checked</sos:maintained-by-subchart>
+      <sos:assumed-of-environment>INV-HTTP-1-request-line-parsed</sos:assumed-of-environment>
+    </sos:invariants>
+  </sos:contract>
+
+  <state id="parse_request_headers">
+    <transition event="tcp.bytes_received" target="validate_target_uri"/>
+  </state>
+  <state id="validate_target_uri">
+    <transition target="authenticate"/>
+    <transition cond="parsed_uri == ''" target="error"/>
+  </state>
+  <state id="authenticate">
+    <transition event="auth.granted" target="authorize"/>
+  </state>
+  <state id="authorize">
+    <transition target="remove_resource"/>
+  </state>
+  <state id="remove_resource">
+    <transition target="finalize_response"/>
+  </state>
+  <state id="finalize_response">
+    <onentry>
+      <raise event="method.complete"/>
+    </onentry>
+  </state>
+  <state id="error">
+    <onentry>
+      <raise event="method.error"/>
+    </onentry>
+  </state>
+</scxml>

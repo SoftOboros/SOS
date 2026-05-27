@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 §8.4 worked example: GET method sub-chart.
+
+  Authority: docs/concepts/SOS-12-CONCEPTS.md §8.2 (per-method sub-chart
+  shape) + §8.4 (bound pin: bound(http_get) = 5).
+
+  States (5):
+    1. parse_headers
+    2. validate_uri
+    3. dispatch_handler
+    4. finalize_response
+    5. error
+
+  No internal dispatches — this is a leaf sub-chart per §8.3
+  (per-handler sub-charts deferred, not enumerated in Wave-1B's
+  47-vector pin).
+
+  Contract declared per PCDN-SOS-12-004 (root-level <sos:contract>) +
+  PCDN-SOS-12-002 (reads/writes attributes). Events-in / events-out /
+  invariants match the §8.2 informative example pattern.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="parse_headers">
+  <sos:contract reads="parsed_method parsed_uri" writes="response_status response_headers method.complete">
+    <sos:events-in>
+      <sos:event>tcp.bytes_received</sos:event>
+      <sos:event>timer.body_timeout</sos:event>
+    </sos:events-in>
+    <sos:events-out>
+      <sos:event>method.complete</sos:event>
+      <sos:event>method.error</sos:event>
+    </sos:events-out>
+    <sos:invariants>
+      <sos:maintained-by-subchart>INV-HTTP-3-idempotency</sos:maintained-by-subchart>
+      <sos:assumed-of-environment>INV-HTTP-1-request-line-parsed</sos:assumed-of-environment>
+    </sos:invariants>
+  </sos:contract>
+
+  <state id="parse_headers">
+    <transition event="tcp.bytes_received" target="validate_uri"/>
+    <transition event="timer.body_timeout" target="error"/>
+  </state>
+  <state id="validate_uri">
+    <transition target="dispatch_handler"/>
+    <transition cond="parsed_uri == ''" target="error"/>
+  </state>
+  <state id="dispatch_handler">
+    <transition target="finalize_response"/>
+  </state>
+  <state id="finalize_response">
+    <onentry>
+      <raise event="method.complete"/>
+    </onentry>
+  </state>
+  <state id="error">
+    <onentry>
+      <raise event="method.error"/>
+    </onentry>
+  </state>
+</scxml>

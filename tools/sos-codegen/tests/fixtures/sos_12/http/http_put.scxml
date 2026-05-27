@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 §8.4 worked example: PUT method sub-chart.
+
+  Authority: docs/concepts/SOS-12-CONCEPTS.md §8.2 + §8.4 (bound pin:
+  bound(http_put) = 12). PUT is structurally similar to POST but
+  without chunked transfer (RFC 7231 §4.3.4 PUT semantics are
+  idempotent resource replacement); 12 states reflects the simpler
+  body-handling decomposition.
+
+  States (12):
+    1. parse_request_headers
+    2. validate_content_length
+    3. validate_target_uri
+    4. authenticate
+    5. authorize
+    6. check_if_match_precondition
+    7. read_body
+    8. validate_body_consistency
+    9. persist_resource
+   10. dispatch_handler
+   11. finalize_response
+   12. error
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="parse_request_headers">
+  <sos:contract reads="parsed_method parsed_uri parsed_headers parsed_body request_id"
+                writes="response_status response_body method.complete">
+    <sos:events-in>
+      <sos:event>tcp.bytes_received</sos:event>
+      <sos:event>timer.body_timeout</sos:event>
+      <sos:event>auth.granted</sos:event>
+    </sos:events-in>
+    <sos:events-out>
+      <sos:event>method.complete</sos:event>
+      <sos:event>method.error</sos:event>
+    </sos:events-out>
+    <sos:invariants>
+      <sos:maintained-by-subchart>INV-HTTP-2-content-length-honored</sos:maintained-by-subchart>
+      <sos:maintained-by-subchart>INV-HTTP-3-idempotency</sos:maintained-by-subchart>
+      <sos:maintained-by-subchart>INV-HTTP-4-auth-checked</sos:maintained-by-subchart>
+      <sos:assumed-of-environment>INV-HTTP-1-request-line-parsed</sos:assumed-of-environment>
+    </sos:invariants>
+  </sos:contract>
+
+  <state id="parse_request_headers">
+    <transition event="tcp.bytes_received" target="validate_content_length"/>
+    <transition event="timer.body_timeout" target="error"/>
+  </state>
+  <state id="validate_content_length">
+    <transition target="validate_target_uri"/>
+    <transition cond="parsed_headers == ''" target="error"/>
+  </state>
+  <state id="validate_target_uri">
+    <transition target="authenticate"/>
+    <transition cond="parsed_uri == ''" target="error"/>
+  </state>
+  <state id="authenticate">
+    <transition event="auth.granted" target="authorize"/>
+    <transition event="timer.body_timeout" target="error"/>
+  </state>
+  <state id="authorize">
+    <transition target="check_if_match_precondition"/>
+  </state>
+  <state id="check_if_match_precondition">
+    <transition target="read_body"/>
+  </state>
+  <state id="read_body">
+    <transition event="tcp.bytes_received" target="validate_body_consistency"/>
+    <transition event="timer.body_timeout" target="error"/>
+  </state>
+  <state id="validate_body_consistency">
+    <transition target="persist_resource"/>
+    <transition cond="parsed_body == ''" target="error"/>
+  </state>
+  <state id="persist_resource">
+    <transition target="dispatch_handler"/>
+  </state>
+  <state id="dispatch_handler">
+    <transition target="finalize_response"/>
+  </state>
+  <state id="finalize_response">
+    <onentry>
+      <raise event="method.complete"/>
+    </onentry>
+  </state>
+  <state id="error">
+    <onentry>
+      <raise event="method.error"/>
+    </onentry>
+  </state>
+</scxml>

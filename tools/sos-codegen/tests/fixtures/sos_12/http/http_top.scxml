@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 §8.4 worked example: top-level HTTP dispatcher chart.
+
+  Authority: docs/concepts/SOS-12-CONCEPTS.md §8.1 (chart shape) + §8.4
+  (bound composition); Wave-1B's
+  test_sos12_bound.test_sos12_section_8_4_http_worked_example_bounds
+  pins this family's composed_bound at 47 (8 + 5 + 15 + 12 + 7) and
+  asserts 4 sequential (None-axis) independence axes.
+
+  Per §8.1 the chart has 8 reachable states:
+    1. idle
+    2. awaiting_request_line
+    3. dispatching_get          → http_get.scxml
+    4. dispatching_post         → http_post.scxml
+    5. dispatching_put          → http_put.scxml
+    6. dispatching_delete       → http_delete.scxml
+    7. dispatching_unknown_method
+    8. responding
+
+  Each `dispatching_<METHOD>` carries one <sos:dispatch ref="…"/> per
+  PCDN-SOS-12-001. Dispatches from distinct parent states are
+  sequential per §6.3 — they form 4 single-member independence axes
+  per Wave-1B's bound-composition algebra (see
+  test_sos12_section_8_4_http_worked_example_bounds).
+
+  The chart declares its own <sos:contract> at root carrying the UNION
+  of all dispatched children's events-in / events-out / invariants_
+  assumed / reads / writes — this is what sos12_contract_match.
+  simple_edge_provider uses as the per-dispatch expectation (the
+  simple provider treats the parent's chart-level contract as the
+  expectation for every dispatch site; the union pattern is the
+  v1 conformant shape until a multi-dispatch edge_provider partitions
+  per-site).
+
+  Legibility (SCXML-LINT-DISP-2): 8 peer states ≤ 15 default
+  threshold per §9.1 / PCDN-SOS-12-003 — passes.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="idle">
+  <sos:contract reads="parsed_method parsed_uri parsed_headers parsed_body request_id"
+                writes="response_status response_headers response_body method.complete method.error">
+    <sos:events-in>
+      <sos:event>tcp.bytes_received</sos:event>
+      <sos:event>timer.body_timeout</sos:event>
+      <sos:event>chunk.received</sos:event>
+      <sos:event>auth.granted</sos:event>
+    </sos:events-in>
+    <sos:events-out>
+      <sos:event>method.complete</sos:event>
+      <sos:event>method.error</sos:event>
+    </sos:events-out>
+    <sos:invariants>
+      <sos:maintained-by-subchart>INV-HTTP-1-request-line-parsed</sos:maintained-by-subchart>
+      <sos:maintained-by-subchart>INV-HTTP-2-content-length-honored</sos:maintained-by-subchart>
+      <sos:maintained-by-subchart>INV-HTTP-3-idempotency</sos:maintained-by-subchart>
+      <sos:maintained-by-subchart>INV-HTTP-4-auth-checked</sos:maintained-by-subchart>
+    </sos:invariants>
+  </sos:contract>
+
+  <state id="idle">
+    <transition event="tcp.bytes_received" target="awaiting_request_line"/>
+  </state>
+  <state id="awaiting_request_line">
+    <transition cond="parsed_method == 'GET'"    target="dispatching_get"/>
+    <transition cond="parsed_method == 'POST'"   target="dispatching_post"/>
+    <transition cond="parsed_method == 'PUT'"    target="dispatching_put"/>
+    <transition cond="parsed_method == 'DELETE'" target="dispatching_delete"/>
+    <transition target="dispatching_unknown_method"/>
+  </state>
+  <state id="dispatching_get">
+    <sos:dispatch ref="http_get.scxml"/>
+    <transition event="method.complete" target="responding"/>
+    <transition event="method.error"    target="responding"/>
+  </state>
+  <state id="dispatching_post">
+    <sos:dispatch ref="http_post.scxml"/>
+    <transition event="method.complete" target="responding"/>
+    <transition event="method.error"    target="responding"/>
+  </state>
+  <state id="dispatching_put">
+    <sos:dispatch ref="http_put.scxml"/>
+    <transition event="method.complete" target="responding"/>
+    <transition event="method.error"    target="responding"/>
+  </state>
+  <state id="dispatching_delete">
+    <sos:dispatch ref="http_delete.scxml"/>
+    <transition event="method.complete" target="responding"/>
+    <transition event="method.error"    target="responding"/>
+  </state>
+  <state id="dispatching_unknown_method">
+    <transition target="responding"/>
+  </state>
+  <state id="responding">
+    <transition target="idle"/>
+  </state>
+</scxml>

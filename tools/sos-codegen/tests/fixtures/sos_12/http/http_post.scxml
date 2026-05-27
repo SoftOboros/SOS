@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SOS-12 §8.4 worked example: POST method sub-chart.
+
+  Authority: docs/concepts/SOS-12-CONCEPTS.md §8.2 ("POST — header
+  parse + length-validated body + chunked transfer") + §8.4 (bound
+  pin: bound(http_post) = 15). The 15-state count sits EXACTLY at the
+  §9.1 / PCDN-SOS-12-003 default legibility threshold per the §8.5
+  narrative: SCXML-LINT-DISP-2 passes here (peer_count > threshold is
+  the breach predicate; 15 == 15 is admissible — the §8.5 worked
+  example specifically calls out adding a 16th would fail lint).
+
+  States (15):
+    1. parse_request_headers
+    2. validate_content_length
+    3. validate_content_type
+    4. authenticate
+    5. authorize
+    6. select_body_mode
+    7. read_body_fixed
+    8. read_body_chunked
+    9. await_chunk
+   10. parse_chunk_size
+   11. read_chunk_data
+   12. read_trailers
+   13. dispatch_handler
+   14. finalize_response
+   15. error
+
+  No internal dispatches (per-handler decomposition is §8.3 deferred).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sos="https://softoboros.com/sos/1.0"
+       version="1.0" datamodel="ecmascript" initial="parse_request_headers">
+  <sos:contract reads="parsed_method parsed_uri parsed_headers parsed_body"
+                writes="response_status response_body method.complete">
+    <sos:events-in>
+      <sos:event>tcp.bytes_received</sos:event>
+      <sos:event>timer.body_timeout</sos:event>
+      <sos:event>chunk.received</sos:event>
+      <sos:event>auth.granted</sos:event>
+    </sos:events-in>
+    <sos:events-out>
+      <sos:event>method.complete</sos:event>
+      <sos:event>method.error</sos:event>
+    </sos:events-out>
+    <sos:invariants>
+      <sos:maintained-by-subchart>INV-HTTP-2-content-length-honored</sos:maintained-by-subchart>
+      <sos:maintained-by-subchart>INV-HTTP-4-auth-checked</sos:maintained-by-subchart>
+      <sos:assumed-of-environment>INV-HTTP-1-request-line-parsed</sos:assumed-of-environment>
+    </sos:invariants>
+  </sos:contract>
+
+  <state id="parse_request_headers">
+    <transition event="tcp.bytes_received" target="validate_content_length"/>
+    <transition event="timer.body_timeout" target="error"/>
+  </state>
+  <state id="validate_content_length">
+    <transition target="validate_content_type"/>
+    <transition cond="parsed_headers == ''" target="error"/>
+  </state>
+  <state id="validate_content_type">
+    <transition target="authenticate"/>
+  </state>
+  <state id="authenticate">
+    <transition event="auth.granted" target="authorize"/>
+    <transition event="timer.body_timeout" target="error"/>
+  </state>
+  <state id="authorize">
+    <transition target="select_body_mode"/>
+  </state>
+  <state id="select_body_mode">
+    <transition cond="parsed_headers == 'chunked'" target="read_body_chunked"/>
+    <transition target="read_body_fixed"/>
+  </state>
+  <state id="read_body_fixed">
+    <transition event="tcp.bytes_received" target="dispatch_handler"/>
+  </state>
+  <state id="read_body_chunked">
+    <transition target="await_chunk"/>
+  </state>
+  <state id="await_chunk">
+    <transition event="chunk.received" target="parse_chunk_size"/>
+    <transition event="timer.body_timeout" target="error"/>
+  </state>
+  <state id="parse_chunk_size">
+    <transition cond="parsed_body == ''" target="read_trailers"/>
+    <transition target="read_chunk_data"/>
+  </state>
+  <state id="read_chunk_data">
+    <transition event="tcp.bytes_received" target="await_chunk"/>
+  </state>
+  <state id="read_trailers">
+    <transition target="dispatch_handler"/>
+  </state>
+  <state id="dispatch_handler">
+    <transition target="finalize_response"/>
+  </state>
+  <state id="finalize_response">
+    <onentry>
+      <raise event="method.complete"/>
+    </onentry>
+  </state>
+  <state id="error">
+    <onentry>
+      <raise event="method.error"/>
+    </onentry>
+  </state>
+</scxml>
