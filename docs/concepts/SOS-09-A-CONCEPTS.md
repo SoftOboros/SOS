@@ -91,7 +91,7 @@ Frozen-enumeration registration policy: **Standards Action** (extending the pare
 
 ### 5.2 Permitted `sos:`-prefixed key set
 
-A SOS-09 channel annotation is the set of `sos:`-prefixed keys inside the `other_attributes` JSON map on a single permitted parent context. The **twelve** permitted keys are (per PCDN-SOS-09-A-003 ratification 2026-05-25 — `sos:id` shape changed from SV-identifier to UUID, and `sos:name` added as a new required key; and per the **PCDN-SOS-09-007 follow-on amendment 2026-05-26** — `sos:channel_group` and `sos:privilege_region` added as optional axes per the umbrella's "channel-group as two axes" resolution; see §15 entry dated 2026-05-26):
+A SOS-09 channel annotation is the set of `sos:`-prefixed keys inside the `other_attributes` JSON map on a single permitted parent context. The **thirteen** permitted keys are (per PCDN-SOS-09-A-003 ratification 2026-05-25 — `sos:id` shape changed from SV-identifier to UUID, and `sos:name` added as a new required key; per the **PCDN-SOS-09-007 follow-on amendment 2026-05-26** — `sos:channel_group` and `sos:privilege_region` added as optional axes per the umbrella's "channel-group as two axes" resolution, see §16 entry dated 2026-05-26; and per the **§15 amendment 2026-05-28 (SIS-08E PCDN-002 prerequisite)** — `sos:core` added as an optional channel-annotation key with frozen-enum value set `ALLOWED_CORES = {cm4, cm7}`, see §16 entry dated 2026-05-28):
 
 | Key | Required? | Type | Allowed values |
 |---|---|---|---|
@@ -107,14 +107,15 @@ A SOS-09 channel annotation is the set of `sos:`-prefixed keys inside the `other
 | `sos:mutex` | optional | string | mutex name (instantiated as a `sos_mutex` per SOS-08-A §6.5; SOS-09 §5.3); only valid when `sos:kind="shared"` |
 | `sos:channel_group` | optional | SV identifier (string) | `[a-zA-Z_][a-zA-Z0-9_]*`; names the Rust borrow scope / shared `RegisterBlock` boundary the channel belongs to (SOS-09-D consumer). Default-from-inheritance: when absent, the channel inherits from the enclosing parallel/compound state's `sos:channel_group` declaration, or `"default"` if no ancestor declares. Inheritance is consumer-side (SOS-09-D) — the parser surfaces raw `Optional[str]`. Origin: PCDN-SOS-09-007 ratification 2026-05-26 ("channel-group as two axes"). |
 | `sos:privilege_region` | optional | SV identifier (string) | `[a-zA-Z_][a-zA-Z0-9_]*`; names the HDL MPU privilege region / access-violation aggregation domain the channel belongs to (SOS-09-E consumer). Default-from-inheritance: when absent, the channel inherits from the enclosing parallel/compound state's `sos:privilege_region` declaration, or `"default"` if no ancestor declares. Inheritance is consumer-side (SOS-09-E) — the parser surfaces raw `Optional[str]`. Origin: PCDN-SOS-09-007 ratification 2026-05-26 ("channel-group as two axes"). |
+| `sos:core` | optional | enum (string) | one of `ALLOWED_CORES = {cm4, cm7}` (the two cores physically present on the disco-analyzer STM32H747I-DISCO v1 bench substrate). Names which core a chart region binds to when the system is multi-core. Absent: channel is core-agnostic; downstream emitters (SOS-09-B IRQ binding, SOS-09-D Rust HAL, SOS-09-E HDL register-file) MAY replicate the channel across whichever cores host the chart region. Validated against `ALLOWED_CORES` per §5.4(3) at parse time. Adding a third core value (e.g. `riscv` for a heterogeneous add-on, or an FPGA soft-core target) requires another §15 amendment to this doc (Standards Action — see §16 entry dated 2026-05-28). Origin: SIS-08E PCDN-002 ratification 2026-05-28. |
 
 **Identity vs name split (per PCDN-SOS-09-A-003 ratification 2026-05-25).** `sos:id` is the cross-doc source-of-uniqueness-truth: a UUID per RFC 4122 in canonical hyphenated form. The UUID is identity-only; downstream emitters MUST NOT use it as an emitted symbol name. `sos:name` is the human-readable / emission-facing handle: SV-identifier-shaped, unique within the composed scope path (NOT chart-wide — two charts MAY independently declare `sos:name="rx_path"`; the composed path differentiates them as e.g. `<outer>.<inner>.rx_path` in the final emit). The composed-name hierarchy provides emission uniqueness; the UUID owns identity.
 
 The `sos:kind` enum values (`status`, `command`, `queue`, `shared`) are **mirrored** from SOS-09 §5.1 without modification; this sub-phase does NOT introduce additional kind values. Per SOS-09 §5.1 frozen-enumeration registration policy (Standards Action), extending the kind set requires a §16 amendment to `SOS-09-CONCEPTS.md`, not to this doc.
 
-The twelve-key set above is frozen at v1 (per ratifications of PCDN-SOS-09-A-001 / -003 and the PCDN-SOS-09-007 follow-on amendment 2026-05-26). Adding a thirteenth permitted SOS-semantic key requires a §16 amendment to this doc (Standards Action — see below).
+The thirteen-key set above is frozen at v1 (per ratifications of PCDN-SOS-09-A-001 / -003, the PCDN-SOS-09-007 follow-on amendment 2026-05-26, and the §15 amendment 2026-05-28 introducing `sos:core`). Adding a fourteenth permitted SOS-semantic key requires a §16 amendment to this doc (Standards Action — see below).
 
-Frozen-enumeration registration policy: **Standards Action** for the twelve-key set (extending the set changes the chart-author surface and the downstream emitter contract).
+Frozen-enumeration registration policy: **Standards Action** for the thirteen-key set (extending the set changes the chart-author surface and the downstream emitter contract).
 
 ### 5.3 Parsing rule
 
@@ -194,8 +195,9 @@ Per INV-SOS-E, the row addition policy is the same as SOS-07 §7: **Specificatio
 This sub-phase freezes the following enumerations (each declared in §5 with its registration policy):
 
 - §5.1 Allowed annotation parent contexts — `{ <region>, <state>, <parallel> }` — **Standards Action**.
-- §5.2 Permitted `sos:`-prefixed key set — `{ sos:id, sos:name, sos:kind, sos:dir, sos:zone, sos:atomicity, sos:width, sos:bit_layout, sos:irq, sos:mutex, sos:channel_group, sos:privilege_region }` (twelve keys, post-PCDN-SOS-09-007 follow-on amendment 2026-05-26; previously ten keys post-PCDN-SOS-09-A-003 ratification 2026-05-25) — **Standards Action**.
+- §5.2 Permitted `sos:`-prefixed key set — `{ sos:id, sos:name, sos:kind, sos:dir, sos:zone, sos:atomicity, sos:width, sos:bit_layout, sos:irq, sos:mutex, sos:channel_group, sos:privilege_region, sos:core }` (thirteen keys, post-§15 amendment 2026-05-28 introducing `sos:core` as a SIS-08E PCDN-002 prerequisite; previously twelve keys post-PCDN-SOS-09-007 follow-on amendment 2026-05-26; previously ten keys post-PCDN-SOS-09-A-003 ratification 2026-05-25) — **Standards Action**.
 - §5.2 Per-key allowed-value sets (`kind`, `dir`, `zone`, `atomicity`) — **mirror** from SOS-09 §5.1 / §5.2 / §5.3 / §5.4 (no local mutation rights).
+- §5.2 `sos:core` allowed-value set — `ALLOWED_CORES = { cm4, cm7 }` — **Standards Action** (locally-owned enum naming the two cores on the disco-analyzer STM32H747I-DISCO v1 bench substrate; adding a third value requires a §15 amendment to this doc per §16 entry dated 2026-05-28).
 - §5.4 Validation-rule set (nine rules) — **Standards Action**.
 
 Plus:
@@ -487,3 +489,47 @@ If a future chart-emitter PR introduces a typo or an unratified extension (e.g. 
 - Parent-side ERRATA-002 entry at `docs/todo/streamz/statechart-orchestration/ERRATA.md` — Path B was authored to close that errata; the validator narrowing here closes the explicit "follow-on tick MAY tighten the validator" clause the parent ERRATA entry references.
 
 Status: 🟢 **closed**. The §16 (2026-05-28) "validator impact: none in this commit" carve-out has been narrowed; the `placement` vocabulary is now both spec-normative AND validator-enforced.
+
+### 2026-05-28 — §15 amendment: `sos:core` channel-annotation key + `ALLOWED_CORES` enum introduced (SIS-08E PCDN-002 prerequisite) (Ira)
+
+**Originating finding.** The parent-side SIS-08E PCDN-002 ratification chose option (a) — introduce a new `sos:core` annotation key on the SOS-09-A channel-annotation surface so that charts targeting a multi-core substrate (the v1 reference being the STM32H747I-DISCO with its Cortex-M4 + Cortex-M7 pair) can declare which core a chart region binds to. The SIS-08E downstream dispatch (parent repo, upcoming C3-A wave) consumes this key to generate per-core IRQ shims, per-core HAL borrow scopes (SOS-09-D), and per-core HDL register-file privilege-region aggregations (SOS-09-E). Without the key, every channel is implicitly core-agnostic, which forces the downstream emitters to replicate dispatch surfaces across all hosting cores — that is correct for genuinely-shared channels but wrong (and silently inefficient) for channels that semantically bind to one core. This amendment lands the key + its frozen-enum guard *before* the SIS-08E C3-A wave dispatches, so the chart-author surface is stable when the wave's emitter PRs cite it.
+
+**Resolution — Standards Action amendment to the §5.2 permitted-key set + a new frozen-enum.** The SOS-09-A §5.2 permitted `sos:`-prefixed key set extends from **twelve keys to thirteen** with the addition of:
+
+- **`sos:core`** — optional channel-annotation key. Type: enum (string). Allowed values: members of `ALLOWED_CORES = {"cm4", "cm7"}` (the two cores physically present on the disco-analyzer STM32H747I-DISCO v1 bench substrate). Naming convention: lowercase short-form (`cm4` rather than `CM4` or `cortex-m4`) for consistency with the rest of the SOS-09-A enum surface (e.g. `kind=status`, `dir=hw→sw`, `zone=privileged`). Absent: the channel is core-agnostic — no per-core dispatch surface is bound; downstream emitters MAY replicate the channel across whichever cores host the chart region.
+
+**Authority scope.** `sos:core` is a **region/state-level annotation** (a channel-annotation key, valid on `<state>` / `<parallel>` / `<region>` per §5.1, alongside the other twelve keys). It is NOT a chart-root key — multi-core charts are expected to have some regions on one core and other regions on the other, so the granularity MUST be per-region, not per-chart. The parser surfaces the raw `Optional[str]`; consumer-side defaulting/inheritance (e.g. "if no ancestor region declares `sos:core`, channel is core-agnostic") is a SOS-09-B / SOS-09-D / SOS-09-E concern, mirroring the consumer-side handling of `sos:channel_group` and `sos:privilege_region` ratified by the PCDN-SOS-09-007 follow-on amendment 2026-05-26.
+
+**Frozen enum + registration policy.** `ALLOWED_CORES = frozenset({"cm4", "cm7"})` is now a SOS-09-A frozen enumeration under **Standards Action** registration policy (inherited from the SOS-09 umbrella's frozen-enumeration registration-policy clause; the core vocabulary crosses sub-phase boundaries — SOS-09-A annotation parser, SOS-09-B IRQ binding, SOS-09-D Rust HAL emission, SOS-09-E HDL register-file all consume it). Adding a third core value (e.g. a future `riscv` for a heterogeneous add-on, or a soft-core target on an FPGA-backed bench) requires another §15 amendment to this doc *first*, with the same Standards Action discipline. Demotion to Specification Required would itself require an umbrella §15 amendment. This sub-phase carries no mutation rights for the `ALLOWED_CORES` enum outside that amendment path.
+
+**Precedent.** This amendment mirrors the SOS-09-A §16 amendment 2026-05-28 (commits `be1d4c7` introducing `mmio-peripheral` placement + `4ad618d` enforcing the placement enum at the validator layer). Same Standards Action discipline; same `frozenset[str]` shape; same validator-enforcement pattern (the value is gated at parse time via the existing `_validate_enum` helper with rule citation `§5.4(3)`, same shape the rest of the channel-annotation enums use). The placement amendment chose a dedicated `validate_placement()` helper because the field is a *manifest-layer* tag (set by the emitter, not by the chart author); `sos:core` is a *chart-layer* annotation set by the chart author, so it is naturally enforced inside the existing `_build_channel` walker rather than via a separate public helper.
+
+**Validator impact landed with this entry.** `tools/sos-codegen/sos09_annotations.py`:
+
+- `ALLOWED_CORES: frozenset[str] = frozenset({"cm4", "cm7"})` declared next to `ALLOWED_PLACEMENTS` for shape parity. Exported via `__all__`.
+- `PERMITTED_SOS_KEYS` extended to include `"sos:core"` (twelve → thirteen).
+- `ChannelAnnotation.core: Optional[str]` field surfaces the parsed value; `None` indicates core-agnostic (absent annotation).
+- `_build_channel` validates the value against `ALLOWED_CORES` via `_validate_enum(...)`, producing a `§5.4(3)`-cited `Sos09AnnotationError` on out-of-set values — same error shape (`element_path`, `rule`, `key`) the rest of the §5.4(3) enum failures use.
+
+The validator gate is on-by-default: unlike the placement amendment which deferred enforcement to a follow-on tick (`4ad618d`), `sos:core` ships with its validator enforcement in the same commit. There is no checked-in chart yet declaring `sos:core`, so there is no migration-window concern; tightening at introduction-time avoids the manifest-mythology window the placement enforcement follow-on closed in retrospect.
+
+**Tests landed.** `tools/sos-codegen/tests/test_sos09_annotations.py` — fourteen new tests covering: each `ALLOWED_CORES` value parsing (cm4, cm7); `sos:core="cm3"` failing with a `§5.4(3)`-cited error that names the allowed set; a parametrized battery of unratified string values (case variants, alternate spellings, empty string, padded values); the `ALLOWED_CORES` frozen-set shape regression guard; the `PERMITTED_SOS_KEYS` thirteen-key cardinality guard; and absence-yields-None for the core-agnostic default. Total file count: 76 → 90 (delta +14).
+
+**Chart-side impact at amendment time: none.** No checked-in chart currently declares `sos:core`. The SIS-08E C3-A wave (parent repo, upcoming) will be the first chart family to consume the key; this amendment lands the spec + validator surface so that wave can cite it without a chicken-and-egg ratification gap.
+
+**SIS-08B / SIS-08D impact: none.** `sis08_first_slice` and `sis08d_c2_membrane` charts are single-core SIS-08B and SIS-08D family charts respectively; neither currently declares `sos:core`, both continue to surface as core-agnostic (`ChannelAnnotation.core is None` on every channel). Both chart families' existing pytest sweeps pass unchanged.
+
+**Verification sweep.**
+
+- `python3 -m pytest tools/sos-codegen/tests/test_sos09_annotations.py` → 90/90 pass (was 76; delta +14 new tests for `sos:core`).
+- `python3 -m pytest tools/sos-codegen/tests/test_sos_09_a_concepts_doc.py tools/sos-codegen/tests/test_placement_enforcement.py tools/sos-codegen/tests/test_sis08_first_slice.py` regression sweep → all pass.
+- Wider sweep: `python3 -m pytest tools/sos-codegen/tests/ -k "sos_09 or sos09 or placement"` → 770 passed, 1 skipped, no regressions.
+
+**Cross-references.**
+
+- Parent-side SIS-08E PCDN-002 ratification — chose option (a) (introduce new `sos:core` annotation key) over option (b) (overload an existing key) and option (c) (defer to a downstream emitter-only convention).
+- SOS-09-A §16 amendment 2026-05-28 (commits `be1d4c7`, `4ad618d`) — direct precedent for the Standards Action discipline + frozen-enum shape this amendment mirrors.
+- PCDN-SOS-09-007 follow-on amendment 2026-05-26 (this doc above) — precedent for adding optional channel-annotation keys (`sos:channel_group`, `sos:privilege_region`) with consumer-side defaulting; `sos:core` follows the same shape.
+- Implementation site: `tools/sos-codegen/sos09_annotations.py:ALLOWED_CORES` (frozen enum) and the new validator branch in `_build_channel` (rule `§5.4(3)`, key `sos:core`).
+
+Status: 🟢 **ratified**. The §5.2 permitted-key set is now thirteen keys; `ALLOWED_CORES = {"cm4", "cm7"}` is a Standards Action–protected frozen enumeration on the SOS-09-A surface. The SIS-08E C3-A wave (parent repo) is unblocked to consume the new key.

@@ -20,6 +20,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from loader import load_chart  # noqa: E402
 from sos09_annotations import (  # noqa: E402
+    ALLOWED_CORES,
     ALLOWED_DIRS,
     ALLOWED_KINDS,
     ALLOWED_MPU_ATTRS,
@@ -30,6 +31,7 @@ from sos09_annotations import (  # noqa: E402
     ChannelAnnotation,
     ChartAnnotations,
     DEFAULT_MPU_BACKGROUND,
+    PERMITTED_SOS_KEYS,
     Sos09AnnotationError,
     parse_chart_annotations,
 )
@@ -791,3 +793,120 @@ def test_only_channel_group_present_privilege_region_none():
     ch = parse_chart_annotations(chart).channels[0]
     assert ch.channel_group == "rx_group"
     assert ch.privilege_region is None
+
+
+# ---------------------------------------------------------------------------
+# SOS-09-A §15 amendment 2026-05-28 (SIS-08E PCDN-002 prerequisite):
+# §5.2 twelve-key -> thirteen-key (added `sos:core` with frozen enum
+# `ALLOWED_CORES = {"cm4", "cm7"}`). Standards Action protected; adding a
+# third value requires another §15 amendment to SOS-09-A first.
+#
+# Test categories (mirrors the channel_group/privilege_region precedent
+# above and the placement-enum precedent in test_placement_enforcement.py):
+#     1. Each ALLOWED_CORES value parses successfully through the
+#        annotation walker.
+#     2. Unratified core values (e.g. "cm3", "riscv") fail with §5.4(3)
+#        citing ALLOWED_CORES.
+#     3. ALLOWED_CORES frozen-set shape regression guard.
+#     4. PERMITTED_SOS_KEYS now contains `sos:core` (thirteen-key set).
+#     5. Absence of `sos:core` -> ChannelAnnotation.core is None
+#        (core-agnostic channel; downstream consumer-side default).
+# ---------------------------------------------------------------------------
+
+
+def test_core_cm4_parses_successfully():
+    """Happy path: `sos:core="cm4"` validates and surfaces on the channel."""
+    attrs = {**_minimal_status(), "sos:core": "cm4"}
+    chart = _chart([_state("S1", attrs)])
+    anns = parse_chart_annotations(chart)
+    assert len(anns.channels) == 1
+    assert anns.channels[0].core == "cm4"
+
+
+def test_core_cm7_parses_successfully():
+    """Happy path: `sos:core="cm7"` validates and surfaces on the channel."""
+    attrs = {**_minimal_status(), "sos:core": "cm7"}
+    chart = _chart([_state("S1", attrs)])
+    anns = parse_chart_annotations(chart)
+    assert len(anns.channels) == 1
+    assert anns.channels[0].core == "cm7"
+
+
+def test_core_invalid_value_cm3_raises_with_allowed_cores_diagnostic():
+    """Error path: `sos:core="cm3"` -> §5.4(3) error naming ALLOWED_CORES.
+
+    The diagnostic MUST cite the allowed set so a chart author who typo'd
+    `cm3` (a different Cortex-M part not present on the disco-analyzer
+    bench) gets actionable feedback pointing at the two-value enum.
+    Adding `cm3` would require a §15 amendment to SOS-09-A first
+    (Standards Action — inherited from the SOS-09 umbrella registration
+    policy clause).
+    """
+    attrs = {**_minimal_status(), "sos:core": "cm3"}
+    chart = _chart([_state("S1", attrs)])
+    with pytest.raises(Sos09AnnotationError) as exc:
+        parse_chart_annotations(chart)
+    assert exc.value.rule == "§5.4(3)"
+    assert exc.value.key == "sos:core"
+    msg = str(exc.value)
+    # The error names the offending value and the allowed set.
+    assert "'cm3'" in msg
+    assert "cm4" in msg
+    assert "cm7" in msg
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "CM4",          # case-insensitive guard (enum is lowercase)
+        "CM7",
+        "cortex-m4",    # alternate spelling
+        "cortex-m7",
+        "riscv",        # not-yet-ratified heterogeneous-core extension
+        "",             # empty string
+        "m4",           # without the cortex- or cm prefix
+        " cm4",         # whitespace padding
+    ],
+)
+def test_core_rejects_unratified_string_values(bad_value: str):
+    """Each invalid string -> §5.4(3) rejection with key='sos:core'."""
+    attrs = {**_minimal_status(), "sos:core": bad_value}
+    chart = _chart([_state("S1", attrs)])
+    with pytest.raises(Sos09AnnotationError) as exc:
+        parse_chart_annotations(chart)
+    assert exc.value.rule == "§5.4(3)"
+    assert exc.value.key == "sos:core"
+
+
+def test_allowed_cores_is_exactly_cm4_and_cm7():
+    """ALLOWED_CORES is the §15(2026-05-28) two-value enum.
+
+    If this test fails because the set grew, the amendment landing this
+    PR must have edited it — verify the amendment also lands in §16 of
+    `docs/concepts/SOS-09-A-CONCEPTS.md` (Standards Action) before
+    silencing the test.
+    """
+    assert ALLOWED_CORES == frozenset({"cm4", "cm7"})
+    assert isinstance(ALLOWED_CORES, frozenset)
+
+
+def test_permitted_sos_keys_contains_sos_core_thirteen_key_set():
+    """The §5.2 permitted-key set is now thirteen, including `sos:core`."""
+    assert "sos:core" in PERMITTED_SOS_KEYS
+    # Sanity guard the cardinality: thirteen post-§15 amendment 2026-05-28.
+    assert len(PERMITTED_SOS_KEYS) == 13
+
+
+def test_core_absent_yields_none_core_agnostic_channel():
+    """Absence of `sos:core` surfaces as None — channel is core-agnostic.
+
+    Per the §15 amendment: charts that omit `sos:core` do not bind a
+    per-core dispatch surface; downstream emitters MAY replicate the
+    channel across whichever cores host the chart region. The parser
+    surfaces raw Optional[str]; the agnostic-vs-bound semantics are a
+    consumer concern (SOS-09-B IRQ binding, SOS-09-D Rust HAL, etc.).
+    """
+    chart = _chart([_state("S1", _minimal_status())])
+    anns = parse_chart_annotations(chart)
+    assert len(anns.channels) == 1
+    assert anns.channels[0].core is None

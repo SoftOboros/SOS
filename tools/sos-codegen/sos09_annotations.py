@@ -10,7 +10,9 @@ implements §5.3 (parsing rule) and §5.4 (validation rules 1-9) of
 `docs/concepts/SOS-09-A-CONCEPTS.md`, ratified 2026-05-25, with the
 PCDN-SOS-09-007 follow-on amendment 2026-05-26 that extends §5.2 from
 ten keys to twelve keys (added `sos:channel_group` and
-`sos:privilege_region`).
+`sos:privilege_region`), and the §15 amendment 2026-05-28 (SIS-08E
+PCDN-002 prerequisite) that extends §5.2 from twelve keys to thirteen
+keys (added `sos:core` with frozen `ALLOWED_CORES = {"cm4", "cm7"}`).
 
 Authority: `docs/concepts/SOS-09-A-CONCEPTS.md` (this sub-phase, normative);
 `docs/concepts/SOS-09-CONCEPTS.md` (umbrella; §5.1-§5.4 enums mirrored);
@@ -107,14 +109,40 @@ ALLOWED_PLACEMENTS: frozenset[str] = frozenset(
     {"hardware-block", "sram-membrane", "mmio-peripheral"}
 )
 
+# Per SOS-09-A §15 amendment 2026-05-28 (SIS-08E PCDN-002 prerequisite):
+# the two-value `sos:core` channel-annotation enum names which core a chart
+# region targets when the system is multi-core. The two values are the cores
+# physically present on the disco-analyzer STM32H747I-DISCO bench substrate
+# (the v1 reference bench across the entire SOS-04 / SOS-05 / SIS-08
+# pipeline). Charts that omit `sos:core` are core-agnostic by default: no
+# per-core dispatch surface is bound, and downstream emitters (SOS-09-D Rust
+# HAL, SOS-09-E HDL register-file, SOS-09-B IRQ shim) treat the channel as
+# replicated across whichever cores host the chart region. Charts that name
+# `sos:core` bind their dispatch surface to that one core.
+#
+# Registration policy: **Standards Action** (inherited from SOS-09 umbrella
+# frozen-enumeration registration-policy clause; the core vocabulary crosses
+# sub-phase boundaries — SOS-09-A annotation parser, SOS-09-B IRQ binding,
+# SOS-09-D Rust HAL emission, SOS-09-E HDL register-file all consume it).
+# Adding a third core value (e.g. a future `riscv` for a heterogeneous
+# add-on, or an FPGA-soft-core target) requires another §15 amendment to
+# `docs/concepts/SOS-09-A-CONCEPTS.md` *first*, with the same Standards
+# Action discipline. Demotion to Specification Required would itself
+# require an umbrella §15 amendment. Mirrors the `ALLOWED_PLACEMENTS`
+# precedent above (SOS-09-A §16 amendment 2026-05-28 commits be1d4c7 /
+# 4ad618d).
+ALLOWED_CORES: frozenset[str] = frozenset({"cm4", "cm7"})
+
 # Per PCDN-SOS-09-A-001 ratification.
 ALLOWED_BIT_FIELD_ACCESS: frozenset[str] = frozenset({"RW", "RO", "WO", "reserved"})
 ALLOWED_BIT_FIELD_SIDE_EFFECTS: frozenset[str] = frozenset(
     {"clear-on-read", "side-effect-on-write"}
 )
 
-# §5.2: the twelve permitted SOS-09-A keys (post-PCDN-SOS-09-007 follow-on
-# amendment 2026-05-26: added `sos:channel_group` and `sos:privilege_region`).
+# §5.2: the thirteen permitted SOS-09-A keys (post-§15 amendment 2026-05-28:
+# added `sos:core` as a SIS-08E prerequisite; previously twelve keys post-
+# PCDN-SOS-09-007 follow-on amendment 2026-05-26 which added
+# `sos:channel_group` and `sos:privilege_region`).
 PERMITTED_SOS_KEYS: frozenset[str] = frozenset(
     {
         "sos:id",
@@ -129,6 +157,7 @@ PERMITTED_SOS_KEYS: frozenset[str] = frozenset(
         "sos:mutex",
         "sos:channel_group",
         "sos:privilege_region",
+        "sos:core",
     }
 )
 
@@ -259,6 +288,13 @@ class ChannelAnnotation:
     # falls back to `"default"`).
     channel_group: Optional[str] = None
     privilege_region: Optional[str] = None
+    # SOS-09-A §15 amendment 2026-05-28 (SIS-08E PCDN-002 prerequisite):
+    # `sos:core` names which core (`cm4` / `cm7`) the channel's chart region
+    # targets when the system is multi-core. OPTIONAL on a channel; absence
+    # surfaces as None and indicates a core-agnostic channel (no per-core
+    # dispatch surface bound; downstream emitters replicate across hosting
+    # cores). Validated against `ALLOWED_CORES` at parse time per §5.4(3).
+    core: Optional[str] = None
     # Best-effort dotted path to the SCXML parent (state id chain); useful
     # for error reporting and downstream "composed scope path" naming.
     element_path: str = ""
@@ -725,6 +761,18 @@ def _build_channel(
             key="sos:privilege_region",
         )
 
+    # SOS-09-A §15 amendment 2026-05-28 (SIS-08E PCDN-002 prerequisite):
+    # `sos:core` OPTIONAL; when present MUST be one of ALLOWED_CORES
+    # ({"cm4", "cm7"} — the two cores on the disco-analyzer
+    # STM32H747I-DISCO bench substrate). Standards Action protected;
+    # adding a third value requires a §15 amendment to SOS-09-A first.
+    core: Optional[str] = None
+    if "sos:core" in sos_attrs:
+        core = _validate_enum(
+            sos_attrs["sos:core"], ALLOWED_CORES,
+            element_path=element_path, key="sos:core",
+        )
+
     return ChannelAnnotation(
         id=channel_id,
         name=channel_name,
@@ -739,6 +787,7 @@ def _build_channel(
         mpu_attr=mpu_attr,
         channel_group=channel_group,
         privilege_region=privilege_region,
+        core=core,
         element_path=element_path,
         extras=extras,
     )
@@ -982,6 +1031,7 @@ __all__ = [
     "ALLOWED_MPU_ATTRS",
     "ALLOWED_MPU_BACKGROUNDS",
     "ALLOWED_PLACEMENTS",
+    "ALLOWED_CORES",
     "ALLOWED_BIT_FIELD_ACCESS",
     "ALLOWED_BIT_FIELD_SIDE_EFFECTS",
     "PERMITTED_SOS_KEYS",
