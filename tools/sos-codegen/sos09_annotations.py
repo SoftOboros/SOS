@@ -89,6 +89,24 @@ ALLOWED_MPU_ATTRS: frozenset[str] = frozenset(
 ALLOWED_MPU_BACKGROUNDS: frozenset[str] = frozenset({"kernel_default", "strict"})
 DEFAULT_MPU_BACKGROUND: str = "kernel_default"
 
+# Per SOS-09-A §16 amendment 2026-05-28 (Path B per parent EOQ-002-ERRATA-002):
+# the three-value placement enum names the *access mechanism* on a target for
+# a SOS-09-A chart's emitted manifest. Each chart's emitter MUST declare
+# exactly one value; the enforcement gate lives in `validate_placement` below
+# and is wired into every chart-family emitter before manifest write.
+#
+# Registration policy: **Standards Action** (inherited from SOS-09 umbrella
+# frozen-enumeration registration-policy clause; the placement vocabulary
+# crosses sub-phase boundaries — SOS-09-A emitters, SOS-09-D Rust HAL,
+# SOS-09-E HDL register-file all consume it). Adding a fourth placement
+# value (e.g. a future `network-membrane` for remote-accessed surfaces)
+# requires another §15 amendment to `docs/concepts/SOS-09-A-CONCEPTS.md`
+# *first*, with the same Standards Action discipline. Demotion to
+# Specification Required would itself require an umbrella §15 amendment.
+ALLOWED_PLACEMENTS: frozenset[str] = frozenset(
+    {"hardware-block", "sram-membrane", "mmio-peripheral"}
+)
+
 # Per PCDN-SOS-09-A-001 ratification.
 ALLOWED_BIT_FIELD_ACCESS: frozenset[str] = frozenset({"RW", "RO", "WO", "reserved"})
 ALLOWED_BIT_FIELD_SIDE_EFFECTS: frozenset[str] = frozenset(
@@ -848,6 +866,40 @@ def _parse_chart_root_annotations(root: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def validate_placement(
+    placement: Any,
+    *,
+    manifest_path: Optional[str] = None,
+) -> str:
+    """Validate a manifest `placement` value against `ALLOWED_PLACEMENTS`.
+
+    Per SOS-09-A §16 amendment 2026-05-28 (Path B per parent EOQ-002-ERRATA-002),
+    the three-value enum `{hardware-block, sram-membrane, mmio-peripheral}` is
+    normative. Chart-family emitters MUST call this helper before writing
+    their manifest JSON so that a typo or an unratified extension is caught
+    at emit-time rather than surviving as silent manifest mythology.
+
+    The rule citation token is `§16(2026-05-28)`, naming the amendment date
+    that introduced the third placement value and made the enum normative.
+    Adding a fourth value requires a fresh §15 amendment to SOS-09-A under
+    the inherited Standards Action registration policy — see the
+    `ALLOWED_PLACEMENTS` docstring near the top of this module.
+
+    `manifest_path` (optional) surfaces in the error's `element_path` for
+    diagnostic clarity; emitters SHOULD pass the chart-id or the relative
+    manifest path.
+    """
+    if not isinstance(placement, str) or placement not in ALLOWED_PLACEMENTS:
+        raise Sos09AnnotationError(
+            f"manifest placement value {placement!r} not in allowed set "
+            f"{sorted(ALLOWED_PLACEMENTS)}",
+            rule="§16(2026-05-28)",
+            key="placement",
+            element_path=manifest_path,
+        )
+    return placement
+
+
 def parse_chart_annotations(chart_ast: dict) -> ChartAnnotations:
     """Walk the scjson chart AST and produce a typed annotation model.
 
@@ -922,12 +974,14 @@ __all__ = [
     "ChartAnnotations",
     "Sos09AnnotationError",
     "parse_chart_annotations",
+    "validate_placement",
     # Frozen enums exported for downstream emitters that want to mirror them.
     "ALLOWED_KINDS",
     "ALLOWED_DIRS",
     "ALLOWED_ZONES",
     "ALLOWED_MPU_ATTRS",
     "ALLOWED_MPU_BACKGROUNDS",
+    "ALLOWED_PLACEMENTS",
     "ALLOWED_BIT_FIELD_ACCESS",
     "ALLOWED_BIT_FIELD_SIDE_EFFECTS",
     "PERMITTED_SOS_KEYS",

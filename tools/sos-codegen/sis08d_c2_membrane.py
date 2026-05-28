@@ -25,7 +25,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from loader import load_chart  # noqa: E402
-from sos09_annotations import parse_chart_annotations  # noqa: E402
+from sos09_annotations import parse_chart_annotations, validate_placement  # noqa: E402
 from transliterate_mpu import (  # noqa: E402
     derive_mpu_regions,
     emit_mpu_background_setting,
@@ -198,6 +198,10 @@ def emit_membrane(
         ],
     }
     manifest_path = out_dir / "sis08d_c2_membrane_manifest.json"
+    # Per SOS-09-A §16 amendment 2026-05-28 (Path B per EOQ-002-ERRATA-002):
+    # gate the manifest placement value against the three-value enum before
+    # writing. Typos or unratified extensions are a hard Sos09AnnotationError.
+    validate_placement(manifest["placement"], manifest_path=str(manifest_path))
     _write_text(
         manifest_path,
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",

@@ -449,3 +449,41 @@ Status: 🟢 **closed**. The §5.4(3) prose and the validator implementation are
 - SIS-08D §16 (post-amendment) — records the Path B ratification and the SOS pin bump capturing this amendment.
 
 Status: 🟢 **ratified**. The `placement` vocabulary is now a three-value enum under SOS-09-A Standards Action protection; the C2-A manifest re-declares to `mmio-peripheral` and reflects the chart's MMIO-to-FPGA access-mechanism intent.
+
+### 2026-05-28 — §16 follow-on: `placement` enum enforced at the validator layer (Ira)
+
+**Closure of the §16 (2026-05-28) "validator impact: none in this commit" carve-out.** The Path B amendment landed the three-value `placement` vocabulary (`hardware-block` / `sram-membrane` / `mmio-peripheral`) and explicitly deferred validator enforcement to a follow-on tick. This entry is that follow-on. The amendment commit (`be1d4c7`) is unchanged; this entry layers validator enforcement on top of the spec text it ratified.
+
+**Validator narrowing landed with this entry.** `tools/sos-codegen/sos09_annotations.py` now defines `ALLOWED_PLACEMENTS = frozenset({"hardware-block", "sram-membrane", "mmio-peripheral"})` next to the existing `ALLOWED_KINDS` / `ALLOWED_DIRS` / `ALLOWED_ZONES` frozen-set surface, and exports a public `validate_placement(placement, *, manifest_path=None) -> str` helper that raises `Sos09AnnotationError` with rule citation `§16(2026-05-28)` on any value outside the three-value set. The error diagnostic names the offending value and the sorted allowed set in the same shape the existing §5.4(3) enum errors use.
+
+**Enforcement-location decision.** Of the three candidate locations surveyed by the follow-on tick:
+
+- **(a)** Manifest-layer helper inside `sos09_annotations.py` (chosen). Co-locates with the existing frozen-enum surface, exports through the same `Sos09AnnotationError` type, and exports through the same `__all__` block; both emitters already import from this module.
+- **(b)** Inline self-check in each emitter — rejected. Duplicating the enum in two files invites drift; the spec invariant lives in one place.
+- **(c)** New `sos09_manifest_validation.py` module — rejected. The enum's authority surface is SOS-09-A; the validator already names itself "SOS-09-A chart annotation parser + validator." A new module for one function is lower locality with no offsetting benefit.
+
+**Emitter integration.** Both chart emitters call `validate_placement(manifest["placement"], manifest_path=str(manifest_path))` immediately before `_write_text(manifest_path, ...)`:
+
+- `tools/sos-codegen/sis08_first_slice.py` — validates `"hardware-block"` before writing `sis08_first_slice_manifest.json`.
+- `tools/sos-codegen/sis08d_c2_membrane.py` — validates `"mmio-peripheral"` before writing `sis08d_c2_membrane_manifest.json`.
+
+If a future chart-emitter PR introduces a typo or an unratified extension (e.g. `"network-membrane"`), the emit step now raises before the manifest hits disk. Manifest mythology — a placement value surviving in a checked-in JSON because no test ever exercised it — is closed off by construction.
+
+**Tests landed.** `tools/sos-codegen/tests/test_placement_enforcement.py` (28 tests, four categories): (1) accepts each of the three allowed values incl. with `manifest_path`; (2) rejects typos, shortened forms, case variants, underscore-vs-hyphen substitutions, not-yet-ratified extensions, empty string, whitespace-padded values, and a battery of non-string types (None / int / float / bool / list / dict / tuple), all with §16(2026-05-28) citation; (3) `ALLOWED_PLACEMENTS` frozen-set shape regression guard; (4) both chart-family emitters' checked-in manifests round-trip through `validate_placement`, and a spy fixture confirms each emitter calls the helper before manifest write.
+
+**Frozen-enumeration registration policy reaffirmed.** Adding a fourth `placement` value requires a §15 amendment to this doc *first*, with the same **Standards Action** discipline the 2026-05-28 Path B amendment carried. Demotion to Specification Required would itself require an umbrella §15 amendment. This sub-phase carries no mutation rights for the `placement` enum outside that amendment path.
+
+**Verification sweep.**
+
+- `python3 -m pytest tools/sos-codegen/tests/` → 2736 passed, 5 skipped (was 2708; delta +28 = new test module).
+- `python3 -m pytest charts/sis08_first_slice/vectors/sis08_first_slice/` → 22/22 pass.
+- `python3 -m pytest charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/` → 28/28 pass.
+- Total chart-family regression: 50/50, matching the prior baseline.
+
+**Cross-references.**
+
+- Path B amendment commit (entry above): `be1d4c7`.
+- Validator-enforcement commit: this entry's landing commit.
+- Parent-side ERRATA-002 entry at `docs/todo/streamz/statechart-orchestration/ERRATA.md` — Path B was authored to close that errata; the validator narrowing here closes the explicit "follow-on tick MAY tighten the validator" clause the parent ERRATA entry references.
+
+Status: 🟢 **closed**. The §16 (2026-05-28) "validator impact: none in this commit" carve-out has been narrowed; the `placement` vocabulary is now both spec-normative AND validator-enforced.
