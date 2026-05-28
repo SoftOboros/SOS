@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<device xmlns:xs="http://www.w3.org/2001/XMLSchema-instance" schemaVersion="1.3" xs:noNamespaceSchemaLocation="CMSIS-SVD.xsd">
+  <name>Sis08dC2Membrane</name>
+  <version>1.0</version>
+  <description>SOS-09-B generated CMSIS-SVD description for Sis08dC2Membrane</description>
+  <addressUnitBits>8</addressUnitBits>
+  <width>32</width>
+  <size>32</size>
+  <resetValue>0x00000000</resetValue>
+  <resetMask>0xFFFFFFFF</resetMask>
+  <peripherals>
+    <peripheral>
+      <name>Sis08dC2Membrane</name>
+      <description>SOS-09-B channel block for Sis08dC2Membrane</description>
+      <baseAddress>0x40010000</baseAddress>
+      <addressBlock>
+        <offset>0x0</offset>
+        <size>0x00000014</size>
+        <usage>registers</usage>
+      </addressBlock>
+      <interrupt>
+        <name>membrane_irq</name>
+        <description>SOS-09-B placeholder vector for channel 'membrane_status'</description>
+        <value>0</value>
+      </interrupt>
+      <interrupt>
+        <name>transfer_irq</name>
+        <description>SOS-09-B placeholder vector for channel 'transfer_mailbox_notify'</description>
+        <value>1</value>
+      </interrupt>
+      <registers>
+        <register>
+          <name>membrane_command</name>
+          <description>SOS-09-B channel 'membrane_command' (kind=command, dir=sw→hw)</description>
+          <addressOffset>0x00000000</addressOffset>
+          <size>32</size>
+          <access>write-only</access>
+          <resetValue>0x00000000</resetValue>
+          <resetMask>0x0000FFFF</resetMask>
+          <fields>
+            <field>
+              <name>cmd</name>
+              <description>bit-field 'cmd' (access=WO)</description>
+              <bitOffset>0</bitOffset>
+              <bitWidth>8</bitWidth>
+              <access>write-only</access>
+            </field>
+            <field>
+              <name>seq</name>
+              <description>bit-field 'seq' (access=WO)</description>
+              <bitOffset>8</bitOffset>
+              <bitWidth>8</bitWidth>
+              <access>write-only</access>
+            </field>
+          </fields>
+        </register>
+        <register>
+          <name>membrane_status</name>
+          <description>SOS-09-B channel 'membrane_status' (kind=status, dir=hw→sw)</description>
+          <addressOffset>0x00000004</addressOffset>
+          <size>32</size>
+          <access>read-only</access>
+          <readAction>clear</readAction>
+          <resetValue>0x00000000</resetValue>
+          <resetMask>0x80FF00FF</resetMask>
+          <fields>
+            <field>
+              <name>state</name>
+              <description>bit-field 'state' (access=RO)</description>
+              <bitOffset>0</bitOffset>
+              <bitWidth>8</bitWidth>
+              <access>read-only</access>
+            </field>
+            <field>
+              <name>error_code</name>
+              <description>bit-field 'error_code' (access=RO)</description>
+              <bitOffset>16</bitOffset>
+              <bitWidth>8</bitWidth>
+              <access>read-only</access>
+              <readAction>clear</readAction>
+            </field>
+            <field>
+              <name>busy</name>
+              <description>bit-field 'busy' (access=RO)</description>
+              <bitOffset>31</bitOffset>
+              <bitWidth>1</bitWidth>
+              <access>read-only</access>
+            </field>
+          </fields>
+        </register>
+        <register>
+          <name>transfer_mailbox_data</name>
+          <description>SOS-09-B channel 'transfer_mailbox_data' (kind=queue, dir=bidirectional)</description>
+          <addressOffset>0x00000008</addressOffset>
+          <size>32</size>
+          <access>read-write</access>
+          <resetValue>0x00000000</resetValue>
+          <resetMask>0xFFFFFFFF</resetMask>
+        </register>
+        <register>
+          <name>transfer_mailbox_notify</name>
+          <description>SOS-09-B channel 'transfer_mailbox_notify' (kind=status, dir=hw→sw)</description>
+          <addressOffset>0x0000000C</addressOffset>
+          <size>32</size>
+          <access>read-only</access>
+          <readAction>clear</readAction>
+          <resetValue>0x00000000</resetValue>
+          <resetMask>0x00000F01</resetMask>
+          <fields>
+            <field>
+              <name>non_empty</name>
+              <description>bit-field 'non_empty' (access=RO)</description>
+              <bitOffset>0</bitOffset>
+              <bitWidth>1</bitWidth>
+              <access>read-only</access>
+              <readAction>clear</readAction>
+            </field>
+            <field>
+              <name>priority</name>
+              <description>bit-field 'priority' (access=RO)</description>
+              <bitOffset>8</bitOffset>
+              <bitWidth>4</bitWidth>
+              <access>read-only</access>
+            </field>
+          </fields>
+        </register>
+        <register>
+          <name>sram_window</name>
+          <description>SOS-09-B channel 'sram_window' (kind=shared, dir=bidirectional)</description>
+          <addressOffset>0x00000010</addressOffset>
+          <size>32</size>
+          <access>read-write</access>
+          <resetValue>0x00000000</resetValue>
+          <resetMask>0xFFFFFFFF</resetMask>
+        </register>
+      </registers>
+    </peripheral>
+  </peripherals>
+</device>

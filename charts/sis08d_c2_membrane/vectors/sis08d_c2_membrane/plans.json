@@ -1,0 +1,97 @@
+{
+  "chart_id": "sis08d_c2_membrane",
+  "plans": [
+    {
+      "address": 1073807360,
+      "channel_dir": "sw\u2192hw",
+      "channel_id": "8d000000-0000-4000-8000-000000000001",
+      "channel_kind": "command",
+      "channel_name": "membrane_command",
+      "channel_zone": "privileged",
+      "families": [
+        "initial_value",
+        "protection",
+        "side_effect",
+        "write_then_read"
+      ],
+      "irq": null,
+      "mutex": null,
+      "privilege_region": null,
+      "width_bits": 32
+    },
+    {
+      "address": 1073807364,
+      "channel_dir": "hw\u2192sw",
+      "channel_id": "8d000000-0000-4000-8000-000000000002",
+      "channel_kind": "status",
+      "channel_name": "membrane_status",
+      "channel_zone": "privileged",
+      "families": [
+        "atomicity",
+        "clear_on_read",
+        "initial_value",
+        "protection"
+      ],
+      "irq": "membrane_irq",
+      "mutex": null,
+      "privilege_region": null,
+      "width_bits": 32
+    },
+    {
+      "address": 1073807368,
+      "channel_dir": "bidirectional",
+      "channel_id": "8d000000-0000-4000-8000-000000000003",
+      "channel_kind": "queue",
+      "channel_name": "transfer_mailbox_data",
+      "channel_zone": "privileged",
+      "families": [
+        "atomicity",
+        "initial_value",
+        "protection",
+        "side_effect",
+        "write_then_read"
+      ],
+      "irq": null,
+      "mutex": null,
+      "privilege_region": null,
+      "width_bits": 32
+    },
+    {
+      "address": 1073807372,
+      "channel_dir": "hw\u2192sw",
+      "channel_id": "8d000000-0000-4000-8000-000000000004",
+      "channel_kind": "status",
+      "channel_name": "transfer_mailbox_notify",
+      "channel_zone": "privileged",
+      "families": [
+        "atomicity",
+        "clear_on_read",
+        "initial_value",
+        "protection"
+      ],
+      "irq": "transfer_irq",
+      "mutex": null,
+      "privilege_region": null,
+      "width_bits": 32
+    },
+    {
+      "address": 1073807376,
+      "channel_dir": "bidirectional",
+      "channel_id": "8d000000-0000-4000-8000-000000000005",
+      "channel_kind": "shared",
+      "channel_name": "sram_window",
+      "channel_zone": "privileged",
+      "families": [
+        "atomicity",
+        "initial_value",
+        "protection",
+        "side_effect",
+        "write_then_read"
+      ],
+      "irq": null,
+      "mutex": "sram_window_lock",
+      "privilege_region": null,
+      "width_bits": 32
+    }
+  ]
+}

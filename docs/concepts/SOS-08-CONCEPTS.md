@@ -296,6 +296,8 @@ A conforming SOS-08 umbrella ratification satisfies:
 | `docs/concepts/SOS-06-CONCEPTS.md` | Codegen-evaluation methodology; extended at HDL-target ratification. |
 | `rtos_kernel.scxml` | Bootstrap kernel chart; the worked-example HDL emission target candidate. |
 | `tools/sos-codegen/` | Codegen tool; gains HDL emit paths. |
+| `charts/sis08_first_slice/` | **Chart family (informative).** SIS-08B first hardware-slice precedent — memory-mapped FIFO membrane (queue + status + command + mailbox-notify + credit-budget channels). Exercises the SOS-09-A annotation grammar + SOS-09-B SVD emit + SOS-09-G MPU emit + SOS-09-F vector emit end-to-end. Authority: parent repo `docs/todo/streamz/statechart-orchestration/TODO-SIS-08B-FIRST-HARDWARE-SLICE.md`; emitter `tools/sos-codegen/sis08_first_slice.py`. |
+| `charts/sis08d_c2_membrane/` | **Chart family (informative).** SIS-08D C2-A SRAM-membrane proof — disco-analyzer-targeted single SRAM-window membrane (command + status + mailbox data + mailbox notify + SRAM-window channels). Validates the SIS-08D §4 membrane-contract requirements (ownership, byte layout, command/status/transfer surface, notification, vector suite reference) on the same SOS-09 emit pipeline as the SIS-08B precedent. Authority: parent repo `docs/todo/streamz/statechart-orchestration/TODO-SIS-08D-C2-IMPLEMENTATION-PLAN.md` §3 work package C2-A + §4; emitter `tools/sos-codegen/sis08d_c2_membrane.py`. Bespoke integration vector at `charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_c2a_membrane_contract.py` is the SIS-08D §5 step-1 interpreted-simulation evidence. |
 | Parent `CLAUDE.md` | Spec-Before-Code Planning Discipline. |
 
 ## 14. Unblocks

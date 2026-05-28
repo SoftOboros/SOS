@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SIS-08D C2-A SRAM-membrane proof chart.
+
+  Governs the smallest useful SOS-owned SRAM-membrane: one
+  command surface (sw→hw), one status surface (hw→sw), one
+  single-slot mailbox transfer surface (queue + status-notify),
+  and one bulk SRAM window (shared).
+
+  Per `docs/todo/streamz/statechart-orchestration/TODO-SIS-08D-C2-IMPLEMENTATION-PLAN.md`
+  §2 (C2 scope) and §4 (membrane contract requirements). The chart
+  itself is the spec; SOS-09-B / SOS-09-G / SOS-09-F emit the
+  CMSIS-SVD descriptor, the MPU tables, and the membrane-vector
+  suite from these annotations.
+
+  Channels (one per state, per SOS-09-A annotation parent context):
+
+    1. MEMBRANE_COMMAND       — kind=command, dir=sw→hw
+       Fields: cmd (bits 7:0, WO, side-effect-on-write),
+               seq (bits 15:8, WO, side-effect-on-write).
+       Command encoding (cmd value space):
+         0x00 = Idle
+         0x01 = Start
+         0x02 = Stop
+         0x03 = Drain
+
+    2. MEMBRANE_STATUS        — kind=status, dir=hw→sw, irq=membrane_irq
+       Fields: state (bits 7:0, RO),
+               error_code (bits 23:16, RO, clear-on-read),
+               busy (bit 31, RO).
+       Status encoding (state value space):
+         0x00 = Idle
+         0x01 = Busy
+         0x02 = Ready
+         0x03 = Error
+
+    3. TRANSFER_MAILBOX_DATA  — kind=queue, dir=bidirectional,
+                                atomicity=mutex-required
+       Single-slot mailbox per SIS-03 §4.10 (notification surface).
+       At most one in-flight transfer.
+
+    4. TRANSFER_MAILBOX_NOTIFY — kind=status, dir=hw→sw,
+                                 irq=transfer_irq
+       Fields: non_empty (bit 0, RO, clear-on-read),
+               priority (bits 11:8, RO).
+
+    5. SRAM_WINDOW            — kind=shared, dir=bidirectional,
+                                atomicity=mutex-required,
+                                mutex=sram_window_lock
+       Bulk transfer region; Normal-Cacheable-WB-WA by default
+       (SOS-09-G _DEFAULT_ATTR_BY_KIND['shared']).
+
+  UUID space `8d000000-...` distinguishes this chart from the SIS-08B
+  precedent (`8b000000-...`).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="MEMBRANE_COMMAND"
+       other_attributes='{"sos:mpu_background": "strict"}'>
+
+  <state id="MEMBRANE_COMMAND"
+         other_attributes='{
+           "sos:id": "8d000000-0000-4000-8000-000000000001",
+           "sos:name": "membrane_command",
+           "sos:kind": "command",
+           "sos:dir": "sw→hw",
+           "sos:zone": "privileged",
+           "sos:width": 32,
+           "sos:channel_group": "membrane",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "cmd", "start_bit": 0, "width": 8, "access": "WO", "side_effect": "side-effect-on-write", "reset_value": 0},
+               {"name": "seq", "start_bit": 8, "width": 8, "access": "WO", "side_effect": "side-effect-on-write", "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="membrane.status" target="MEMBRANE_STATUS"/>
+  </state>
+
+  <state id="MEMBRANE_STATUS"
+         other_attributes='{
+           "sos:id": "8d000000-0000-4000-8000-000000000002",
+           "sos:name": "membrane_status",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:zone": "privileged",
+           "sos:atomicity": "mutex-required",
+           "sos:width": 32,
+           "sos:irq": "membrane_irq",
+           "sos:channel_group": "membrane",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "state", "start_bit": 0, "width": 8, "access": "RO", "side_effect": null, "reset_value": 0},
+               {"name": "error_code", "start_bit": 16, "width": 8, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0},
+               {"name": "busy", "start_bit": 31, "width": 1, "access": "RO", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="transfer.mailbox" target="TRANSFER_MAILBOX_DATA"/>
+  </state>
+
+  <state id="TRANSFER_MAILBOX_DATA"
+         other_attributes='{
+           "sos:id": "8d000000-0000-4000-8000-000000000003",
+           "sos:name": "transfer_mailbox_data",
+           "sos:kind": "queue",
+           "sos:dir": "bidirectional",
+           "sos:zone": "privileged",
+           "sos:atomicity": "mutex-required",
+           "sos:width": 32,
+           "sos:channel_group": "mailbox"
+         }'>
+    <transition event="transfer.notify" target="TRANSFER_MAILBOX_NOTIFY"/>
+  </state>
+
+  <state id="TRANSFER_MAILBOX_NOTIFY"
+         other_attributes='{
+           "sos:id": "8d000000-0000-4000-8000-000000000004",
+           "sos:name": "transfer_mailbox_notify",
+           "sos:kind": "status",
+           "sos:dir": "hw→sw",
+           "sos:zone": "privileged",
+           "sos:atomicity": "mutex-required",
+           "sos:width": 32,
+           "sos:irq": "transfer_irq",
+           "sos:channel_group": "mailbox",
+           "sos:bit_layout": {
+             "fields": [
+               {"name": "non_empty", "start_bit": 0, "width": 1, "access": "RO", "side_effect": "clear-on-read", "reset_value": 0},
+               {"name": "priority", "start_bit": 8, "width": 4, "access": "RO", "side_effect": null, "reset_value": 0}
+             ]
+           }
+         }'>
+    <transition event="sram.window" target="SRAM_WINDOW"/>
+  </state>
+
+  <state id="SRAM_WINDOW"
+         other_attributes='{
+           "sos:id": "8d000000-0000-4000-8000-000000000005",
+           "sos:name": "sram_window",
+           "sos:kind": "shared",
+           "sos:dir": "bidirectional",
+           "sos:zone": "privileged",
+           "sos:atomicity": "mutex-required",
+           "sos:mutex": "sram_window_lock",
+           "sos:width": 32,
+           "sos:channel_group": "sram"
+         }'>
+    <transition event="membrane.command" target="MEMBRANE_COMMAND"/>
+  </state>
+
+</scxml>

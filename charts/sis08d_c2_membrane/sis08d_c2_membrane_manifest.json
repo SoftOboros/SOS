@@ -1,0 +1,124 @@
+{
+  "backend": "hdl-sos",
+  "baseAddress": "0x40010000",
+  "channels": [
+    {
+      "dir": "sw\u2192hw",
+      "id": "8d000000-0000-4000-8000-000000000001",
+      "irq": null,
+      "kind": "command",
+      "mutex": null,
+      "name": "membrane_command",
+      "width": 32,
+      "zone": "privileged"
+    },
+    {
+      "dir": "hw\u2192sw",
+      "id": "8d000000-0000-4000-8000-000000000002",
+      "irq": "membrane_irq",
+      "kind": "status",
+      "mutex": null,
+      "name": "membrane_status",
+      "width": 32,
+      "zone": "privileged"
+    },
+    {
+      "dir": "bidirectional",
+      "id": "8d000000-0000-4000-8000-000000000003",
+      "irq": null,
+      "kind": "queue",
+      "mutex": null,
+      "name": "transfer_mailbox_data",
+      "width": 32,
+      "zone": "privileged"
+    },
+    {
+      "dir": "hw\u2192sw",
+      "id": "8d000000-0000-4000-8000-000000000004",
+      "irq": "transfer_irq",
+      "kind": "status",
+      "mutex": null,
+      "name": "transfer_mailbox_notify",
+      "width": 32,
+      "zone": "privileged"
+    },
+    {
+      "dir": "bidirectional",
+      "id": "8d000000-0000-4000-8000-000000000005",
+      "irq": null,
+      "kind": "shared",
+      "mutex": "sram_window_lock",
+      "name": "sram_window",
+      "width": 32,
+      "zone": "privileged"
+    }
+  ],
+  "chart": "charts/sis08d_c2_membrane/sis08d_c2_membrane.scxml",
+  "chartHash": "sha256:d64c2849a0699738f7291e9f8658fd2fbf6d3b06d3544e239973870dd0965fa3",
+  "descriptor": {
+    "contentHash": "sha256:26ef7be4b926b56cb7a2bb870952cf5f360ccf84dc404fb3310c505c738baed2",
+    "format": "cmsis-svd-1.3",
+    "path": "charts/sis08d_c2_membrane/sis08d_c2_membrane.svd"
+  },
+  "id": "sis08d-c2-membrane",
+  "mpu": {
+    "background": {
+      "c_define": "#define SOS_MPU_BACKGROUND_PRIVDEFENA 0",
+      "rust_const": "pub const SOS_MPU_BACKGROUND_PRIVDEFENA: bool = false;"
+    },
+    "c": "charts/sis08d_c2_membrane/sis08d_c2_membrane_mpu.c",
+    "rust": "charts/sis08d_c2_membrane/sis08d_c2_membrane_mpu.rs"
+  },
+  "placement": "sram-membrane",
+  "satisfies": [
+    "SIS-08D \u00a72 single SRAM-membrane proof",
+    "SIS-08D \u00a73 work package C2-A membrane contract",
+    "SIS-08D \u00a74 membrane-contract requirements (ownership, byte layout, command/status/transfer/notification)",
+    "SIS-08D \u00a75 step 1 interpreted-simulation evidence",
+    "SIS-08C \u00a77 second-hardware-slice selection rationale",
+    "SIS-03 \u00a74.10 mailbox notification semantics"
+  ],
+  "vectors": [
+    {
+      "contentHash": "sha256:007efece16db4a08b5e25c8f04ec08705dd848c077d9f05a1961c29dd26e8105",
+      "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/.uuid-cache.json"
+    },
+    {
+      "contentHash": "sha256:4c00a9ac69040f08fc658e4a69cbbb1b9f0f6acb8acc191abee13f60c30fc89d",
+      "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/conftest.py"
+    },
+    {
+      "contentHash": "sha256:7e6cb7c5a9dbc74ddde98cc9a2bcbffb1d98ca4356e20b8a8c179eb77eed7bc3",
+      "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/plans.json"
+    },
+    {
+      "contentHash": "sha256:73acb64984d53aa1cafb857a42fa37badae3b30bf202b028131d1dfc17f83175",
+      "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_atomicity.py"
+    },
+    {
+      "contentHash": "sha256:b5ae9b8060c63088bd14f94d3972046605842c203ebb36b45ba4368fc21c3629",
+      "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_c2a_membrane_contract.py"
+    },
+    {
+      "contentHash": "sha256:d3a8385c97785caeee61068e813f1e77199e3002eca9e4b81c81f6b7a9eed85a",
+      "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_clear_on_read.py"
+    },
+    {
+      "contentHash": "sha256:2fab57ac456f0b7510afd9215ef25f8a4415378ee6c3ebc5308f0ce7f9b3359f",
+      "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_initial_value.py"
+    },
+    {
+      "contentHash": "sha256:dcc03f67c3520f0456de335651dddf64ca87f02cd4db5cf72e7b692378658b0d",
+      "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_protection.py"
+    },
+    {
+      "contentHash": "sha256:0e290fea3ee6789cd39584c7430f7efcd6777b3b76c142a2885de482f129314b",
+      "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_side_effect.py"
+    },
+    {
+      "contentHash": "sha256:f74d9b50ef193e458f81d7c777b2fe01366b713f87e554935dff652e88369d55",
+      "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_write_then_read.py"
+    }
+  ],
+  "version": "0.1.0"
+}
