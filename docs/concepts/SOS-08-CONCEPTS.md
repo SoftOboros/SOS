@@ -296,9 +296,10 @@ A conforming SOS-08 umbrella ratification satisfies:
 | `docs/concepts/SOS-06-CONCEPTS.md` | Codegen-evaluation methodology; extended at HDL-target ratification. |
 | `rtos_kernel.scxml` | Bootstrap kernel chart; the worked-example HDL emission target candidate. |
 | `tools/sos-codegen/` | Codegen tool; gains HDL emit paths. |
-| `charts/sis08_first_slice/` | **Chart family (informative).** SIS-08B first hardware-slice precedent — memory-mapped FIFO membrane (queue + status + command + mailbox-notify + credit-budget channels). Exercises the SOS-09-A annotation grammar + SOS-09-B SVD emit + SOS-09-G MPU emit + SOS-09-F vector emit end-to-end. Authority: parent repo `docs/todo/streamz/statechart-orchestration/TODO-SIS-08B-FIRST-HARDWARE-SLICE.md`; emitter `tools/sos-codegen/sis08_first_slice.py`. |
-| `charts/sis08d_c2_membrane/` | **Chart family (informative).** SIS-08D C2-A SRAM-membrane proof — disco-analyzer-targeted single SRAM-window membrane (command + status + mailbox data + mailbox notify + SRAM-window channels). Validates the SIS-08D §4 membrane-contract requirements (ownership, byte layout, command/status/transfer surface, notification, vector suite reference) on the same SOS-09 emit pipeline as the SIS-08B precedent. Authority: parent repo `docs/todo/streamz/statechart-orchestration/TODO-SIS-08D-C2-IMPLEMENTATION-PLAN.md` §3 work package C2-A + §4; emitter `tools/sos-codegen/sis08d_c2_membrane.py`. Bespoke integration vector at `charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_c2a_membrane_contract.py` is the SIS-08D §5 step-1 interpreted-simulation evidence. |
+| `docs/concepts/SOS-08-CHART-REGISTRY.md` | **Chart-family registry (informative).** Per [SIS-08E PCDN-005][sis-08e-pcdn-005] ratification (parent repo, 2026-05-28), chart families consuming the SOS-08 + SOS-09 emit pipeline are registered in this dedicated SOS-authored doc rather than inline here. Historical SIS-08B (`charts/sis08_first_slice/`) and SIS-08D C2-A (`charts/sis08d_c2_membrane/`) rows have been migrated; future chart-family additions land via §2 amendments to the registry doc. |
 | Parent `CLAUDE.md` | Spec-Before-Code Planning Discipline. |
+
+[sis-08e-pcdn-005]: ../../../../../docs/todo/streamz/statechart-orchestration/TODO-SIS-08E-C3-PLAN.md
 
 ## 14. Unblocks
 
@@ -367,3 +368,18 @@ All eight sub-phases (SOS-08-A through SOS-08-H) ratified and implemented to wav
 - **Three sub-phase walkers** (SOS-08-E, SOS-08-F, SOS-08-G AnnotationWriter) carry by-construction invariant audits — emitted text violating the named INV-S-HDL-{E,F,G}-N invariants raises `InvariantAuditError` at codegen time rather than at downstream test compile/simulation time.
 
 Status: 🟢 **wave-1 conformance review complete**. SOS-08 umbrella wave-1 landing is closed; wave-2 work proceeds against an unambiguous spec / impl baseline. See the conformance doc §8 for the consolidated wave-2 candidate list.
+
+### 2026-05-28 — SIS-08E prerequisite: chart-family registry migrated to SOS-08-CHART-REGISTRY.md
+
+This amendment is a **prerequisite for the upcoming SIS-08E C3-A dispatch** in the parent repo. Per [SIS-08E PCDN-005][sis-08e-pcdn-005] ratification (parent repo, 2026-05-28), option (b) was selected: a dedicated SOS-authored chart-family registry doc rather than continuing the inline-row convention in this doc's §13.
+
+Changes landing in this commit:
+
+- **Migrated rows**: the SIS-08B (`charts/sis08_first_slice/`) and SIS-08D C2-A (`charts/sis08d_c2_membrane/`) informational chart-family rows have been moved out of §13 into the new [`SOS-08-CHART-REGISTRY.md`](./SOS-08-CHART-REGISTRY.md) §1. Row content is byte-faithful to the prior §13 entries.
+- **§13 pointer**: §13 retains its "Files cited" shape with a single pointer row to the registry doc replacing the two migrated chart-family rows.
+- **Future additions**: future chart-family rows (notably the 4–6 SIS-08E C3 membranes that motivated this migration) land via §2 amendments to `SOS-08-CHART-REGISTRY.md`, not inline in this doc's §13.
+- **Frozen-enumeration registration policy**: new rows in the registry are **Standards Action** (per the registry doc §0).
+
+This is a **documentation reorganization, not a spec change** — the migrated rows were informational (§13 is the "Files cited" section, not a normative section per §0). No normative behavior changes; INV-S-HDL-1..5, the §5 frozen decisions, and the §12 acceptance checklist are untouched.
+
+Status: 🟢 **wave-1 conformance review remains complete**. SIS-08E C3-A is unblocked on the registry side; the other named sequencing prerequisite (SOS-09-A §15 `sos:core` amendment per PCDN-SIS-08E-002) lands separately.
