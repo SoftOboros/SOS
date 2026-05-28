@@ -3,7 +3,7 @@
   "baseAddress": "0x40000000",
   "channels": [
     {
-      "dir": "bidirectional",
+      "dir": "hw\u2194sw",
       "id": "8b000000-0000-4000-8000-000000000001",
       "irq": null,
       "kind": "queue",
@@ -43,7 +43,7 @@
       "zone": "privileged"
     },
     {
-      "dir": "bidirectional",
+      "dir": "hw\u2194sw",
       "id": "8b000000-0000-4000-8000-000000000005",
       "irq": null,
       "kind": "shared",
@@ -54,9 +54,9 @@
     }
   ],
   "chart": "charts/sis08_first_slice/sis08_first_slice.scxml",
-  "chartHash": "sha256:4448a8881b32c863610393d849399ba41076e985c1dcb4fc29e16ef07721a722",
+  "chartHash": "sha256:3a7ae95ff27d1eecb9c9429f64f570e56166a2653f6f5026eb5125f7a2d6c06b",
   "descriptor": {
-    "contentHash": "sha256:3c61ce69cf836569ad7fd0cc1a8c33921ed26ef7cd4f52edd6ca22a3bf38ef69",
+    "contentHash": "sha256:2baa7bdf2d797e2b8259b34f46e0a5e86dc365a5c49141880423a0cb5787c4b9",
     "format": "cmsis-svd-1.3",
     "path": "charts/sis08_first_slice/sis08_first_slice.svd"
   },
@@ -91,7 +91,7 @@
       "path": "charts/sis08_first_slice/vectors/sis08_first_slice/conftest.py"
     },
     {
-      "contentHash": "sha256:8f2592d3f91bfab3f657ac8a53c3be51c4b5c9e81409a473d9a54548a1cf6999",
+      "contentHash": "sha256:caa9519b935ba716afc0245c79cad574567b0261f8094fdfc651b280758fbde7",
       "path": "charts/sis08_first_slice/vectors/sis08_first_slice/plans.json"
     },
     {

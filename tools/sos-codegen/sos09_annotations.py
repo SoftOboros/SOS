@@ -46,7 +46,10 @@ from typing import Any, Optional
 ALLOWED_KINDS: frozenset[str] = frozenset({"status", "command", "queue", "shared"})
 
 # Per umbrella §5.2 channel->primitive mapping (the dir values themselves).
-ALLOWED_DIRS: frozenset[str] = frozenset({"hw→sw", "sw→hw", "bidirectional"})
+# 2026-05-28 ERRATA-004: `bidirectional` retracted as a synonym for `hw↔sw`;
+# canonical SOS-09 §5.2 spelling is the arrow form. The retracted spelling
+# stays accepted for one release window to ease dependent-chart migration.
+ALLOWED_DIRS: frozenset[str] = frozenset({"hw→sw", "sw→hw", "hw↔sw", "bidirectional"})
 
 # Per umbrella §5.4.
 ALLOWED_ZONES: frozenset[str] = frozenset({"privileged", "unprivileged"})
@@ -60,12 +63,15 @@ _ATOMICITY_INPUT_TOKENS: frozenset[str] = frozenset(
 )
 _ATOMICITY_RESOLVED: frozenset[str] = frozenset({"atomic", "mutex-required"})
 
-# Per umbrella §5.2 (kind -> permitted dirs table).
+# Per umbrella §5.2 (kind -> permitted dirs table). Per ERRATA-004
+# (2026-05-28) `bidirectional` retracted as a synonym for `hw↔sw`; both
+# spellings accepted for one release window to ease dependent-chart
+# migration before the legacy spelling becomes a hard error.
 _KIND_DIR_MATRIX: dict[str, frozenset[str]] = {
     "status": frozenset({"hw→sw"}),
     "command": frozenset({"sw→hw"}),
-    "queue": frozenset({"hw→sw", "sw→hw", "bidirectional"}),
-    "shared": frozenset({"bidirectional"}),
+    "queue": frozenset({"hw→sw", "sw→hw", "hw↔sw", "bidirectional"}),
+    "shared": frozenset({"hw↔sw", "bidirectional"}),
 }
 
 # Per SOS-09-G §5.2 / PCDN-G-003.

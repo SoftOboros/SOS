@@ -90,7 +90,7 @@
         </register>
         <register>
           <name>transfer_mailbox_data</name>
-          <description>SOS-09-B channel 'transfer_mailbox_data' (kind=queue, dir=bidirectional)</description>
+          <description>SOS-09-B channel 'transfer_mailbox_data' (kind=queue, dir=hw↔sw)</description>
           <addressOffset>0x00000008</addressOffset>
           <size>32</size>
           <access>read-write</access>
@@ -126,7 +126,7 @@
         </register>
         <register>
           <name>sram_window</name>
-          <description>SOS-09-B channel 'sram_window' (kind=shared, dir=bidirectional)</description>
+          <description>SOS-09-B channel 'sram_window' (kind=shared, dir=hw↔sw)</description>
           <addressOffset>0x00000010</addressOffset>
           <size>32</size>
           <access>read-write</access>

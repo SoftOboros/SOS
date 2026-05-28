@@ -39,7 +39,7 @@
     },
     {
       "address": 1073807368,
-      "channel_dir": "bidirectional",
+      "channel_dir": "hw\u2194sw",
       "channel_id": "8d000000-0000-4000-8000-000000000003",
       "channel_kind": "queue",
       "channel_name": "transfer_mailbox_data",
@@ -76,7 +76,7 @@
     },
     {
       "address": 1073807376,
-      "channel_dir": "bidirectional",
+      "channel_dir": "hw\u2194sw",
       "channel_id": "8d000000-0000-4000-8000-000000000005",
       "channel_kind": "shared",
       "channel_name": "sram_window",

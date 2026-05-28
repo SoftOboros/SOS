@@ -3,7 +3,7 @@
   "plans": [
     {
       "address": 1073741824,
-      "channel_dir": "bidirectional",
+      "channel_dir": "hw\u2194sw",
       "channel_id": "8b000000-0000-4000-8000-000000000001",
       "channel_kind": "queue",
       "channel_name": "fifo_data",
@@ -76,7 +76,7 @@
     },
     {
       "address": 1073741840,
-      "channel_dir": "bidirectional",
+      "channel_dir": "hw\u2194sw",
       "channel_id": "8b000000-0000-4000-8000-000000000005",
       "channel_kind": "shared",
       "channel_name": "credit_budget",

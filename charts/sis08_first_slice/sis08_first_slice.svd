@@ -31,7 +31,7 @@
       <registers>
         <register>
           <name>fifo_data</name>
-          <description>SOS-09-B channel 'fifo_data' (kind=queue, dir=bidirectional)</description>
+          <description>SOS-09-B channel 'fifo_data' (kind=queue, dir=hw↔sw)</description>
           <addressOffset>0x00000000</addressOffset>
           <size>32</size>
           <access>read-write</access>
@@ -148,7 +148,7 @@
         </register>
         <register>
           <name>credit_budget</name>
-          <description>SOS-09-B channel 'credit_budget' (kind=shared, dir=bidirectional)</description>
+          <description>SOS-09-B channel 'credit_budget' (kind=shared, dir=hw↔sw)</description>
           <addressOffset>0x00000010</addressOffset>
           <size>32</size>
           <access>read-write</access>
