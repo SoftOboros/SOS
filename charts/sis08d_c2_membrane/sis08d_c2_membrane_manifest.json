@@ -69,7 +69,7 @@
     "c": "charts/sis08d_c2_membrane/sis08d_c2_membrane_mpu.c",
     "rust": "charts/sis08d_c2_membrane/sis08d_c2_membrane_mpu.rs"
   },
-  "placement": "sram-membrane",
+  "placement": "mmio-peripheral",
   "satisfies": [
     "SIS-08D \u00a72 single SRAM-membrane proof",
     "SIS-08D \u00a73 work package C2-A membrane contract",
@@ -96,7 +96,7 @@
       "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_atomicity.py"
     },
     {
-      "contentHash": "sha256:b5ae9b8060c63088bd14f94d3972046605842c203ebb36b45ba4368fc21c3629",
+      "contentHash": "sha256:937945b1e6bd5633589980b8b8935f244ccc23a04fcd9eff867147f211aeabaf",
       "path": "charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/test_c2a_membrane_contract.py"
     },
     {

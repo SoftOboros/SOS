@@ -327,7 +327,12 @@ def test_c2a_manifest_references_all_emitted_artifacts():
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["id"] == "sis08d-c2-membrane"
-    assert manifest["placement"] == "sram-membrane"
+    # Path B per EOQ-002-ERRATA-002 (2026-05-28): placement amended from
+    # "sram-membrane" to "mmio-peripheral" because the C2-A target
+    # access mechanism is memory-mapped IO, not memory-backed SRAM.
+    # The chart's semantic surface (shared region with command/status/
+    # transfer channels) is unchanged; only the access-mechanism tag is.
+    assert manifest["placement"] == "mmio-peripheral"
     assert manifest["descriptor"]["format"] == "cmsis-svd-1.3"
     assert manifest["descriptor"]["contentHash"].startswith("sha256:")
     assert manifest["chartHash"].startswith("sha256:")

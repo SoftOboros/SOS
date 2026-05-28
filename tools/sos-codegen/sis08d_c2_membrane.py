@@ -148,7 +148,14 @@ def emit_membrane(
         "chartHash": _sha256_file(chart),
         "baseAddress": f"0x{base_address:08X}",
         "backend": "hdl-sos",
-        "placement": "sram-membrane",
+        # 2026-05-28 Path B per EOQ-002-ERRATA-002: the chart's semantic
+        # surface is a shared memory region with command/status/transfer
+        # channels, but its target access mechanism is memory-mapped IO
+        # (the C2-A baseAddress 0x40010000 lands on STM32H747's APB2
+        # peripheral space; on a future FPGA-backed target the membrane
+        # is a custom-peripheral MMIO region). `mmio-peripheral` names
+        # the access mechanism explicitly per SOS-09-A §15 amendment.
+        "placement": "mmio-peripheral",
         "descriptor": {
             "format": "cmsis-svd-1.3",
             "path": _logical_artifact_path("sis08d_c2_membrane.svd"),
