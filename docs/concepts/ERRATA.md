@@ -172,6 +172,17 @@ This errata commit + the SOS-09-A §16 amendment that co-lands:
 - Umbrella canonical source: `docs/concepts/SOS-09-CONCEPTS.md` §5.2 — the three-row mapping table whose dir-column carries `{hw→sw, sw→hw, hw↔sw}` as the canonical value set.
 - This entry is filed and resolved at intake; no follow-up work owed.
 
+### 2026-05-28 — Chart-family migration + validator narrowing closure
+
+The 2026-05-27 ratification carved out a one-release migration window during which the SOS-09-A validator (`tools/sos-codegen/sos09_annotations.py`) accepted both `hw↔sw` and `bidirectional` in `ALLOWED_DIRS` / `_KIND_DIR_MATRIX`, so dependent charts could land their migration commits without simultaneous validator + chart edits. That window has now closed:
+
+- **Chart migration** — SOS submodule commit `9682b35` ("ERRATA-004 sweep: bidirectional → hw↔sw across both chart families") migrated `charts/sis08_first_slice/sis08_first_slice.scxml` and `charts/sis08d_c2_membrane/sis08d_c2_membrane.scxml` to the canonical `hw↔sw` spelling. Verification: `grep -rn 'bidirectional' charts/sis08_first_slice/ charts/sis08d_c2_membrane/` returns zero hits.
+- **Validator narrowing** — this errata follow-up commit removes the migration-window backstop from `tools/sos-codegen/sos09_annotations.py`. `ALLOWED_DIRS` is now `frozenset({"hw→sw", "sw→hw", "hw↔sw"})` and `_KIND_DIR_MATRIX` no longer admits `bidirectional` for either `queue` or `shared`. The validator now hard-errors on `bidirectional` with the §5.4(3) diagnostic `sos:dir value 'bidirectional' not in allowed set ['hw→sw', 'hw↔sw', 'sw→hw']`, mirroring §5.4(3) rule prose verbatim.
+- **Chart-family pytest** — `python3 -m pytest charts/sis08_first_slice/vectors/sis08_first_slice/` (22/22) and `python3 -m pytest charts/sis08d_c2_membrane/vectors/sis08d_c2_membrane/` (28/28) both pass against the narrowed validator. Narrowing is a no-op for the post-migration chart families by construction.
+- **Downstream test-suite migration** — `tools/sos-codegen/tests/test_sos09_annotations.py` plus several emitter test fixtures (`test_rust_hal_emit.py`, `test_transliterate_svd.py`, `test_c_hal_emit.py`, `test_regfile_emit.py`, `test_transliterate_mpu.py`, `test_mmio_emit.py`, `tests/fixtures/sos09_mpu_chart.scxml`) still construct fixtures with `dir="bidirectional"`. Those tests will fail against the narrowed validator and require a follow-up sweep to retarget every `bidirectional` literal to `hw↔sw`. The `mmio_emit.py` `_DIR_BIDIRECTIONAL` constant and `transliterate_regfile.py` per-channel docstrings carry the legacy spelling too. None of those surfaces are in the SOS-09-A validator's scope; they are downstream consumers that the ERRATA-004 closure unblocks. Status of this errata entry remains 🟢: the SOS-09-A surface (validator + §5.4(3) prose) is fully aligned with SOS-09 umbrella §5.2; the downstream sweep is a tracked follow-up, not a re-opening of this errata.
+
+Status: 🟢 (unchanged — this is closure of the migration-window backstop, not a new errata).
+
 ## ERRATA-005 — SOS-12 boundary-vector `kind` field plural/singular drift
 
 **Status:** 🟢 resolved

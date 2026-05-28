@@ -396,3 +396,21 @@ The other §5.4 rules are unchanged. The `sos:kind`, `sos:zone`, and `sos:atomic
 - SOS-01 §15 SCXML-LINT-CH-3 amendment (commit `4f33c1e`) — quotes the canonical arrow form; unaffected by this amendment.
 
 Status: 🟢 **ratified**. The §5.4(3) enumeration now mirrors SOS-09 §5.2 verbatim; `bidirectional` is retracted as a synonym across the SOS-09-A surface.
+
+### 2026-05-28 — ERRATA-004 follow-up: validator migration-window backstop removed (Ira)
+
+**Closure of the migration window.** The 2026-05-27 ERRATA-004 amendment retracted `bidirectional` as a synonym for `hw↔sw` in the §5.4(3) chart-author-facing rule text. The validator implementation at `tools/sos-codegen/sos09_annotations.py` carved out a one-release migration window during which both spellings remained accepted in `ALLOWED_DIRS` and the `_KIND_DIR_MATRIX` rows for `queue` and `shared`, so dependent charts could complete their migration without a simultaneous validator-and-chart edit collision. That window has now closed.
+
+**Chart-family migration landed.** SOS submodule commit `9682b35` ("ERRATA-004 sweep: bidirectional → hw↔sw across both chart families") migrated `charts/sis08_first_slice/sis08_first_slice.scxml` and `charts/sis08d_c2_membrane/sis08d_c2_membrane.scxml` to the canonical `hw↔sw` spelling. Both chart families' vector pytest suites pass against the narrowed validator (22/22 + 28/28 = 50/50).
+
+**Validator narrowing landed with this entry.** `ALLOWED_DIRS` is now `frozenset({"hw→sw", "sw→hw", "hw↔sw"})`; `_KIND_DIR_MATRIX["queue"] = frozenset({"hw→sw", "sw→hw", "hw↔sw"})`; `_KIND_DIR_MATRIX["shared"] = frozenset({"hw↔sw"})`. The migration-window backstop is removed; `bidirectional` is now a hard `Sos09AnnotationError` at the validator layer with the §5.4(3) diagnostic `sos:dir value 'bidirectional' not in allowed set ['hw→sw', 'hw↔sw', 'sw→hw']`, mirroring §5.4(3) rule prose verbatim.
+
+**Frozen-enumeration registration policy reaffirmed.** Re-introducing `bidirectional` as a synonym would now require a §15 amendment to SOS-09 umbrella §5.2 (Standards Action per the umbrella's registration-policy clause). This sub-phase carries no mutation rights for the `sos:dir` enum.
+
+**Cross-references.**
+
+- ERRATA-004 entry's 2026-05-28 closure subsection ("Chart-family migration + validator narrowing closure") — names the chart commit, the validator narrowing, and the downstream test-suite sweep that the closure unblocks.
+- Chart-migration commit: `9682b35` (SOS submodule webslinger).
+- Validator narrowing commit: this entry's landing commit.
+
+Status: 🟢 **closed**. The §5.4(3) prose and the validator implementation are now fully aligned; the migration-window backstop is gone.

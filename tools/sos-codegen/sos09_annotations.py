@@ -46,10 +46,14 @@ from typing import Any, Optional
 ALLOWED_KINDS: frozenset[str] = frozenset({"status", "command", "queue", "shared"})
 
 # Per umbrella §5.2 channel->primitive mapping (the dir values themselves).
-# 2026-05-28 ERRATA-004: `bidirectional` retracted as a synonym for `hw↔sw`;
-# canonical SOS-09 §5.2 spelling is the arrow form. The retracted spelling
-# stays accepted for one release window to ease dependent-chart migration.
-ALLOWED_DIRS: frozenset[str] = frozenset({"hw→sw", "sw→hw", "hw↔sw", "bidirectional"})
+# 2026-05-28 ERRATA-004 closure: `bidirectional` retracted as a synonym for
+# `hw↔sw`; canonical SOS-09 §5.2 spelling is the arrow form. The migration
+# window backstop that briefly accepted the legacy spelling has been removed
+# now that both chart families (sis08_first_slice, sis08d_c2_membrane) have
+# completed the migration to `hw↔sw` (SOS submodule commit 9682b35).
+# `bidirectional` is now a hard §5.4(3) error at the validator layer,
+# mirroring §5.4(3) rule prose verbatim.
+ALLOWED_DIRS: frozenset[str] = frozenset({"hw→sw", "sw→hw", "hw↔sw"})
 
 # Per umbrella §5.4.
 ALLOWED_ZONES: frozenset[str] = frozenset({"privileged", "unprivileged"})
@@ -63,15 +67,17 @@ _ATOMICITY_INPUT_TOKENS: frozenset[str] = frozenset(
 )
 _ATOMICITY_RESOLVED: frozenset[str] = frozenset({"atomic", "mutex-required"})
 
-# Per umbrella §5.2 (kind -> permitted dirs table). Per ERRATA-004
-# (2026-05-28) `bidirectional` retracted as a synonym for `hw↔sw`; both
-# spellings accepted for one release window to ease dependent-chart
-# migration before the legacy spelling becomes a hard error.
+# Per umbrella §5.2 (kind -> permitted dirs table). Per ERRATA-004 closure
+# (2026-05-28) `bidirectional` has been retracted as a synonym for `hw↔sw`
+# and is no longer accepted; the migration-window backstop is removed now
+# that both chart families have completed the migration. Adding the legacy
+# spelling back would require a §15 amendment to SOS-09 §5.2 (Standards
+# Action per the umbrella's registration-policy clause).
 _KIND_DIR_MATRIX: dict[str, frozenset[str]] = {
     "status": frozenset({"hw→sw"}),
     "command": frozenset({"sw→hw"}),
-    "queue": frozenset({"hw→sw", "sw→hw", "hw↔sw", "bidirectional"}),
-    "shared": frozenset({"hw↔sw", "bidirectional"}),
+    "queue": frozenset({"hw→sw", "sw→hw", "hw↔sw"}),
+    "shared": frozenset({"hw↔sw"}),
 }
 
 # Per SOS-09-G §5.2 / PCDN-G-003.
