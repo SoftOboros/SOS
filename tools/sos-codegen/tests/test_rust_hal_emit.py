@@ -118,7 +118,7 @@ def _command_channel(name: str, *, width: int = 32,
 
 def _queue_channel(name: str, *, n: int = 3) -> ChannelAnnotation:
     return ChannelAnnotation(
-        id=_uuid(n), name=name, kind="queue", dir="bidirectional",
+        id=_uuid(n), name=name, kind="queue", dir="hw↔sw",
         atomicity="atomic", width=32,
     )
 
@@ -127,7 +127,7 @@ def _shared_channel(name: str, *, n: int = 4,
                     zone: str = "privileged",
                     mpu_attr: str | None = None) -> ChannelAnnotation:
     return ChannelAnnotation(
-        id=_uuid(n), name=name, kind="shared", dir="bidirectional",
+        id=_uuid(n), name=name, kind="shared", dir="hw↔sw",
         atomicity="mutex-required", width=32, mutex="shared_lock",
         zone=zone, mpu_attr=mpu_attr,
     )

@@ -262,7 +262,7 @@ def test_shared_surface_hint_yields_shared_bidirectional():
     plans = plan_mmio(orch, chart_id="x")
     assert len(plans) == 1
     assert plans[0].sos_kind == "shared"
-    assert plans[0].sos_dir == "bidirectional"
+    assert plans[0].sos_dir == "hw↔sw"
     assert plans[0].sos_atomicity == "mutex-required"
 
 

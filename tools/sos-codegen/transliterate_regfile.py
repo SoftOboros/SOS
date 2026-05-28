@@ -208,7 +208,7 @@ class ChannelView:
     id: str                       # sos:id (UUID)
     name: str                     # SV identifier from sos:name
     kind: str                     # status / command / queue / shared
-    dir: str                      # hw→sw / sw→hw / bidirectional
+    dir: str                      # hw→sw / sw→hw / hw↔sw
     width: int                    # sos:width
     offset_bytes: int             # byte offset within peripheral
     index: int                    # 0-based doc-order index

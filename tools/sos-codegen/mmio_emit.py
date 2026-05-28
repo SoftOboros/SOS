@@ -121,10 +121,12 @@ _DEFAULT_MMIO_KIND: str = "notification"
 _HW_LANGS: frozenset[str] = frozenset({"vhdl", "systemverilog", "sv", "verilog"})
 
 # Direction grammar per SOS-09-A §5.2. The arrows are Unicode → because
-# the annotation parser stores them that way.
+# the annotation parser stores them that way. Per ERRATA-004 closure
+# (2026-05-28), the third value is `hw↔sw` — the word form
+# `bidirectional` was retracted as a synonym at the validator layer.
 _DIR_SW_TO_HW: str = "sw→hw"
 _DIR_HW_TO_SW: str = "hw→sw"
-_DIR_BIDIRECTIONAL: str = "bidirectional"
+_DIR_HW_SW_ARROW: str = "hw↔sw"
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +161,7 @@ class DerivedChannel:
     sos_id: str  # RFC 4122 canonical UUID
     sos_name: str  # SV identifier (per SOS-09-A §5.2)
     sos_kind: str  # one of {status, command, queue, shared}
-    sos_dir: str  # one of {sw→hw, hw→sw, bidirectional}
+    sos_dir: str  # one of {sw→hw, hw→sw, hw↔sw}
     sos_width: int  # default 32 per SOS-09-A §5.2
     sos_zone: str  # default "unprivileged" per task brief
     sos_atomicity: str  # "atomic" for cmd/status; "none" for queue/shared
@@ -213,7 +215,7 @@ def _infer_direction(
       - role="cmd"   : direction follows the event flow src->dst.
       - role="resp"  : response flows back, so reverse src->dst.
       - role="q"     : streaming; direction follows event flow.
-      - role="shared": always bidirectional (the shared register surface
+      - role="shared": always hw↔sw (the shared register surface
                        has multiple readers + writers).
 
     Software-piece sends to hardware-piece -> sw->hw.
@@ -225,7 +227,7 @@ def _infer_direction(
     we treat that as sw->hw too (the source side is the "active" master).
     """
     if channel_role == "shared":
-        return _DIR_BIDIRECTIONAL
+        return _DIR_HW_SW_ARROW
 
     # Determine event-flow direction first.
     src_hw = _is_hw_lang(src_piece.lang)

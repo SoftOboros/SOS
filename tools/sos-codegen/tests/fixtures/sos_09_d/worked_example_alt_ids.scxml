@@ -74,7 +74,7 @@
              "sos:id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
              "sos:name": "io_queue",
              "sos:kind": "queue",
-             "sos:dir": "bidirectional",
+             "sos:dir": "hw↔sw",
              "sos:width": 32
            }'/>
 
@@ -83,7 +83,7 @@
              "sos:id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
              "sos:name": "shared_block",
              "sos:kind": "shared",
-             "sos:dir": "bidirectional",
+             "sos:dir": "hw↔sw",
              "sos:width": 32,
              "sos:zone": "unprivileged",
              "sos:mutex": "shared_lock"

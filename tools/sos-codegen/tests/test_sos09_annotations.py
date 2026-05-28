@@ -105,7 +105,7 @@ def _minimal_shared(uuid: str = UUID_C, name: str = "shr") -> dict:
         "sos:id": uuid,
         "sos:name": name,
         "sos:kind": "shared",
-        "sos:dir": "bidirectional",
+        "sos:dir": "hw↔sw",
     }
 
 
@@ -114,7 +114,7 @@ def _minimal_queue(uuid: str = UUID_D, name: str = "q") -> dict:
         "sos:id": uuid,
         "sos:name": name,
         "sos:kind": "queue",
-        "sos:dir": "bidirectional",
+        "sos:dir": "hw↔sw",
     }
 
 
@@ -144,9 +144,9 @@ def test_smoke_chart_kinds_and_dirs_resolved():
     assert by_name["tx_command"].kind == "command"
     assert by_name["tx_command"].dir == "sw→hw"
     assert by_name["io_queue"].kind == "queue"
-    assert by_name["io_queue"].dir == "bidirectional"
+    assert by_name["io_queue"].dir == "hw↔sw"
     assert by_name["shared_block"].kind == "shared"
-    assert by_name["shared_block"].dir == "bidirectional"
+    assert by_name["shared_block"].dir == "hw↔sw"
 
 
 def test_smoke_chart_status_has_irq_and_bit_layout():
@@ -443,8 +443,14 @@ def test_status_with_sw_to_hw_dir_raises():
         parse_chart_annotations(chart)
 
 
-def test_command_with_bidirectional_dir_raises():
-    attrs = {**_minimal_command(), "sos:dir": "bidirectional"}
+def test_command_with_bidir_dir_raises():
+    # Post-ERRATA-004 closure (validator narrowed 2026-05-28): the legacy
+    # `bidirectional` spelling is now a §5.4(3) value-not-in-enum hard
+    # error, fired BEFORE §5.4(4) kind/dir-matrix consistency. To preserve
+    # this test's original intent (the cross-attribute consistency rule),
+    # we pick `hw↔sw` here — still in ALLOWED_DIRS but not in
+    # _KIND_DIR_MATRIX["command"], so §5.4(4) fires as before.
+    attrs = {**_minimal_command(), "sos:dir": "hw↔sw"}
     chart = _chart([_state("S1", attrs)])
     with pytest.raises(Sos09AnnotationError, match="§5.4\\(4\\)"):
         parse_chart_annotations(chart)

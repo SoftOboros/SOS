@@ -57,22 +57,22 @@
     <transition event="done" target="QUEUE_REGION"/>
   </state>
 
-  <!-- Channel 3: queue / bidirectional / no bit_layout / width=16. -->
+  <!-- Channel 3: queue / hw↔sw / no bit_layout / width=16. -->
   <parallel id="QUEUE_REGION"
             other_attributes='{
               "sos:id": "33333333-3333-4333-8333-333333333333",
               "sos:name": "io_queue",
               "sos:kind": "queue",
-              "sos:dir": "bidirectional",
+              "sos:dir": "hw↔sw",
               "sos:width": 16
             }'>
-    <!-- Channel 4: shared / bidirectional / mutex. -->
+    <!-- Channel 4: shared / hw↔sw / mutex. -->
     <state id="SHARED_LEAF"
            other_attributes='{
              "sos:id": "44444444-4444-4444-8444-444444444444",
              "sos:name": "shared_block",
              "sos:kind": "shared",
-             "sos:dir": "bidirectional",
+             "sos:dir": "hw↔sw",
              "sos:mutex": "shared_lock"
            }'/>
 

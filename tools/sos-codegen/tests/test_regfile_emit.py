@@ -151,7 +151,7 @@ def _command(uuid: str, name: str, *, width: int = 32,
 
 
 def _queue(uuid: str, name: str, *, width: int = 32,
-           direction: str = "bidirectional",
+           direction: str = "hw↔sw",
            privilege_region: str | None = None) -> dict:
     out: dict = {
         "sos:id": uuid,
@@ -172,7 +172,7 @@ def _shared(uuid: str, name: str, *, width: int = 32,
         "sos:id": uuid,
         "sos:name": name,
         "sos:kind": "shared",
-        "sos:dir": "bidirectional",
+        "sos:dir": "hw↔sw",
         "sos:width": width,
     }
     if mutex is not None:

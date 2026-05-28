@@ -58,13 +58,13 @@
     <transition event="finish" target="QUEUE_REGION"/>
   </state>
 
-  <!-- queue channel on <parallel>: bidirectional. -->
+  <!-- queue channel on <parallel>: hw↔sw. -->
   <parallel id="QUEUE_REGION"
             other_attributes='{
               "sos:id": "550e8400-e29b-41d4-a716-446655440002",
               "sos:name": "io_queue",
               "sos:kind": "queue",
-              "sos:dir": "bidirectional",
+              "sos:dir": "hw↔sw",
               "sos:width": 16
             }'>
     <!-- shared channel with sos:mutex + SOS-09-G sos:mpu_attr override. -->
@@ -73,7 +73,7 @@
              "sos:id": "550e8400-e29b-41d4-a716-446655440003",
              "sos:name": "shared_block",
              "sos:kind": "shared",
-             "sos:dir": "bidirectional",
+             "sos:dir": "hw↔sw",
              "sos:mutex": "shared_lock",
              "sos:mpu_attr": "cacheable"
            }'/>
