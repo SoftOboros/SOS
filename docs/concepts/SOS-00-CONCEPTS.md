@@ -459,6 +459,8 @@ Each invariant has a stable ID. Amendments require a §15 entry and SHOULD cite 
 
 The sibling subrepo's FreeRTOS-Kernel sources are **NOT** crawled by SOS-side work. Cross-pollination ratifies via explicit §15 citation with a named delta. The `analyzer-rtos` crate's existence does NOT obligate SOS to match its API surface.
 
+**Cross-pollination citation (Amendment 006, 2026-06-01).** The sibling disco-analyzer DAA-08 initiative is the motivating consumer for the **AMP medium** newly admitted in §11 (SOS-14). DAA-08 holds the FreeRTOS analyzer as its *behavioural reference* and asks SOS to host the analyzer's managed core (CM7) while the foreign core (CM4) stays bare-metal. SOS satisfies that via an above-kernel medium (SOS-14), not by matching FreeRTOS's API; DAA's requirements are cited from its published registry (DAA-08 §7 REQ-SOS-6/8), and no DAA/FreeRTOS source is crawled (INV-S1/S10 intact).
+
 ## 11. Non-goals
 
 Frozen non-goals for SOS-00 through SOS-06 (initial scope). Each may be lifted via a §15 amendment.
@@ -470,7 +472,8 @@ Frozen non-goals for SOS-00 through SOS-06 (initial scope). Each may be lifted v
 - **Memory allocator.** Static pools only (INV-S12).
 - **Stream / message-buffer streaming variants.** Fixed-size queue payloads only.
 - **Tickless idle.** Tick fires at `SOS_TICK_HZ` always.
-- **SMP / core affinity.** One statechart per port (INV-S14). The disco-analyzer's CM4 is not in scope; SOS runs on CM7 only at v1.
+- **SMP / inter-kernel scheduling.** One statechart per port (INV-S14); SOS does not schedule across cores, and two SOS kernels do not coordinate at the kernel level. This stays a non-goal.
+- **AMP medium (newly in scope, SOS-14 — Amendment 006, 2026-06-01).** Binding *one* SOS kernel (the managed core) to a *bare-metal* sibling (the foreign core) via the SOS-10 `shared-memory` medium + an HSEM **doorbell** is in scope as an **above-kernel medium**. The foreign core is not an SOS kernel; the doorbell is a standard kernel-aware `*_from_isr` source (§6.1, INV-S3). **INV-S14 is not relaxed** — the managed core still hosts exactly one statechart. See SOS-14-CONCEPTS.md.
 - **Heap-based task creation.** Task IDs are pre-allocated TCB slot indices; `task.create` activates a dormant slot.
 - **Dynamic priority change.** A task's priority is set at create time and constant thereafter at v1. Reserved for a future amendment.
 - **Multiple statechart instances per port.** Per INV-S14, one statechart per port.
@@ -618,3 +621,16 @@ What does NOT change with this amendment:
 Cross-references: [`SOS-07-CONCEPTS.md`](./SOS-07-CONCEPTS.md) (this amendment's authoritative artifact); [`SOS-ROADMAP-07-PLUS.md`](./SOS-ROADMAP-07-PLUS.md) (informative roadmap the EOQ batch resolution lived in); parent `CLAUDE.md` ("Spec-Before-Code Planning Discipline"; "Standards integration: authority boundary declarations").
 
 Status: rename ratified through SOS-07; SOS-00's foundational role unchanged.
+
+### 2026-06-01 — Amendment 006: admit the AMP medium (SOS-14 prerequisite) (Ira)
+
+Resolves **PCDN-SOS-14-004** (the §11 amendment lands first, in its own commit, before SOS-14 ratifies — per the spec-before-code discipline for touching frozen non-goal content).
+
+§11 change: the single "**SMP / core affinity**" non-goal line is replaced by two lines —
+"**SMP / inter-kernel scheduling**" (stays a non-goal: SOS does not schedule across cores; two SOS kernels do not coordinate at the kernel level) and "**AMP medium (newly in scope, SOS-14)**" (binding *one* SOS kernel on a managed core to a *bare-metal* foreign core via the SOS-10 `shared-memory` medium + an HSEM doorbell, as an above-kernel medium). The "Multiple statechart instances per port" and "Inter-port communication" non-goals are unchanged and still apply to the two-SOS-kernel / two-board cases.
+
+§10 change: a cross-pollination citation records that the sibling DAA-08 initiative is the motivating consumer of the AMP medium, cited from DAA-08 §7 (REQ-SOS-6/8) with no DAA/FreeRTOS source crawled.
+
+What does NOT change: **INV-S14 is preserved unchanged** — the managed core still hosts exactly one statechart; the foreign core is not an SOS kernel. No frozen enum changes. No port behaviour changes here (SOS-14 owns the medium spec; its emitter/port bindings land as follow-up commits). All §1–§9 content and INV-S1..S15 stay valid.
+
+Cross-references: [`SOS-14-CONCEPTS.md`](./SOS-14-CONCEPTS.md) (the AMP medium spec this amendment unblocks); §6.1 / INV-S3 (the `*_from_isr` admissibility the doorbell binds to); §9 INV-S14 (preserved). Status: 🟢 ratified 2026-06-01.
