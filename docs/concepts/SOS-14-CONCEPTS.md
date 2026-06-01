@@ -1,11 +1,12 @@
 # SOS-14 — AMP Shared-Memory + HSEM Doorbell Medium
 
-**Status:** 🟡 **drafted 2026-06-01** — **proposed by the sibling disco-analyzer DAA-08
-initiative** (cross-pollination per SOS-00 §10 explicit-citation rule). Open PCDNs pending;
-awaiting SOS-owner ratification. Per the spec-before-code discipline, no implementation lands
-until this doc carries a §15 ratification entry. The motivating consumer's requirements
-(REQ-SOS-6/8) are cited in §2; the SOS-side design here generalizes beyond that one product —
-SOS owns the abstraction.
+**Status:** 🟢 **Ratified 2026-06-01** (owner: Ira). All four PCDNs resolved (§15);
+INV-S-AMP-1..5 (§8) and the §5 enums + `<sos:doorbell>` annotation are binding. Prerequisite
+**SOS-00 Amendment 006** (the §11 AMP-medium admission) landed first in its own commit, per
+PCDN-SOS-14-004. **Proposed by the sibling disco-analyzer DAA-08 initiative** (cross-pollination
+per SOS-00 §10 explicit-citation rule); the motivating consumer's requirements (REQ-SOS-6/8) are
+cited in §2, and the abstraction generalizes beyond that one product — SOS owns it. Implementation
+(the AMP-medium emitter + port doorbell binding, §14) lands as follow-up commits.
 
 ## 0. Authority policy
 
@@ -239,6 +240,27 @@ Cross-initiative (cited, not crawled): disco-analyzer `DAA-08-CONCEPTS.md §7` (
 
 ## 15. Change log
 
+- **2026-06-01 (ratification)** — SOS-14 **ratified** by owner (Ira). All four PCDNs resolved:
+  - **PCDN-SOS-14-001 (doorbell→kernel-action lowering set):** resolved = **both** `sem.give_from_isr`
+    *and* `queue.send_from_isr` are valid lowering targets (§5.2). A doorbell declares which one it
+    lowers to. Rationale: the motivating consumer's parity path uses the semaphore wake; the
+    pointer/index-handoff path uses the queue; the general medium supports both.
+  - **PCDN-SOS-14-002 (shared-region first-class shapes):** resolved = **both** a single ring *and*
+    a mailbox + refcounted-pool are first-class shared-region shapes (§6.3). Rationale: a real AMP
+    consumer needs the latest-value mailbox *and* a multi-slot refcounted pool (the disco analyzer's
+    audio mailbox + LineIn block pool are the worked example); restricting to one ring would force
+    hand-rolling the other.
+  - **PCDN-SOS-14-003 (fall-behind drop policy):** resolved = **drop-newest is the default**,
+    per-channel-overridable (drop-oldest | block also selectable). Rationale: drop-newest matches the
+    established consumer fall-behind behaviour (DAA-03-INV-D17) and is the safe default for a
+    latest-value mailbox; the choice is declared on the channel, surfaced in telemetry (§6.5).
+  - **PCDN-SOS-14-004 (§11 amendment placement):** resolved = the SOS-00 §11 amendment lands
+    **first, in its own commit** (SOS-00 §15 Amendment 006, 2026-06-01), which SOS-14 then cites.
+    Done — Amendment 006 preceded this ratification.
+
+  INV-S-AMP-1..5, the §5 enums (`DoorbellDirection` Standards Action; `<sos:doorbell>` Specification
+  Required), the §6 design, and the §7 reconciliation (INV-S14 preserved) are binding. Implementation
+  (§14 emitter + port binding) is now unblocked.
 - **2026-06-01 (drafting)** — SOS-14 drafted on branch `daa08-amp-proposals`, **proposed by the
   sibling DAA-08 initiative** (REQ-SOS-6/8). Defines the AMP pair (managed SOS core + bare-metal
   foreign core), the HSEM **doorbell** as a baremetal binding onto the SOS `*_from_isr` family
@@ -246,9 +268,4 @@ Cross-initiative (cited, not crawled): disco-analyzer `DAA-08-CONCEPTS.md §7` (
   region** as the baremetal realisation of SOS-10's `shared-memory` medium (extension, not a new
   medium-enum value — INV-S10 honoured). §7 proposes the SOS-00 §11 amendment distinguishing
   "SMP / inter-kernel scheduling" (stays non-goal) from "AMP medium" (newly in scope), with
-  **INV-S14 preserved unchanged**. §8 proposes INV-S-AMP-1..5. **Open PCDNs to resolve before
-  ratification:** PCDN-SOS-14-001 (doorbell→kernel-action lowering set: sem-only vs sem+queue),
-  PCDN-SOS-14-002 (shared-region: single ring vs mailbox+refcounted-pool as first-class), 
-  PCDN-SOS-14-003 (drop policy on fall-behind: drop-newest vs drop-oldest vs block), 
-  PCDN-SOS-14-004 (whether the SOS-00 §11 amendment is SOS-14-local or a SOS-00 §15 amendment
-  landing first). Awaiting SOS-owner ratification.
+  **INV-S14 preserved unchanged**. §8 proposes INV-S-AMP-1..5.

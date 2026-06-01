@@ -1,9 +1,9 @@
 # SOS-04-A — Declarative Port-Config Surface & Per-Task Stack Placement
 
-**Status:** 🟡 **drafted 2026-06-01** — **proposed by the sibling disco-analyzer DAA-08
-initiative** (REQ-SOS-3/4), and the realisation of SOS-04's pre-existing future-amendment marker
-**FAM-04-A (configurable stacks)**. Open PCDNs pending; awaiting SOS-owner ratification. No
-implementation lands until this doc carries a §15 ratification entry.
+**Status:** 🟢 **Ratified 2026-06-01** (owner: Ira). PCDN-SOS-04-A-001 schema **ACCEPTED**; all
+three PCDNs resolved (§15). Discharges SOS-04's **FAM-04-A (configurable stacks)** marker. **Proposed
+by the sibling disco-analyzer DAA-08 initiative** (REQ-SOS-3/4). Implementation (the `port_config`
+parser + Rust/C emitters) lands as follow-up commits.
 
 ## 0. Authority policy
 
@@ -140,14 +140,25 @@ tick), `SOS-09-A-CONCEPTS.md` (core-affinity / `sos:core` + placement enum), `SO
 
 ## 15. Change log
 
+- **2026-06-01 (ratification)** — SOS-04-A **ratified** by owner (Ira). The §4.1 `port_config`
+  schema is **ACCEPTED** (PCDN-SOS-04-A-001). All three PCDNs resolved:
+  - **PCDN-SOS-04-A-001 (carrier + schema):** resolved = **schema accepted**; carrier = the chart
+    `<sos:task_config>` annotation is the **authoritative source** (INV-SOS-A chart-as-source), and
+    the emitter MAY emit a port-local manifest as a *generated* lowered intermediate (never
+    hand-authored). The §4.1 field set is frozen as written.
+  - **PCDN-SOS-04-A-002 (`core`/AMP-affinity fields):** resolved = **deferred out of SOS-04-A**. The
+    task table stays single-kernel (the managed core's tasks); per-task core affinity is owned by
+    SOS-09-A's `sos:core` / `ALLOWED_CORES` surface and consumed by SOS-14, not duplicated here.
+  - **PCDN-SOS-04-A-003 (idle-task declaration):** resolved = **implicit by default** (SOS-00 boot
+    region reserves task 0 / prio 0), with an optional explicit idle row permitted for ports that
+    need a custom idle entry.
+
+  SOS-04's **FAM-04-A is discharged** by this phase (cross-referenced in SOS-04 §15). Schema-field
+  registration is Specification Required. Implementation (parser + SOS-04 Rust / SOS-05 C emitters,
+  §6) is now unblocked; the DAA-08 §2 task table is the reference worked example.
 - **2026-06-01 (drafting)** — SOS-04-A drafted on branch `daa08-amp-proposals`, **proposed by the
   sibling DAA-08 initiative** (REQ-SOS-3/4) and realising SOS-04's **FAM-04-A** marker. Defines a
   carrier-independent `port_config` schema (task table with per-task `stack_words` + `stack_region`,
   sem/queue tables, `tick_hz`/`kernel_stack_words`), lowering to both the SOS-04 Rust and SOS-05 C
   ports, with `.task_stacks` as the backward-compatible default region and a missing-region
-  compile-time error. §4.4 adds the optional SOS-09 protection-composition seam. Registration of
-  schema fields is Specification Required (instances within frozen kernel pools; no SOS-00
-  amendment). **Open PCDNs:** PCDN-SOS-04-A-001 (carrier: chart annotation vs port manifest vs
-  both), PCDN-SOS-04-A-002 (whether `core`/AMP-affinity fields land here or wait for SOS-14),
-  PCDN-SOS-04-A-003 (idle-task declaration: implicit vs explicit row). Awaiting SOS-owner
-  ratification.
+  compile-time error. §4.4 adds the optional SOS-09 protection-composition seam.
