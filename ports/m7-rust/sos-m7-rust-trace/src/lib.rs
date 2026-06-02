@@ -60,7 +60,7 @@
 #![no_std]
 #![warn(missing_docs)]
 
-use core::fmt::{self, Write};
+type WriteResult = Result<(), ()>;
 
 // ============================================================================
 // Trace-input types — pure-data mirror of the trace-relevant `Datamodel`
@@ -72,7 +72,7 @@ use core::fmt::{self, Write};
 /// here so the trace crate is independent of `sos-m7-rust::kernel`.
 /// Discriminants MUST match `sos_sim::datamodel::TaskState` exactly
 /// (INV-S-PORT-9).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TaskState {
     /// `ST_DORMANT`.
@@ -95,7 +95,7 @@ pub enum TaskState {
 
 /// On-wire discriminants for `ReturnCode` per SOS-00 §5.2. Mirrors
 /// `sos_sim::datamodel::ReturnCode` byte-for-byte.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(i8)]
 pub enum ReturnCode {
     /// `RC_OK`.
@@ -115,7 +115,7 @@ pub enum ReturnCode {
 pub type TaskId = i16;
 
 /// On-wire form of `tcb[i].msg` per SOS-00 §5.6 Amendment 004.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Msg {
     /// `null` on the wire.
     Null,
@@ -126,7 +126,7 @@ pub enum Msg {
 }
 
 /// One TCB snapshot — the trace-relevant subset of `kernel::Tcb`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct TcbView {
     /// `tcb[i].id` (widened to `i32` on the wire).
     pub id: TaskId,
@@ -144,7 +144,7 @@ pub struct TcbView {
 
 /// One semaphore snapshot — `valid==false` collapses to `{"valid":false}`
 /// short form on the wire (`waiters` ignored when invalid).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct SemView<'a> {
     /// `sems[s].valid`.
     pub valid: bool,
@@ -159,7 +159,7 @@ pub struct SemView<'a> {
 
 /// One queue snapshot — symmetric to [`SemView`]; `valid==false`
 /// collapses to short form.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct QueueView<'a> {
     /// `queues[q].valid`.
     pub valid: bool,
@@ -185,7 +185,7 @@ pub type ReadyView<'a> = &'a [TaskId];
 /// Field order mirrors SOS-02 §7.1 for documentary clarity, but the
 /// writer does not rely on it — the JSON emission order is the writer's
 /// responsibility.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct TraceInput<'a> {
     /// `dm.current` (`-1` when no task runs).
     pub current: TaskId,
@@ -214,7 +214,7 @@ pub struct TraceInput<'a> {
 // ============================================================================
 
 /// Internal write buffer wrapper. Tracks the write cursor; returns
-/// `fmt::Error` once the caller-supplied buffer is full so the rest of
+/// an error once the caller-supplied buffer is full so the rest of
 /// the writer short-circuits via `?` propagation.
 struct Writer<'a> {
     buf: &'a mut [u8],
@@ -235,7 +235,7 @@ impl<'a> Writer<'a> {
         }
     }
 
-    fn push_bytes(&mut self, src: &[u8]) -> fmt::Result {
+    fn push_bytes(&mut self, src: &[u8]) -> WriteResult {
         let remaining = self.buf.len() - self.pos;
         if src.len() > remaining {
             // Best-effort: copy what we can so the returned `pos` is
@@ -243,17 +243,46 @@ impl<'a> Writer<'a> {
             self.buf[self.pos..].copy_from_slice(&src[..remaining]);
             self.pos = self.buf.len();
             self.overflowed = true;
-            return Err(fmt::Error);
+            return Err(());
         }
         self.buf[self.pos..self.pos + src.len()].copy_from_slice(src);
         self.pos += src.len();
         Ok(())
     }
-}
 
-impl<'a> Write for Writer<'a> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
+    fn write_str(&mut self, s: &str) -> WriteResult {
         self.push_bytes(s.as_bytes())
+    }
+
+    fn write_u64(&mut self, mut n: u64) -> WriteResult {
+        let mut digits = [0u8; 20];
+        let mut pos = digits.len();
+
+        if n == 0 {
+            return self.push_bytes(b"0");
+        }
+
+        while n > 0 {
+            pos -= 1;
+            digits[pos] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+
+        self.push_bytes(&digits[pos..])
+    }
+
+    fn write_i64(&mut self, n: i64) -> WriteResult {
+        if n < 0 {
+            self.push_bytes(b"-")?;
+            let magnitude = if n == i64::MIN {
+                1u64 << 63
+            } else {
+                (-n) as u64
+            };
+            self.write_u64(magnitude)
+        } else {
+            self.write_u64(n as u64)
+        }
     }
 }
 
@@ -293,21 +322,21 @@ fn emit_record(
     w: &mut Writer<'_>,
     input: &TraceInput<'_>,
     after_input_idx: i64,
-) -> fmt::Result {
+) -> WriteResult {
     w.write_str("{\"after_input_idx\":")?;
-    write!(w, "{}", after_input_idx)?;
+    w.write_i64(after_input_idx)?;
 
     w.write_str(",\"current\":")?;
     // SOS-02 §7.2 wire-widening: `TaskId` (i16) → i32 on the wire.
     // `core::fmt::Display` on i32 / i16 emits the same digits for any
     // i16 value, so the cast is byte-equivalent.
-    write!(w, "{}", input.current as i32)?;
+    w.write_i64(input.current as i64)?;
 
     w.write_str(",\"tick_count\":")?;
-    write!(w, "{}", input.tick_count)?;
+    w.write_i64(input.tick_count)?;
 
     w.write_str(",\"rc\":")?;
-    write!(w, "{}", input.rc as i8)?;
+    w.write_i64(input.rc as i8 as i64)?;
 
     w.write_str(",\"tcb\":[")?;
     for (i, tcb) in input.tcb.iter().enumerate() {
@@ -346,35 +375,35 @@ fn emit_record(
     w.write_str("]")?;
 
     w.write_str(",\"irq_nest\":")?;
-    write!(w, "{}", input.irq_nest)?;
+    w.write_u64(input.irq_nest as u64)?;
 
     w.write_str(",\"sched_lock\":")?;
-    write!(w, "{}", input.sched_lock)?;
+    w.write_u64(input.sched_lock as u64)?;
 
     w.write_str(",\"pend_ticks\":")?;
-    write!(w, "{}", input.pend_ticks)?;
+    w.write_u64(input.pend_ticks as u64)?;
 
     w.write_str("}")?;
     Ok(())
 }
 
-fn emit_tcb(w: &mut Writer<'_>, tcb: &TcbView) -> fmt::Result {
+fn emit_tcb(w: &mut Writer<'_>, tcb: &TcbView) -> WriteResult {
     // Field order: id, prio, state, deadline, blk_obj, msg. Mirrors
     // SOS-02 §7.2 + the `sos_sim::TcbSnapshot` struct declaration order.
     w.write_str("{\"id\":")?;
-    write!(w, "{}", tcb.id as i32)?;
+    w.write_i64(tcb.id as i64)?;
 
     w.write_str(",\"prio\":")?;
-    write!(w, "{}", tcb.prio)?;
+    w.write_u64(tcb.prio as u64)?;
 
     w.write_str(",\"state\":")?;
-    write!(w, "{}", tcb.state as u8)?;
+    w.write_u64(tcb.state as u8 as u64)?;
 
     w.write_str(",\"deadline\":")?;
-    write!(w, "{}", tcb.deadline)?;
+    w.write_i64(tcb.deadline)?;
 
     w.write_str(",\"blk_obj\":")?;
-    write!(w, "{}", tcb.blk_obj as i32)?;
+    w.write_i64(tcb.blk_obj as i64)?;
 
     w.write_str(",\"msg\":")?;
     emit_msg(w, &tcb.msg)?;
@@ -383,45 +412,45 @@ fn emit_tcb(w: &mut Writer<'_>, tcb: &TcbView) -> fmt::Result {
     Ok(())
 }
 
-fn emit_msg(w: &mut Writer<'_>, msg: &Msg) -> fmt::Result {
+fn emit_msg(w: &mut Writer<'_>, msg: &Msg) -> WriteResult {
     match msg {
         Msg::Null => w.write_str("null"),
-        Msg::Int(n) => write!(w, "{}", n),
+        Msg::Int(n) => w.write_i64(*n),
         Msg::ReturnCode(rc) => {
             w.write_str("{\"rc\":")?;
-            write!(w, "{}", *rc as i8)?;
+            w.write_i64(*rc as i8 as i64)?;
             w.write_str("}")?;
             Ok(())
         }
     }
 }
 
-fn emit_id_array(w: &mut Writer<'_>, ids: &[TaskId]) -> fmt::Result {
+fn emit_id_array(w: &mut Writer<'_>, ids: &[TaskId]) -> WriteResult {
     w.write_str("[")?;
     for (i, id) in ids.iter().enumerate() {
         if i > 0 {
             w.write_str(",")?;
         }
         // SOS-02 §7.2: each entry widens to i32 on the wire.
-        write!(w, "{}", *id as i32)?;
+        w.write_i64(*id as i64)?;
     }
     w.write_str("]")?;
     Ok(())
 }
 
-fn emit_i64_array(w: &mut Writer<'_>, vals: &[i64]) -> fmt::Result {
+fn emit_i64_array(w: &mut Writer<'_>, vals: &[i64]) -> WriteResult {
     w.write_str("[")?;
     for (i, v) in vals.iter().enumerate() {
         if i > 0 {
             w.write_str(",")?;
         }
-        write!(w, "{}", v)?;
+        w.write_i64(*v)?;
     }
     w.write_str("]")?;
     Ok(())
 }
 
-fn emit_sem(w: &mut Writer<'_>, sem: &SemView<'_>) -> fmt::Result {
+fn emit_sem(w: &mut Writer<'_>, sem: &SemView<'_>) -> WriteResult {
     if !sem.valid {
         // Short form per SOS-02 §7.2 + SOS-03 PCDN-007.
         return w.write_str("{\"valid\":false}");
@@ -430,25 +459,25 @@ fn emit_sem(w: &mut Writer<'_>, sem: &SemView<'_>) -> fmt::Result {
     // `sos_sim::SemSnapshot::Valid` struct's field declaration order
     // (and therefore `serde_json`'s emission order).
     w.write_str("{\"valid\":true,\"count\":")?;
-    write!(w, "{}", sem.count)?;
+    w.write_u64(sem.count as u64)?;
     w.write_str(",\"max\":")?;
-    write!(w, "{}", sem.max)?;
+    w.write_u64(sem.max as u64)?;
     w.write_str(",\"waiters\":")?;
     emit_id_array(w, sem.waiters)?;
     w.write_str("}")?;
     Ok(())
 }
 
-fn emit_queue(w: &mut Writer<'_>, q: &QueueView<'_>) -> fmt::Result {
+fn emit_queue(w: &mut Writer<'_>, q: &QueueView<'_>) -> WriteResult {
     if !q.valid {
         return w.write_str("{\"valid\":false}");
     }
     // Long form: valid, cap, count, buf, sendw, recvw. Matches the
     // `sos_sim::QueueSnapshot::Valid` field declaration order.
     w.write_str("{\"valid\":true,\"cap\":")?;
-    write!(w, "{}", q.cap)?;
+    w.write_u64(q.cap as u64)?;
     w.write_str(",\"count\":")?;
-    write!(w, "{}", q.count)?;
+    w.write_u64(q.count as u64)?;
     w.write_str(",\"buf\":")?;
     emit_i64_array(w, q.buf)?;
     w.write_str(",\"sendw\":")?;

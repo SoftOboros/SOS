@@ -55,7 +55,7 @@ pub const MAX_DEPTH: usize = 16;
 /// constants — if a vector specifies `max_tasks > MAX_TASKS`, the chart's
 /// at-HEAD invariants would be violated; the dispatcher detects this and
 /// halts. The parser itself does not enforce the bound.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct VectorHeader {
     /// `MAX_TASKS` (SOS-00 §7.1 + chart `<data id="MAX_TASKS">`).
     pub max_tasks: usize,
@@ -74,7 +74,6 @@ pub struct VectorHeader {
 
 /// Parser result for incremental parsing. The dispatch loop calls
 /// [`VectorStream::try_step`] repeatedly as new bytes arrive on UART RX.
-#[derive(Debug)]
 pub enum ParseStep {
     /// The buffer doesn't yet contain a complete event/header. Caller
     /// reads more UART bytes and retries. `consumed == 0`; the buffer is
@@ -120,7 +119,7 @@ pub enum ParseStep {
 }
 
 /// Parser error class. Surfaced via [`ParseStep::Error`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ParseError {
     /// Encountered a byte the grammar does not admit at the current
     /// state (e.g. `]` while inside an object, alphabetic char where a
@@ -153,7 +152,7 @@ pub enum ParseError {
 }
 
 /// Top-level parser state machine driving the wrapper's traversal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ParserState {
     /// Expect the wrapper's opening `{`.
     ExpectWrapperOpen,
@@ -181,7 +180,7 @@ enum ParserState {
 
 /// Bitfield tracking which top-level wrapper keys have been consumed.
 /// `name` is tolerated and skipped; `config` and `input` are required.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct SeenKeys(u8);
 
 impl SeenKeys {
@@ -309,7 +308,7 @@ impl<'a> Cursor<'a> {
 
     /// Expect a specific byte; advance on match. `None` if buffer
     /// exhausted; `Some(false)` if the next byte is not `c`.
-    fn expect(&mut self, c: u8) -> Option<bool> {
+    fn consume_if(&mut self, c: u8) -> Option<bool> {
         let b = self.peek()?;
         if b == c {
             self.bump();
@@ -832,10 +831,10 @@ fn parse_config_object(cur: &mut Cursor<'_>) -> Result<Option<VectorHeader>, Par
             None => return Ok(None),
         };
         cur.skip_ws();
-        if cur.expect(b':').unwrap_or(false) {
-            cur.skip_ws();
-        } else {
-            return Err(ParseError::UnexpectedByte);
+        match cur.consume_if(b':') {
+            Some(true) => cur.skip_ws(),
+            Some(false) => return Err(ParseError::UnexpectedByte),
+            None => return Ok(None),
         }
 
         // Read the value into a local i64.
@@ -971,8 +970,10 @@ fn parse_event_object(cur: &mut Cursor<'_>) -> Result<Option<Event>, ParseError>
             None => return Ok(None),
         };
         cur.skip_ws();
-        if !cur.expect(b':').unwrap_or(false) {
-            return Err(ParseError::UnexpectedByte);
+        match cur.consume_if(b':') {
+            Some(true) => {}
+            Some(false) => return Err(ParseError::UnexpectedByte),
+            None => return Ok(None),
         }
         cur.skip_ws();
 
@@ -1043,7 +1044,10 @@ fn parse_event_object(cur: &mut Cursor<'_>) -> Result<Option<Event>, ParseError>
 
     // If no `data` field appeared, default to EventData::None — only
     // valid if the event name doesn't carry a payload.
-    let final_data = data.unwrap_or(EventData::None);
+    let final_data = match data {
+        Some(d) => d,
+        None => EventData::None,
+    };
     validate_data_for_name(name, &final_data)?;
 
     // from_tid: None (absent) → None; Some(Some(n)) → Some(TaskId);
@@ -1156,8 +1160,10 @@ fn parse_event_data(
             None => return Ok(None),
         };
         cur.skip_ws();
-        if !cur.expect(b':').unwrap_or(false) {
-            return Err(ParseError::UnexpectedByte);
+        match cur.consume_if(b':') {
+            Some(true) => {}
+            Some(false) => return Err(ParseError::UnexpectedByte),
+            None => return Ok(None),
         }
         cur.skip_ws();
         let val = match parse_i64(cur)? {
@@ -1199,8 +1205,8 @@ fn parse_event_data(
                 max_v.is_some(),
             ])?;
             EventData::TaskCreate {
-                id: i16_from_i64(id_v.unwrap())?,
-                prio: u8_from_i64(prio_v.unwrap())?,
+                id: i16_from_i64(require_i64(id_v)?)?,
+                prio: u8_from_i64(require_i64(prio_v)?)?,
             }
         }
         EventName::TaskDelay => {
@@ -1215,7 +1221,9 @@ fn parse_event_data(
                 initial_v.is_some(),
                 max_v.is_some(),
             ])?;
-            EventData::TaskDelay { ticks: ticks_v.unwrap() }
+            EventData::TaskDelay {
+                ticks: require_i64(ticks_v)?,
+            }
         }
         EventName::TaskSuspend | EventName::TaskResume => {
             check_only(&[id_v.is_some()], &[
@@ -1229,7 +1237,9 @@ fn parse_event_data(
                 initial_v.is_some(),
                 max_v.is_some(),
             ])?;
-            EventData::TaskId { id: i16_from_i64(id_v.unwrap())? }
+            EventData::TaskId {
+                id: i16_from_i64(require_i64(id_v)?)?,
+            }
         }
         EventName::SemCreate => {
             check_only(
@@ -1245,9 +1255,9 @@ fn parse_event_data(
                 ],
             )?;
             EventData::SemCreate {
-                id: i16_from_i64(id_v.unwrap())?,
-                initial: u32_nonneg(initial_v.unwrap())?,
-                max: u32_nonneg(max_v.unwrap())?,
+                id: i16_from_i64(require_i64(id_v)?)?,
+                initial: u32_nonneg(require_i64(initial_v)?)?,
+                max: u32_nonneg(require_i64(max_v)?)?,
             }
         }
         EventName::SemTake | EventName::SemGive | EventName::SemGiveFromIsr => {
@@ -1275,8 +1285,8 @@ fn parse_event_data(
                 return Err(ParseError::BadEventShape);
             }
             EventData::SemOp {
-                sid: i16_from_i64(sid_v.unwrap())?,
-                timeout: timeout_v.unwrap_or(0),
+                sid: i16_from_i64(require_i64(sid_v)?)?,
+                timeout: optional_i64_or_zero(timeout_v),
             }
         }
         EventName::QueueCreate => {
@@ -1291,8 +1301,8 @@ fn parse_event_data(
                 max_v.is_some(),
             ])?;
             EventData::QueueCreate {
-                id: i16_from_i64(id_v.unwrap())?,
-                cap: u32_nonneg(cap_v.unwrap())?,
+                id: i16_from_i64(require_i64(id_v)?)?,
+                cap: u32_nonneg(require_i64(cap_v)?)?,
             }
         }
         EventName::QueueSend | EventName::QueueSendFromIsr => {
@@ -1316,9 +1326,9 @@ fn parse_event_data(
                 return Err(ParseError::BadEventShape);
             }
             EventData::QueueSend {
-                qid: i16_from_i64(qid_v.unwrap())?,
-                msg: msg_v.unwrap(),
-                timeout: timeout_v.unwrap_or(0),
+                qid: i16_from_i64(require_i64(qid_v)?)?,
+                msg: require_i64(msg_v)?,
+                timeout: optional_i64_or_zero(timeout_v),
             }
         }
         EventName::QueueReceive => {
@@ -1333,8 +1343,8 @@ fn parse_event_data(
                 max_v.is_some(),
             ])?;
             EventData::QueueReceive {
-                qid: i16_from_i64(qid_v.unwrap())?,
-                timeout: timeout_v.unwrap(),
+                qid: i16_from_i64(require_i64(qid_v)?)?,
+                timeout: require_i64(timeout_v)?,
             }
         }
         EventName::TaskYield
@@ -1411,6 +1421,20 @@ fn check_only(required: &[bool], forbidden: &[bool]) -> Result<(), ParseError> {
         }
     }
     Ok(())
+}
+
+fn require_i64(v: Option<i64>) -> Result<i64, ParseError> {
+    match v {
+        Some(n) => Ok(n),
+        None => Err(ParseError::BadEventShape),
+    }
+}
+
+fn optional_i64_or_zero(v: Option<i64>) -> i64 {
+    match v {
+        Some(n) => n,
+        None => 0,
+    }
 }
 
 // ---------------------------------------------------------------------------

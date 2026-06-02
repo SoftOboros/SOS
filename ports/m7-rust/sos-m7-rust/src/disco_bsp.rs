@@ -29,6 +29,12 @@ const PENDSV_PRIO: u8 = 0xE0;
 /// SysTick NVIC priority per SOS-00 §6.2 / SOS-04 INV-S-PORT-2.
 const SYSTICK_PRIO: u8 = 0xC0;
 
+fn park_forever() -> ! {
+    loop {
+        cortex_m::asm::wfi();
+    }
+}
+
 /// Bring up the CM7 clock tree, GPIO AF for the trace UART pins, and
 /// SysTick. NVIC priority programming happens here per §6.8 step 6
 /// even though it logically belongs to the kernel — clock + NVIC + SCB
@@ -40,9 +46,14 @@ const SYSTICK_PRIO: u8 = 0xC0;
 /// `Peripherals::steal()` — this is sound because `disco_bsp::init()`
 /// is the single peripheral-init choke point and is called exactly once.
 pub fn init() {
-    let cp = cortex_m::Peripherals::take().expect("cortex_m::Peripherals already taken");
-    let dp = stm32h7::stm32h747cm7::Peripherals::take()
-        .expect("stm32h7 Peripherals already taken");
+    let cp = match cortex_m::Peripherals::take() {
+        Some(p) => p,
+        None => park_forever(),
+    };
+    let dp = match stm32h7::stm32h747cm7::Peripherals::take() {
+        Some(p) => p,
+        None => park_forever(),
+    };
 
     init_clocks(&dp);
     init_gpio_usart1_pins(&dp);

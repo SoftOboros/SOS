@@ -15,12 +15,8 @@ Entries are permanent. Resolved entries stay as institutional memory; mark statu
 
 Open questions tied to errata entries appear here for at-a-glance visibility. Format: `EOQ-NNN-ERRATA-MMM`. See parent CLAUDE.md "EOQ identifiers" for the rule.
 
-- **EOQ-001-ERRATA-008** — The SOS-04 m7-rust firmware overflows FLASH because the JSON
-  trace/parser layer drags in float/u128 `core::fmt` + PAC `Debug`. Which remediation does
-  the owner want: (a) integer-only formatting audit of `json_parser`/`trace`/`transport`
-  (format-preserving, must keep SOS-02 §7 / SOS-03 byte-equality); (b) feature-gate the JSON
-  conformance layer out of the flashable image (build it only for the host conformance crate);
-  (c) accept a larger FLASH map (dual-bank 2 MiB, revisits PCDN-SOS-04-012)? See ERRATA-008.
+*(none open — ERRATA-001 through ERRATA-008 all resolved. EOQ-001-ERRATA-008 resolved
+2026-06-02 via path (a) integer-only formatting + `--gc-sections`; see ERRATA-008.)*
 
 ## Status of this log
 
@@ -37,7 +33,7 @@ ERRATA is now actively used. SOS-00 ratified 2026-05-19; every subsequent phase 
 | ERRATA-005 | 🟢 | SOS-12 boundary-vector `kind` field plural/singular convention codified (plural for events, singular for invariants) | 2026-05-27 | SOS-12 |
 | ERRATA-006 | 🟢 | `VectorCategory.Boundary` name collision (SOS-03 legacy edge-case vs SOS-12 dispatch-boundary) — overload is intentional at v1, disambiguated by directory + subtype | 2026-05-27 | SOS-03 |
 | ERRATA-007 | 🟢 | SOS-09-G MPU install-function name drift (`sos_mpu_install` vs `apply_mpu_config`) reconciled to canonical `apply_mpu_config()` | 2026-05-27 | SOS-09-G |
-| ERRATA-008 | 🟡 | SOS-04 m7-rust port overflows 1 MiB FLASH (.text ≈ 1.44 MB) — float/u128 `core::fmt` + PAC `Debug` bloat from the JSON trace/parser layer; workspace `[profile.release]` also missing | 2026-06-02 | SOS-04 |
+| ERRATA-008 | 🟢 | SOS-04 m7-rust port overflows 1 MiB FLASH (.text ≈ 1.44 MB) — float/u128 `core::fmt` + PAC `Debug` bloat from the JSON trace/parser layer; workspace `[profile.release]` also missing | 2026-06-02 | SOS-04 |
 
 ## ERRATA-001 — SOS-09-B implementation cite mismatch (stealth rename)
 
@@ -319,7 +315,7 @@ This commit reconciles the spec text to the single canonical identifier `apply_m
 
 ## ERRATA-008 — SOS-04 m7-rust port overflows 1 MiB FLASH (float/u128 fmt + PAC Debug bloat)
 
-**Status:** 🟡 diagnosed
+**Status:** 🟢 resolved (2026-06-02)
 **First seen:** 2026-06-02 (HEAD at first sighting: `32f719f`)
 **Owning phase:** SOS-04
 
@@ -399,14 +395,45 @@ Two independent defects, one latent:
   2 MiB) — revisits PCDN-SOS-04-012, least preferred (masks the bloat). Recommended: (a),
   falling back to (b) for any formatting genuinely needed only in conformance mode.
 
+### Resolution (2026-06-02, path (a) integer-only formatting + dead-strip)
+
+Defect 1 fixed by two complementary changes (no PAC removal, no wire-format change):
+
+1. **Reachability cleanup** (`ports/m7-rust/sos-m7-rust-trace/src/lib.rs`,
+   `src/{json_parser,main,disco_bsp,event,kernel,scripts}.rs`): the trace writer no longer
+   uses `core::fmt::Write` (hand-rolled byte/integer emission via a `Result<(),()>` writer);
+   firmware-side `#[derive(Debug)]` and `unwrap`/`expect`/`panic`-with-Debug sites replaced
+   with `match`/park/error-return paths. This removes the reachability roots that pulled in
+   the PAC `Debug` impls and the float/u128 `core::fmt` machinery.
+2. **`--gc-sections`** (`ports/m7-rust/sos-m7-rust/build.rs` emits
+   `cargo:rustc-link-arg=--gc-sections`): the linker dead-strips the now-unreachable PAC
+   `Debug` + residual `core::fmt` float/u128 code.
+
+The `stm32h7` PAC is retained and all peripheral register access is unchanged. A first
+remediation attempt that removed the PAC and hand-rolled raw MMIO was rejected (out of scope;
+spec §4-pinned dependency + bench-regression risk) and fully reverted.
+
 ### Verification
 
-- Defect 2: `grep -A5 '\[profile.release\]' Cargo.toml` shows the block; build still reaches
-  link (overflow now attributable solely to defect 1).
-- Defect 1: pending. Acceptance = `cargo build --target thumbv7em-none-eabihf --release -p
-  sos-m7-rust` links within 1 MiB FLASH **and** the conformance trace vectors remain
-  byte-equal (SOS-03 INV-S-CONF-1). Diagnostic reproduction: build against a temporarily
-  enlarged `memory.x` FLASH region + `llvm-size -A` / `llvm-nm --print-size --size-sort`.
+- Defect 2: `grep -A6 '\[profile.release\]' Cargo.toml` shows the block.
+- Defect 1: `env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --target
+  thumbv7em-none-eabihf --release -p sos-m7-rust` **links** within real 1024K FLASH.
+  Section sizes (`llvm-size -A`): `.vector_table 664 + .text 64,704 + .rodata 13,736 +
+  .data 1,496 = 80,600 B` resident (was `.text ≈ 1.44 MB`). PAC retained
+  (`grep stm32h7 …/Cargo.toml`). Byte-equality / conformance preserved:
+  `cargo test -p sos-m7-rust-tests` → 8 passed; `cargo test -p sos-conformance` → 6 passed;
+  `cargo run --release -p sos-conformance -- run --suite conformance/vectors/` → 6/6 PASS.
+- On-target bench verification (actual flash + UART trace) remains future work under DAA-08-C
+  (this errata closes the build/size/host-conformance surface only).
+
+### Diagnostic note (build-artifact footgun, not a code defect)
+
+During remediation a stale `device.x` left in the firmware crate's cargo `OUT_DIR` (first on
+the linker search path) shadowed the PAC-emitted `stm32h747cm7/device.x`, producing spurious
+`rust-lld: undefined symbol: WWDG1/PVD_PVM/RCC/…` (`__INTERRUPTS`) link errors that masquerade
+as a missing-vector-table bug. A clean checkout / `cargo clean -p sos-m7-rust` does not exhibit
+it. No code change is owed for this; recorded here so a future session does not chase a
+phantom "the Rust port never linked" defect.
 
 ### Tracking
 

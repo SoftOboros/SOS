@@ -33,6 +33,7 @@ fn main() {
     // the linker invocation regardless of env state. See cortex-m-rt
     // 0.7's `link.x` documentation.
     println!("cargo:rustc-link-arg=-Tlink.x");
+    println!("cargo:rustc-link-arg=--gc-sections");
 
     println!("cargo:rerun-if-changed=memory.x");
     println!("cargo:rerun-if-changed=build.rs");

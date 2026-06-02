@@ -52,7 +52,7 @@ pub const TASK_STACK_BYTES: usize = 2 * 1024;
 // -----------------------------------------------------------------------
 
 /// Task lifecycle state. Mirrors `sim::datamodel::TaskState`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TaskState {
     /// `ST_DORMANT` — TCB slot unused.
@@ -74,7 +74,7 @@ pub enum TaskState {
 }
 
 /// Syscall return code. Mirrors `sim::datamodel::ReturnCode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(i8)]
 pub enum ReturnCode {
     /// `RC_OK`.
@@ -96,7 +96,7 @@ pub type TaskId = i16;
 /// Polymorphic value carried in `tcb[i].msg`. Per SOS-00 §5.6 and
 /// SOS-02 §6.3.1; wire encoding per SOS-02 §7.2 lives in `trace.rs`.
 /// Mirrors `sim::datamodel::Msg`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Msg {
     /// No staged message. JSON `null`.
     Null,
@@ -257,7 +257,7 @@ pub static mut CURRENT_TID: i32 = 0;
 /// commit retains the kernel-side fields only; the saved-frame backing
 /// store + PSP pointer the §6.4 PendSV body needs lands in the
 /// implementation phase.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Tcb {
     pub id: TaskId,
     pub prio: u8,
@@ -268,7 +268,7 @@ pub struct Tcb {
 }
 
 /// One semaphore descriptor. Mirrors `sim::datamodel::Sem`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Sem {
     pub valid: bool,
     pub count: u32,
@@ -278,7 +278,7 @@ pub struct Sem {
 }
 
 /// One queue descriptor. Mirrors `sim::datamodel::Queue`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Queue {
     pub valid: bool,
     pub buf: heapless::Vec<i64, Q_DEPTH>,
@@ -292,7 +292,7 @@ pub struct Queue {
 /// mirrors `sim::datamodel::Datamodel`; field order matches SOS-02 §7.1
 /// trace serialisation order so the hand-rolled writer in
 /// `trace::write_record` lands the bytes the harness expects.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Datamodel {
     pub max_tasks: usize,
     pub max_prio: usize,

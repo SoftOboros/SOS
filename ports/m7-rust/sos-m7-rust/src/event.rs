@@ -30,7 +30,7 @@ use crate::kernel::TaskId;
 /// The wire-form discriminant (`task.create`, `sem.give_from_isr`, etc.)
 /// lives on the parser side (wave 8 `transport.rs`); this enum is the
 /// in-firmware representation only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EventName {
     /// `task.create` — pairs with [`EventData::TaskCreate`].
     TaskCreate,
@@ -82,7 +82,7 @@ pub enum EventName {
 ///   * Events sharing a payload shape (e.g. `task.suspend` + `task.resume`
 ///     both take `{ id }`) share a variant.
 ///   * Events with unique payload shapes get their own variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EventData {
     /// No payload. Used by `task.yield`, `sys.tick`, `crit.enter`,
     /// `crit.exit`, `sched.suspend`, `sched.resume`.
@@ -154,7 +154,7 @@ pub enum EventData {
 /// `current = from_tid` before dispatching. `None` for ISR-context events
 /// (`sys.tick`, `*_from_isr`) where `current` is not consulted by the
 /// transition body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Event {
     /// Event name (SOS-01 §5.3 `ExternalEventName`).
     pub name: EventName,

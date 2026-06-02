@@ -209,14 +209,17 @@ fn main() -> ! {
         // tick_count reset is part of the bench-race workaround
         // (matches EOQ-004 delay note above).
         unsafe {
-            let dm_mut = (*kernel::KERNEL_STATE.0.get()).as_mut()
-                .expect("kernel::init() must run before main loop");
+            let dm_mut = match (*kernel::KERNEL_STATE.0.get()).as_mut() {
+                Some(dm) => dm,
+                None => park_forever(),
+            };
             dm_mut.tick_count = 0;
         }
         let dm_cell = unsafe { &*kernel::KERNEL_STATE.0.get() };
-        let dm = dm_cell
-            .as_ref()
-            .expect("kernel::init() must run before main loop");
+        let dm = match dm_cell.as_ref() {
+            Some(dm) => dm,
+            None => park_forever(),
+        };
         let n = trace::write_record(&mut trace_buf, dm, -1);
         for &b in &trace_buf[..n] {
             transport::write_byte(b);
@@ -290,12 +293,13 @@ fn main() -> ! {
         // try_step on the full prefix. This matches the host-test
         // single-call pattern; proper fix is a parser API change to
         // expose `consumed` on NeedMoreInput.
-        let nl_pos = scratch[..scratch_len].iter().position(|&b| b == b'\n');
-        if nl_pos.is_none() {
-            cortex_m::asm::wfi();
-            continue;
-        }
-        let parse_end = nl_pos.unwrap() + 1; // include the newline
+        let parse_end = match scratch[..scratch_len].iter().position(|&b| b == b'\n') {
+            Some(pos) => pos + 1, // include the newline
+            None => {
+                cortex_m::asm::wfi();
+                continue;
+            }
+        };
 
         match parser.try_step(&scratch[..parse_end]) {
             json_parser::ParseStep::NeedMoreInput => {
@@ -337,9 +341,10 @@ fn main() -> ! {
                 // main thread is the only mutator (SysTick / USART1
                 // ISRs only touch their own slices of the datamodel).
                 let dm = unsafe {
-                    (*kernel::KERNEL_STATE.0.get())
-                        .as_mut()
-                        .expect("kernel::init() must run before dispatch")
+                    match (*kernel::KERNEL_STATE.0.get()).as_mut() {
+                        Some(dm) => dm,
+                        None => park_forever(),
+                    }
                 };
                 if let Some(tid) = event.from_tid {
                     dm.current = tid;

@@ -43,7 +43,7 @@ use crate::kernel::{
 /// supplied a payload of the wrong shape (parser bug) or violated a
 /// dimensional bound (vector-generation bug). The dispatcher converts them
 /// to trace records per SOS-02 §7.x.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ScriptError {
     /// The [`EventData`] variant attached to the [`Event`] did not match
     /// the variant expected for the [`EventName`].
@@ -76,7 +76,7 @@ pub enum ScriptError {
 // ---------------------------------------------------------------------------
 
 /// Discriminator for the three waiter lists the chart maintains.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 enum WaiterList {
     SemWaiters,
     QueueSendW,
