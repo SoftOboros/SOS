@@ -8,3 +8,15 @@ members = [
     "ports/m7-rust/sos-m7-rust-tests",
     "ports/m7-rust/sos-m7-rust-host-driver",
 ]
+
+# SOS-04 §6.1 release profile for the M7 firmware port. Cargo ignores
+# [profile.*] in non-root manifests for workspace members, so the
+# size-critical settings the sos-m7-rust crate doc references must live
+# here at the workspace root. Without this the canonical
+# `cargo build --release -p sos-m7-rust` overflows the 1 MiB FLASH region
+# because dead-code elimination / unwinding-table stripping is not applied.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
+panic = "abort"

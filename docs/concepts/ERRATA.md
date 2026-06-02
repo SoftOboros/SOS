@@ -15,7 +15,12 @@ Entries are permanent. Resolved entries stay as institutional memory; mark statu
 
 Open questions tied to errata entries appear here for at-a-glance visibility. Format: `EOQ-NNN-ERRATA-MMM`. See parent CLAUDE.md "EOQ identifiers" for the rule.
 
-*(none open — ERRATA-001 through ERRATA-007 all resolved at intake.)*
+- **EOQ-001-ERRATA-008** — The SOS-04 m7-rust firmware overflows FLASH because the JSON
+  trace/parser layer drags in float/u128 `core::fmt` + PAC `Debug`. Which remediation does
+  the owner want: (a) integer-only formatting audit of `json_parser`/`trace`/`transport`
+  (format-preserving, must keep SOS-02 §7 / SOS-03 byte-equality); (b) feature-gate the JSON
+  conformance layer out of the flashable image (build it only for the host conformance crate);
+  (c) accept a larger FLASH map (dual-bank 2 MiB, revisits PCDN-SOS-04-012)? See ERRATA-008.
 
 ## Status of this log
 
@@ -32,6 +37,7 @@ ERRATA is now actively used. SOS-00 ratified 2026-05-19; every subsequent phase 
 | ERRATA-005 | 🟢 | SOS-12 boundary-vector `kind` field plural/singular convention codified (plural for events, singular for invariants) | 2026-05-27 | SOS-12 |
 | ERRATA-006 | 🟢 | `VectorCategory.Boundary` name collision (SOS-03 legacy edge-case vs SOS-12 dispatch-boundary) — overload is intentional at v1, disambiguated by directory + subtype | 2026-05-27 | SOS-03 |
 | ERRATA-007 | 🟢 | SOS-09-G MPU install-function name drift (`sos_mpu_install` vs `apply_mpu_config`) reconciled to canonical `apply_mpu_config()` | 2026-05-27 | SOS-09-G |
+| ERRATA-008 | 🟡 | SOS-04 m7-rust port overflows 1 MiB FLASH (.text ≈ 1.44 MB) — float/u128 `core::fmt` + PAC `Debug` bloat from the JSON trace/parser layer; workspace `[profile.release]` also missing | 2026-06-02 | SOS-04 |
 
 ## ERRATA-001 — SOS-09-B implementation cite mismatch (stealth rename)
 
@@ -310,6 +316,109 @@ This commit reconciles the spec text to the single canonical identifier `apply_m
 - Wave-5C cross-reference commit: `1180910` (the SOS-04 §15 + SOS-09-G §16 PCDN-005 cross-reference pair; the SOS-09-G side explicitly deferred this errata's reconciliation as a future minor amendment).
 - This entry is filed and resolved at intake. The actual emitted Rust + C function names in `tools/sos-codegen/transliterate_mpu.py` MAY differ from the canonical spec name — that's a separate code-doc drift outside the scope of this errata, to be reconciled in a future implementation-side rename commit (no SOS-09-G or SOS-04 §16 / §15 amendment owed by such a future commit; only this errata's cite is needed).
 - ERRATA-002 cross-reference: ERRATA-002 (filename rename context, commit `d24528f`) handles the SIBLING drift of the implementation filename (`mpu_emit.py` → `transliterate_mpu.py`). ERRATA-007 handles the function-NAME drift at the spec layer; the two are independent and resolved separately.
+
+## ERRATA-008 — SOS-04 m7-rust port overflows 1 MiB FLASH (float/u128 fmt + PAC Debug bloat)
+
+**Status:** 🟡 diagnosed
+**First seen:** 2026-06-02 (HEAD at first sighting: `32f719f`)
+**Owning phase:** SOS-04
+
+### Symptom
+
+The canonical SOS-04 build command (`SOS-04-CONCEPTS.md §8`):
+
+```
+cargo build --target thumbv7em-none-eabihf --release -p sos-m7-rust
+```
+
+fails at link with a FLASH-overflow cascade:
+
+```
+rust-lld: error: section '.text' will not fit in region 'FLASH': overflowed by 393076 bytes
+rust-lld: error: section '.rodata' ... '.data' ... '.gnu.sgstubs' will not fit in region 'FLASH' ...
+```
+
+Linking against a temporarily-enlarged FLASH region and measuring with `llvm-size -A` shows
+the real section breakdown (the `.data`/`.gnu.sgstubs` overflows in the error are *cascade
+artifacts* — once `.text` runs past the FLASH end every later section is reported as
+overflowing too):
+
+| section | size | note |
+|---|---|---|
+| `.text` | **1,440,988 B (≈1.44 MB)** | overflows the 1 MiB (1024K) `FLASH` region in `memory.x:15` |
+| `.rodata` | 108,260 B | |
+| `.data` | 1,496 B | tiny — NOT the problem (matches the historical 62 KB May-22 skeleton ELF) |
+| `.bss` | 21,364 B | |
+
+`llvm-nm --print-size --size-sort` names the dominant `.text` contributors:
+
+- `core::fmt::num::exp_u128` — **32,110 B** (single largest symbol)
+- `core::num::flt2dec` dragon/grisu float-formatting (`format_shortest`, `format_exact`, `grisu`) — several KB each
+- `core::num::dec2flt` float *parsing* (`parse_number`, `POWER_OF_FIVE_128` table ≈10 KB)
+- `<stm32h7::stm32h747cm7::Interrupt as core::fmt::Debug>::fmt` — PAC enum `Debug` impl
+- `sos_m7_rust::json_parser::{parse_event_data, resolve_event_name}` — the reachability root
+
+Independent of build profile: default-`release` `.text` = 1,403,804 B; the spec
+`[profile.release]` (`lto="fat"`, `opt-level="s"`, `panic="abort"`, `codegen-units=1`) =
+1,440,988 B. LTO cannot strip it because the formatting code is genuinely reachable from the
+JSON parser/trace layer.
+
+### Root cause
+
+Two independent defects, one latent:
+
+1. **Float/u128 `core::fmt` + PAC `Debug` reachable from the firmware image.** The on-device
+   JSON trace writer (PCDN-SOS-04-008/018) + `json_parser` pull in `core::num::flt2dec`,
+   `core::num::dec2flt`, `core::fmt::num::exp_u128`, and the PAC `Interrupt` `Debug` impl. The
+   SOS trace/event payloads are integer-only (`Tcb` fields are `i16`/`u8`/`i64`, SOS-04
+   Amendment 001), so float formatting/parsing and 128-bit fmt are not semantically required —
+   they are dragged in by generic `core::fmt`/number-parse paths and stray `{:?}`/`{}` uses.
+   This was **latent**: bench bring-up (SOS-04 §15 baud-mismatch amendment, SOS-05 §15) flashed
+   the **SOS-05 C port**, never the SOS-04 Rust port at full size, so the overflow went
+   undiscovered. The historical 62 KB ELF predates the JSON/conformance machinery landing.
+
+2. **Workspace `[profile.release]` missing.** `SOS-04-CONCEPTS.md §6.1` specifies
+   `lto="fat"`, `opt-level="s"`, `codegen-units=1`, `panic="abort"`, and the `sos-m7-rust`
+   crate `Cargo.toml` comment states these "belong at the workspace root" (cargo ignores
+   `[profile.*]` in non-root workspace members). They were never landed in the root
+   `Cargo.toml`. This alone does NOT cause the overflow (defect 1 dominates) but means the
+   canonical build never ran with the intended size profile.
+
+### Fix
+
+- **Defect 2 (landed with this errata):** add `[profile.release]` (`lto="fat"`,
+  `codegen-units=1`, `opt-level="s"`, `panic="abort"`) to the workspace root `Cargo.toml`.
+  Necessary-not-sufficient; commit `<this commit>`.
+- **Defect 1 (proposed; owner decision required — EOQ-001-ERRATA-008):** candidate paths —
+  (a) **integer-only formatting audit** of `json_parser.rs` / `trace.rs` / `transport.rs`:
+  replace any float/`u128`/`{:?}`-on-PAC formatting with integer (`itoa`-style) writers; MUST
+  preserve the SOS-02 §7 trace wire format and SOS-03 INV-S-CONF-1 byte-equality (verify
+  against `conformance/` vectors); expected to bring `.text` well under 1 MiB. (b)
+  **feature-gate** the JSON conformance layer so it compiles only into the host
+  `sos-m7-rust-tests` crate, not the flashable bin. (c) **enlarge the FLASH map** (dual-bank
+  2 MiB) — revisits PCDN-SOS-04-012, least preferred (masks the bloat). Recommended: (a),
+  falling back to (b) for any formatting genuinely needed only in conformance mode.
+
+### Verification
+
+- Defect 2: `grep -A5 '\[profile.release\]' Cargo.toml` shows the block; build still reaches
+  link (overflow now attributable solely to defect 1).
+- Defect 1: pending. Acceptance = `cargo build --target thumbv7em-none-eabihf --release -p
+  sos-m7-rust` links within 1 MiB FLASH **and** the conformance trace vectors remain
+  byte-equal (SOS-03 INV-S-CONF-1). Diagnostic reproduction: build against a temporarily
+  enlarged `memory.x` FLASH region + `llvm-size -A` / `llvm-nm --print-size --size-sort`.
+
+### Tracking
+
+- Surfaced during **DAA-08** cross-repo verification (the sibling disco-analyzer initiative;
+  REQ-SOS-1 had assumed SOS-04 "exists" and is flashable). DAA-08-B depends on a flashable
+  SOS-04 Rust port; this errata is on that critical path.
+- `SOS-04-CONCEPTS.md §15` SHOULD carry a dated entry citing ERRATA-008 (the §6.1 profile now
+  landed at the workspace root; the bloat remediation tracked here).
+- Note (environment, not a SOS defect): the dev host's inherited `RUSTFLAGS`
+  (`-Clink-arg=-fuse-ld=mold`) also breaks this cross-compile (`rust-lld: unknown argument
+  '-fuse-ld=mold'`) and clobbers the crate-local target rustflags; build with `RUSTFLAGS`
+  unset. Not part of this errata's fix scope.
 
 ## How to add an entry
 
