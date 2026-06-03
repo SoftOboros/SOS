@@ -256,6 +256,26 @@ pub extern "C" fn task_exit_trap() -> ! {
     loop {}
 }
 
+/// The idle task body. The model reserves TCB[0] / priority 0 as the idle
+/// task (`kernel::init`); the scheduler promotes it whenever every real task
+/// is blocked (`pick_next` finds no higher-priority READY task). A switch
+/// INTO idle is therefore a normal, frequent event — so idle MUST have a
+/// validly-primed PSP frame, exactly like any created task. This is its
+/// entry: low-power-wait forever. Woken implicitly when an ISR (`SysTick`,
+/// `sem_give_from_isr`) makes a higher-priority task READY and pends PendSV,
+/// switching away from idle on the next exception return.
+///
+/// Stored into the idle frame's `PC` by [`prime_idle_task`]. Mirrors a
+/// FreeRTOS `prvIdleTask`: a kernel-owned body, not host-supplied (the host
+/// supplies *application* task bodies — INV-S-EMBED-3 — but idle is the
+/// kernel's own).
+#[cfg(target_arch = "arm")]
+pub extern "C" fn idle_entry() -> ! {
+    loop {
+        cortex_m::asm::wfi();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal: drive a model event through the unchanged macrostep core.
 // ---------------------------------------------------------------------------
@@ -421,6 +441,42 @@ pub unsafe fn create_task(id: TaskId, prio: u8, entry: extern "C" fn() -> !) {
     create_task_with_stack(id, prio, entry, stack);
 }
 
+/// Prime the idle task (TCB[0]) exception-return frame.
+///
+/// `kernel::init()` reserves TCB[0] as idle and pre-stages `TASK_PSPS[0]` to
+/// point at the top of `TASK_STACKS[0]`, but leaves the frame there all-zero
+/// (it expected "a real activation overwrites them via task.create" — but
+/// idle is implicit, never created through [`create_task`]). The scheduler
+/// switches into idle the moment all real tasks block, so that all-zero frame
+/// would be restored as `PC=0 / xPSR.T=0` → INVSTATE HardFault. This writes a
+/// real basic frame — entry [`idle_entry`] (wfi loop), `LR` [`task_exit_trap`]
+/// — at idle's default-pool slot 0 and updates `TASK_PSPS[0]`. Idempotent;
+/// called once from [`start_scheduler`] before the first PendSV.
+#[cfg(target_arch = "arm")]
+fn prime_idle_task() {
+    const IDLE_ID: usize = 0;
+    // Default-pool slice for idle: TASK_STACKS[0] viewed as [u32], the same
+    // construction [`create_task`] uses for the default pool (raw pointer to
+    // avoid a shared ref to the `static mut`, per the Rust 2024 lint).
+    let slot_ptr = unsafe {
+        let base = core::ptr::addr_of_mut!(kernel::TASK_STACKS) as *mut StackRegion;
+        base.add(IDLE_ID) as *mut u32
+    };
+    let idle_stack: &'static mut [u32] = unsafe {
+        core::slice::from_raw_parts_mut(slot_ptr, TASK_STACK_BYTES / core::mem::size_of::<u32>())
+    };
+    let psp = prime_stack_slice(
+        idle_stack,
+        idle_entry as *const () as usize as u32,
+        task_exit_trap as *const () as usize as u32,
+    );
+    // SAFETY: boot-context single writer (start_scheduler), before the first
+    // PendSV / any interrupt that touches the side-table.
+    unsafe {
+        kernel::TASK_PSPS[IDLE_ID] = psp;
+    }
+}
+
 /// Start the scheduler: select the highest-priority READY task and trigger
 /// the first PendSV to context-switch INTO its primed PSP frame. Never
 /// returns.
@@ -451,6 +507,17 @@ pub unsafe fn create_task(id: TaskId, prio: u8, entry: extern "C" fn() -> !) {
 /// and `kernel::init()`. Never returns.
 #[cfg(target_arch = "arm")]
 pub unsafe fn start_scheduler() -> ! {
+    // (0) Prime the IDLE task (TCB[0]) frame. The model promotes idle
+    // whenever every real task is blocked (render's `task_delay`, audio's
+    // `sem_take`), which happens within the first few ticks — so PendSV WILL
+    // switch into idle. `kernel::init()` only pre-staged idle's PSP *pointer*
+    // (`TASK_PSPS[0]`) over an all-zero frame; restoring that gives PC=0 /
+    // xPSR.T=0 → INVSTATE HardFault. Prime a real exception-return frame
+    // (entry = [`idle_entry`] wfi-loop, LR = [`task_exit_trap`]) at idle's
+    // stack now, before the first switch. Idle uses default-pool slot 0
+    // (`kernel::TASK_STACKS[0]`); a wfi loop needs negligible stack.
+    prime_idle_task();
+
     // (1) Ensure the highest-priority ready task is `current`. Run the
     // model scheduler microstep directly on the live state — same body the
     // macrostep runs (INV-S-EMBED-2). pick_next() promotes the top ready
