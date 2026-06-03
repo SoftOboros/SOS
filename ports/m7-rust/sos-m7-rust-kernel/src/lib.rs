@@ -39,7 +39,17 @@
 
 #![no_std]
 
+pub mod embed;
 pub mod event;
+// The exception-handler bodies are Cortex-M inline ARM asm (`core::arch::asm!`
+// with ARMv7-M instructions) and the `#[exception]` cortex-m-rt symbols; they
+// only compile on the embedded target. Gating to `target_arch = "arm"` lets
+// the rest of the kernel core (and the `embed` host unit tests, SOS-04-B
+// §8 gate (c)/wave-2 priming test) build on the host. The conformance bin and
+// host apps build for `thumbv7em-none-eabihf` (arm), so the handlers are
+// always present in any real firmware image. INV-S-EMBED-1: no model/trace
+// change — this is a build-target gate only.
+#[cfg(target_arch = "arm")]
 pub mod handlers;
 pub mod kernel;
 pub mod scripts;
