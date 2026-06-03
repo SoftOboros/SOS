@@ -1,10 +1,11 @@
 # SOS-04-B — Embeddable Kernel: Real Task-Body Execution & Host-App Library API
 
-**Status:** **DRAFT 2026-06-03** (branch `daa08-amp-proposals`; §15). Awaiting ratification.
+**Status:** **Ratified 2026-06-03** (owner: Ira; branch `daa08-amp-proposals`; §15). All three
+PCDNs (§5) resolved; the §5.5 kernel-library API surface and INV-S-EMBED-1..3 (§6) are binding.
 This is a **terms / spec** doc: it pins how the SOS-04 M7 port grows from a *scheduling /
 conformance model* into an **embeddable RTOS that executes real application task bodies** and
-exposes a consumable kernel-library API. **NO code lands under SOS-04-B itself** — the three
-PCDNs (§5) must ratify first; implementation lands as follow-up commits citing this doc's §15.
+exposes a consumable kernel-library API. **NO code lands under SOS-04-B itself**; implementation
+lands as follow-up commits citing this doc's §15.
 
 **Proposed by the sibling disco-analyzer DAA-08 initiative** (REQ-SOS-1/2 at the *real-execution*
 level, beyond the model level G-A0 already proved). DAA-08-B (the analyzer's `sos` CM7 build)
@@ -119,7 +120,11 @@ an SOS-hosted build must reproduce:
   conformance front-end. *Con:* a host still depends on the bin crate; feature-unification risk.
 
 **Recommendation: (B).** Cleanest consumer contract (analyzer-cm7 depends only on the kernel lib),
-and it makes "one kernel core, two front-ends" structural. *Decision: __pending__.*
+and it makes "one kernel core, two front-ends" structural. **Decision: (B) ratified 2026-06-03** —
+extract a `sos-m7-rust-kernel` `no_std` lib crate holding the kernel core
+(kernel/handlers/scripts/event + the §5.5 API); the conformance `bin` (`sos-m7-rust`) and host apps
+both depend on it. The extraction MUST be behaviour-preserving for the conformance suite
+(INV-S-EMBED-1).
 
 ### 5.2 PCDN-SOS-04-B-002 — Task entry ABI & stack priming
 
@@ -134,7 +139,13 @@ and it makes "one kernel core, two front-ends" structural. *Decision: __pending_
   stays `{id, prio}` (additive — entry/PSP are not serialized model state, see PCDN-003).
 
 **Recommendation: (A)** `extern "C" fn() -> !` + a `task_exit_trap` that faults/halts (a returning
-task is a bug), R0=0. *Decision: __pending__.*
+task is a bug), R0=0. **Decision: (A) ratified 2026-06-03** — entry is `extern "C" fn() -> !`; at
+create, prime the basic exception-return frame on the task's PSP (`xPSR = 0x0100_0000`,
+`PC = entry`, `LR = task_exit_trap`, `R0..R3/R12 = 0`, 8-byte aligned) and set `TASK_PSPS[id]`.
+A returning task reaches `task_exit_trap` → fault/halt. The embedded `create_task` carries the
+`entry` (+ stack region); the SOS-02/03 event-model `task.create` stays `{id, prio}` (additive;
+entry/PSP are not serialized — INV-S-EMBED-1). This ABI is **Standards Action** so SOS-05 (C port)
+mirrors it.
 
 ### 5.3 PCDN-SOS-04-B-003 — Syscall / ISR execution model & conformance compatibility
 
@@ -151,7 +162,11 @@ task is a bug), R0=0. *Decision: __pending__.*
   emits byte-identical traces (INV-S-CONF-1 intact). One kernel core, two front-ends.
 
 **Recommendation: as stated** (DirectCallBasepri + pend-PendSV; model/trace unchanged).
-*Decision: __pending__.*
+**Decision: ratified 2026-06-03** — real-context syscalls use the DirectCallBasepri envelope
+(SOS-00 PCDN-SOS-00-002 / SOS-04 §6.5): mask BASEPRI → run the existing `dispatch_event`
+macrostep → unmask → pend PendSV iff `current` changed; the switch happens on PendSV exit
+(SOS-04 §6.4). The SVC handler stays vestigial. Kernel core + `Tcb` serialization unchanged →
+conformance traces byte-equal (INV-S-CONF-1 / INV-S-EMBED-1).
 
 ### 5.4 Registration policy
 
@@ -160,6 +175,39 @@ task is a bug), R0=0. *Decision: __pending__.*
   kernel pools/semantics, it does not change them).
 - **Task entry ABI (PCDN-002):** *Standards Action* on SOS-04-B — it is a cross-port contract
   (SOS-05 C port must mirror it); changing it requires a §15 amendment here.
+
+### 5.5 Frozen kernel-library API (`sos-m7-rust-kernel`)
+
+The `no_std` surface a host `bin` links. Signatures are frozen (Specification Required, §5.4);
+semantics cite the kernel core they drive. `TaskId = i16` (SOS-04 §6.3).
+
+```rust
+// Construction (boot context, before the scheduler runs):
+pub unsafe fn create_sem(id: u8, initial: u32, max: u32);          // → sem.create model event
+pub unsafe fn create_task(id: TaskId, prio: u8,                    // primes PSP frame (PCDN-002),
+                          entry: extern "C" fn() -> !);            //   sets TASK_PSPS[id],
+                                                                   //   → task.create{id,prio} model event
+pub unsafe fn start_scheduler() -> !;                             // first PendSV → highest-prio task; never returns
+
+// Task context (DirectCallBasepri → macrostep → pend PendSV, PCDN-003):
+pub fn sem_take(sid: u8, timeout: i32);                           // timeout -1 = block forever
+pub fn task_delay(ticks: u32);                                    // → task.delay model event
+
+// ISR context (kernel-aware IRQ ≥ 0xA0, SOS-00 §6.1):
+pub fn sem_give_from_isr(sid: u8) -> bool;                        // returns "higher-prio woken" (yield hint)
+pub fn on_sys_tick();                                            // SysTick handler body → sys.tick + pend PendSV
+
+// Exception bodies the host routes its vector table to (install mechanism is an impl detail):
+pub unsafe extern "C" fn sos_pendsv();                           // SOS-04 §6.4 save/restore body
+pub unsafe extern "C" fn sos_systick();                          // wraps on_sys_tick()
+```
+
+**Consumer mapping (informative — disco-analyzer `analyzer-rtos`):**
+`scheduler::init(audio_entry, render_entry)` ≡ `create_sem` + `create_task(render)` +
+`create_task(audio)` + `start_scheduler()`; `AudioSemaphore::take_blocking()` ≡ `sem_take(s, -1)`;
+`AudioSemaphore::give_from_isr()` ≡ `sem_give_from_isr(s)`; `handle_systick()` ≡ `on_sys_tick()`.
+The host owns the idle body unless it relies on the kernel's default `__WFI` idle (task 0 / prio 0,
+SOS-00 boot region).
 
 ## 6. Invariants
 
@@ -215,6 +263,20 @@ REQ-SOS-1/2.
 
 ## 15. Change log
 
+- **2026-06-03 (ratification)** — SOS-04-B **ratified** by owner (Ira). All three PCDNs resolved:
+  **PCDN-001 = (B)** extract a `sos-m7-rust-kernel` `no_std` lib crate (kernel core + the §5.5 API),
+  consumed by both the conformance bin and host apps, extraction behaviour-preserving for the
+  conformance suite; **PCDN-002 = (A)** task entry ABI `extern "C" fn() -> !` + PSP exception-return
+  frame priming at create (`xPSR`/`PC`/`LR=task_exit_trap`/`R0=0`) + `TASK_PSPS[id]` init, returning
+  task → trap (Standards Action, SOS-05 mirrors); **PCDN-003 =** DirectCallBasepri envelope →
+  `dispatch_event` macrostep → pend PendSV iff `current` changed (SVC stays vestigial). §5.5 freezes
+  the kernel-library API surface; §6 INV-S-EMBED-1..3 binding (model/trace immutability; one core /
+  two front-ends; host-owns-app / kernel-owns-scheduling). The §8 acceptance set is binding on the
+  implementation phase, including the byte-equal-conformance-after-extraction gate (c) and the
+  two-task host example (d). **Implementation now unblocked** (SOS-owned, follow-up commits);
+  **DAA-08-B unblocks once the `sos-m7-rust-kernel` lib + the §5.5 API land** and the parent SOS
+  submodule pin is bumped. Per the standing user preference, SOS-04-B implementation fan-out uses
+  Claude-native subagents, not codex.
 - **2026-06-03 (drafting)** — SOS-04-B drafted on branch `daa08-amp-proposals`, **proposed by the
   sibling disco-analyzer DAA-08 initiative** (REQ-SOS-1/2 at real-execution level). §2 pins the
   evidence: the port runs no task bodies (`scripts.rs:366` create is `{id,prio}`-only;
