@@ -1,10 +1,11 @@
 //! Smoke tests for the harness internals — one test per
 //! implementation slot per SOS-03 §12.2 (l).
 //!
-//! The conformance suite itself (the six fixtures under
-//! `conformance/vectors/smoke/`) is the integration test surface and is
-//! exercised by `sos-conformance run --suite ...`; these unit tests
-//! cover the harness primitives (loader, diff, filter, port, harness).
+//! The conformance suite itself is the integration test surface and is
+//! exercised by `sos-conformance run --suite ...`; these unit tests cover
+//! the harness primitives (loader, diff, filter, port, harness). The six
+//! seed fixtures under `conformance/vectors/smoke/` remain the smoke
+//! baseline.
 
 use std::path::PathBuf;
 
@@ -154,13 +155,30 @@ fn subprocess_port_reports_missing_binary_as_spawn_error() {
 
 #[test]
 fn harness_run_against_in_process_port_passes_full_suite() {
-    let harness = Harness::new(suite_root(), None, None);
-    let report = harness.run().expect("harness run must succeed");
-    assert_eq!(report.total, 6, "expect six smoke vectors");
+    let smoke_harness = Harness::new(suite_root(), None, Some("smoke/*.json".to_string()));
+    let smoke_report = smoke_harness.run().expect("smoke harness run must succeed");
+    assert_eq!(smoke_report.total, 6, "expect six smoke seed vectors");
     assert_eq!(
-        report.passed, 6,
+        smoke_report.passed, 6,
+        "in-process port must pass every smoke committed-trace vector"
+    );
+    assert!(smoke_report.failed.is_empty());
+    assert!(smoke_report.is_pass());
+
+    let full_harness = Harness::new(suite_root(), None, None);
+    let report = full_harness.run().expect("full harness run must succeed");
+    assert_eq!(
+        report.total, 7,
+        "expect six smoke vectors plus DAA-08 diversity vector"
+    );
+    assert_eq!(
+        report.passed, 7,
         "in-process port must pass every committed-trace vector"
     );
+    assert!(report
+        .per_vector
+        .iter()
+        .any(|v| v.relative_path == "diversity/0001-daa08-analyzer-two-task-hsem-wake.json"));
     assert!(report.failed.is_empty());
     assert!(report.is_pass());
 }

@@ -3,17 +3,17 @@
 //!
 //! See SOS-03 §7.1 for the CLI grammar (`run --suite <DIR>
 //! [--port <BIN>] [--filter <GLOB>] [--format <FORMAT>] [--out <PATH>]`)
-//! and §7.2 for the exit-code table. v1 implements the `run` subcommand
-//! body; `generate` and `lint` are reserved subcommand slots.
+//! and §7.2 for the exit-code table. v1 implements the `run` and
+//! `generate` subcommands; `lint` is a reserved subcommand slot.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use sos_conformance::{Harness, HarnessReport};
+use sos_conformance::{Harness, HarnessReport, InProcessPort, Port, VectorFile};
 
 /// SOS-03 §7.2 exit codes.
 const EXIT_OK: u8 = 0;
@@ -35,7 +35,7 @@ struct Cli {
     cmd: Cmd,
 }
 
-/// Subcommands. v1 ships `run` only; `generate` and `lint` are reserved.
+/// Subcommands. v1 ships `run` and `generate`; `lint` is reserved.
 #[derive(Debug, Subcommand)]
 enum Cmd {
     /// Run every (filter-matching) vector in the suite directory against
@@ -60,12 +60,19 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Reserved: regenerate a vector's `expected_trace` by running
-    /// `sos-sim` over its `input`. Lands in a follow-up commit.
+    /// Regenerate vector `expected_trace` values by running in-process
+    /// `sos-sim` over each vector's `input`.
     Generate {
         /// Path to the vector file to regenerate.
+        #[arg(value_name = "VECTOR")]
+        vector: Option<PathBuf>,
+        /// Path to the vector file to regenerate. Compatibility spelling
+        /// for the reserved v1 CLI slot.
+        #[arg(long = "vector", value_name = "VECTOR")]
+        vector_flag: Option<PathBuf>,
+        /// Regenerate every JSON vector under this suite root.
         #[arg(long)]
-        vector: PathBuf,
+        suite: Option<PathBuf>,
     },
     /// Reserved: validate a vector file against the SOS-03 §6.2 schema
     /// without running it. Lands in a follow-up commit.
@@ -95,16 +102,123 @@ fn main() -> ExitCode {
             format,
             out,
         } => run_cmd(suite, port, filter, format, out),
-        Cmd::Generate { .. } => {
-            let _ = writeln!(io::stderr(), "`generate` subcommand not implemented at v1");
-            EXIT_SETUP
-        }
+        Cmd::Generate {
+            vector,
+            vector_flag,
+            suite,
+        } => generate_cmd(vector, vector_flag, suite),
         Cmd::Lint { .. } => {
             let _ = writeln!(io::stderr(), "`lint` subcommand not implemented at v1");
             EXIT_SETUP
         }
     };
     ExitCode::from(code)
+}
+
+fn generate_cmd(
+    vector: Option<PathBuf>,
+    vector_flag: Option<PathBuf>,
+    suite: Option<PathBuf>,
+) -> u8 {
+    let mut targets: Vec<PathBuf> = Vec::new();
+
+    match (vector, vector_flag, suite) {
+        (Some(v), None, None) | (None, Some(v), None) => {
+            targets.push(v);
+        }
+        (None, None, Some(suite)) => {
+            if !suite.exists() {
+                let _ = writeln!(
+                    io::stderr(),
+                    "suite directory does not exist: {}",
+                    suite.display()
+                );
+                return EXIT_SETUP;
+            }
+            if let Err(e) = collect_vector_paths(&suite, &mut targets) {
+                let _ = writeln!(io::stderr(), "suite walk failed: {e}");
+                return EXIT_IO;
+            }
+        }
+        (None, None, None) => {
+            let _ = writeln!(
+                io::stderr(),
+                "generate requires a VECTOR path or --suite <DIR>"
+            );
+            return EXIT_SETUP;
+        }
+        _ => {
+            let _ = writeln!(
+                io::stderr(),
+                "generate accepts exactly one of VECTOR, --vector <VECTOR>, or --suite <DIR>"
+            );
+            return EXIT_SETUP;
+        }
+    }
+
+    targets.sort();
+    let mut generated = 0usize;
+    for path in targets {
+        match generate_one(&path) {
+            Ok(record_count) => {
+                generated += 1;
+                println!(
+                    "GENERATED  {}  ({} trace records)",
+                    path.display(),
+                    record_count
+                );
+            }
+            Err(e) => {
+                let _ = writeln!(io::stderr(), "generate failed for {}: {e}", path.display());
+                return EXIT_SETUP;
+            }
+        }
+    }
+    println!("RESULT: GENERATED {generated} vector(s)");
+    EXIT_OK
+}
+
+fn generate_one(path: &Path) -> anyhow::Result<usize> {
+    let mut vec = VectorFile::from_path(path)?;
+    let expected_trace = InProcessPort.execute_vector(&vec)?;
+    let record_count = expected_trace.len();
+    vec.expected_trace = expected_trace;
+
+    let mut writer = BufWriter::new(File::create(path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to open vector file for write {}: {e}",
+            path.display()
+        )
+    })?);
+    serde_json::to_writer_pretty(&mut writer, &vec).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to serialize generated vector {}: {e}",
+            path.display()
+        )
+    })?;
+    writeln!(writer)?;
+    writer.flush()?;
+    Ok(record_count)
+}
+
+fn collect_vector_paths(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    let read = std::fs::read_dir(root)?;
+    for entry in read {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if path.file_name().and_then(|name| name.to_str()) == Some("retired") {
+                continue;
+            }
+            collect_vector_paths(&path, out)?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn run_cmd(
