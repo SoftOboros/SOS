@@ -6,12 +6,16 @@
 //!     Cortex-M exception-return frame at the top of the task's PSP region
 //!     (`xPSR = 0x0100_0000`, `PC = entry`, `LR = task_exit_trap`,
 //!     `R0..R3/R12 = 0`, 8-byte aligned) and sets `TASK_PSPS[id]`.
-//!   * §5.5 — the frozen `no_std` library API. **This module (wave 2)
-//!     implements the CONSTRUCTION + TICK subset only:** [`create_sem`],
-//!     [`create_task`], [`start_scheduler`], [`on_sys_tick`].
-//!     The task-context / ISR-context syscall front-ends
-//!     (`sem_take`, `task_delay`, `sem_give_from_isr`) are PCDN-003 and
-//!     land in wave 3 — they are **deliberately absent here**.
+//!   * §5.5 — the frozen `no_std` library API. **This module now implements
+//!     the COMPLETE §5.5 surface** across two waves:
+//!       - wave 2 (PCDN-002): construction + tick — [`create_sem`],
+//!         [`create_task`], [`start_scheduler`], [`on_sys_tick`];
+//!       - wave 3 (PCDN-003): the real-context syscall / ISR front-ends —
+//!         [`sem_take`], [`task_delay`], [`sem_give_from_isr`], each running
+//!         the DirectCallBasepri envelope (mask BASEPRI → unchanged
+//!         `dispatch_event` macrostep → unmask → pend PendSV iff `current`
+//!         changed). The pend predicate + the `sem_give_from_isr` yield hint
+//!         are factored into the pure, host-tested [`envelope_outcome`].
 //!
 //! ## Invariants honoured (§6)
 //!
@@ -116,6 +120,63 @@ pub const fn compute_primed_frame(
         // R0, R1, R2, R3, R12, LR, PC, xPSR
         frame: [0, 0, 0, 0, 0, lr, pc, INITIAL_XPSR],
         psp,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pure, host-testable DirectCallBasepri envelope decision (PCDN-003).
+// ---------------------------------------------------------------------------
+
+/// Outcome of one DirectCallBasepri syscall/ISR envelope step, derived purely
+/// from the model's `current` task id before and after the macrostep.
+///
+/// PCDN-003: every real-context entry runs the existing `dispatch_event`
+/// macrostep under a BASEPRI mask, then decides — from `current` alone —
+/// whether to pend PendSV. The model's scheduler microstep (`sched.run`)
+/// always promotes the highest-priority READY task to `current`; so a change
+/// in `current` across the macrostep is exactly the signal that a different
+/// (i.e. higher-priority, by the model's `pick_next` ordering) task must now
+/// run. This is the load-bearing equivalence the envelope rests on:
+///
+///   * **pend PendSV** iff `current` changed (the running context must be
+///     swapped on PendSV exit — SOS-04 §6.4);
+///   * the **yield hint** returned by `sem_give_from_isr` ("a higher-priority
+///     task was made ready") is the *same* predicate — when an ISR `give`
+///     unblocks a waiter the macrostep's `sched.run` promotes it to `current`
+///     iff it outranks the interrupted task, mirroring the analyzer's
+///     `AudioSemaphore::give_from_isr() -> bool` contract.
+///
+/// Factored out as a pure function so the predicate (the only non-asm part of
+/// the envelope) is host-unit-testable without the live `KERNEL_STATE` or any
+/// `cortex_m` intrinsic. INV-S-EMBED-1: no model/trace state — pure math over
+/// two ids the macrostep already computed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EnvelopeOutcome {
+    /// Whether PendSV must be pended (the running task changed).
+    pub pend_pendsv: bool,
+    /// The outgoing task id to record in `OUTGOING_TID` when `pend_pendsv`
+    /// (the task that was running before the macrostep). Meaningless when
+    /// `!pend_pendsv`.
+    pub outgoing: i32,
+    /// The incoming task id to record in `CURRENT_TID` when `pend_pendsv`
+    /// (the task selected by the macrostep). Meaningless when `!pend_pendsv`.
+    pub incoming: i32,
+}
+
+/// Decide the envelope outcome from the `current` ids straddling the macrostep.
+///
+/// `prev_current` is `dm.current` before `dispatch_event`; `new_current` is
+/// `dm.current` after. PendSV is pended (and the yield hint is true) iff they
+/// differ — see [`EnvelopeOutcome`] for why this single predicate serves both
+/// the context-switch request and the ISR yield hint.
+///
+/// Pure function: no `static` access, no asm — host-testable.
+pub const fn envelope_outcome(prev_current: i32, new_current: i32) -> EnvelopeOutcome {
+    let changed = new_current != prev_current;
+    EnvelopeOutcome {
+        pend_pendsv: changed,
+        outgoing: prev_current,
+        incoming: new_current,
     }
 }
 
@@ -367,20 +428,203 @@ pub fn on_sys_tick() {
             }
         };
 
-        if new_current != prev_current {
+        // Same pend predicate the PCDN-003 syscall envelope uses (factored
+        // into the host-tested `envelope_outcome`): pend PendSV iff `current`
+        // changed. SysTick already runs at `0xC0` (≥ kernel-aware), so no
+        // BASEPRI bracket is needed here — the ISR context is the mask.
+        let outcome = envelope_outcome(prev_current, new_current);
+        if outcome.pend_pendsv {
             // Record the switch endpoints for PendSV and request it. The
             // outgoing task is the one that was running; PendSV saves its
             // live frame, restores the incoming. -1 ↔ valid transitions are
             // handled by PendSV's OUTGOING_TID sentinel check.
-            kernel::OUTGOING_TID = prev_current;
-            kernel::CURRENT_TID = new_current;
+            kernel::OUTGOING_TID = outcome.outgoing;
+            kernel::CURRENT_TID = outcome.incoming;
             cortex_m::peripheral::SCB::set_pendsv();
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Host unit tests — the PURE frame-layout math (PCDN-002).
+// §5.5 — Real-context syscall / ISR front-ends (PCDN-003).
+//
+// Each runs the DirectCallBasepri envelope (SOS-00 PCDN-SOS-00-002 / SOS-04
+// §6.5): mask BASEPRI to the kernel-aware level (0xA0) → run the *existing*
+// `dispatch_event` macrostep for the corresponding model event → unmask
+// (0x00) → pend PendSV iff `current` changed (the switch happens on PendSV
+// exit, SOS-04 §6.4). No kernel logic is duplicated and no model semantics
+// are added: the only additions are the BASEPRI bracket and the PendSV pend,
+// both pure port-layer (INV-S-EMBED-1). The pend predicate + yield hint are
+// factored into the host-tested [`envelope_outcome`].
+// ---------------------------------------------------------------------------
+
+/// Kernel-aware BASEPRI mask level (SOS-04 §6.5 / SOS-00 §6.2): masks every
+/// interrupt at or below `*_from_isr` priority (`0xA0`) — including SysTick
+/// (`0xC0`) and PendSV (`0xE0`) — so the macrostep runs atomically against
+/// the live `KERNEL_STATE`. `0x00` lifts the mask.
+#[cfg(target_arch = "arm")]
+const KERNEL_BASEPRI: u8 = 0xA0;
+
+/// Run one model `event` through the macrostep inside the DirectCallBasepri
+/// envelope and request a context switch iff `current` changed.
+///
+/// Shared by every real-context syscall/ISR front-end below: it brackets the
+/// unchanged [`dispatch`] (→ `dispatch_event`) with a BASEPRI raise/lower
+/// (DSB/ISB ordered per SOS-04 §6.5), reads `current` straddling the
+/// macrostep, and — via the pure [`envelope_outcome`] — records the
+/// outgoing/incoming TIDs and pends PendSV when they differ. Returns the
+/// [`EnvelopeOutcome`] so the ISR `give` path can surface the yield hint.
+///
+/// # Safety
+/// Caller MUST ensure `kernel::init()` has run. From task context the BASEPRI
+/// raise makes the macrostep atomic against `*_from_isr` / SysTick; from ISR
+/// context (already at `≥ 0xA0`) the raise is a benign no-op-or-raise.
+#[cfg(target_arch = "arm")]
+unsafe fn run_envelope(event: &Event) -> EnvelopeOutcome {
+    // --- mask BASEPRI to the kernel-aware level (enter the envelope) ---
+    cortex_m::register::basepri::write(KERNEL_BASEPRI);
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
+
+    let prev_current: i32 = {
+        let cell = &*kernel::KERNEL_STATE.0.get();
+        match cell.as_ref() {
+            Some(dm) => dm.current as i32,
+            None => {
+                // Nothing to drive; lift the mask and bail.
+                cortex_m::asm::dsb();
+                cortex_m::asm::isb();
+                cortex_m::register::basepri::write(0x00);
+                return envelope_outcome(0, 0);
+            }
+        }
+    };
+
+    // The unchanged macrostep (INV-S-EMBED-1/2).
+    dispatch(event);
+
+    let new_current: i32 = {
+        let cell = &*kernel::KERNEL_STATE.0.get();
+        match cell.as_ref() {
+            Some(dm) => dm.current as i32,
+            None => prev_current,
+        }
+    };
+
+    let outcome = envelope_outcome(prev_current, new_current);
+
+    // --- unmask BASEPRI (exit the envelope) ---
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
+    cortex_m::register::basepri::write(0x00);
+
+    // Pend PendSV iff `current` changed; the actual save/restore happens on
+    // PendSV exit (SOS-04 §6.4) once BASEPRI is below 0xE0 (just lifted).
+    if outcome.pend_pendsv {
+        kernel::OUTGOING_TID = outcome.outgoing;
+        kernel::CURRENT_TID = outcome.incoming;
+        cortex_m::peripheral::SCB::set_pendsv();
+    }
+
+    outcome
+}
+
+/// Take a semaphore, blocking the **calling task** if it is unavailable
+/// (§5.5). Dispatches the existing `sem.take{sid, timeout}` model event under
+/// the DirectCallBasepri envelope; `timeout == -1` blocks forever, `0` is
+/// no-wait, `> 0` is a tick deadline (the model's `script_sys_idle_sem_take_0`
+/// owns all of this — no duplication here).
+///
+/// If the sem is unavailable and a wait is requested, the macrostep blocks the
+/// caller (`block_current` → `BlkSem`) and `sched.run` promotes the next task
+/// to `current`; the envelope then pends PendSV so the caller is switched away
+/// and resumes only when a `sem_give` / `sem_give_from_isr` unblocks it
+/// (SOS-04 §6.4). If the sem is available, no block / no switch occurs.
+///
+/// # Safety
+/// MUST be called from **task context** (a running task — `dm.current >= 0`).
+/// `sem.take` reads `dm.current` to identify the blocker; calling it from ISR
+/// context (where the interrupted task, not the kernel, owns `current`) is a
+/// precondition violation (the model returns `BadState` if `current < 0`).
+/// `kernel::init()` MUST have run and the sem MUST have been created.
+#[cfg(target_arch = "arm")]
+pub fn sem_take(sid: u8, timeout: i32) {
+    // SAFETY: task-context single-entry to the envelope; see fn doc.
+    unsafe {
+        let event = Event {
+            name: EventName::SemTake,
+            data: EventData::SemOp {
+                sid: sid as i16,
+                timeout: timeout as i64,
+            },
+            from_tid: None,
+        };
+        let _ = run_envelope(&event);
+    }
+}
+
+/// Delay the **calling task** for `ticks` SysTick periods (§5.5). Dispatches
+/// the existing `task.delay{ticks}` model event under the envelope; the
+/// macrostep blocks the caller (`block_current` → `Delay`, deadline
+/// `tick_count + ticks`) and `sched.run` selects the next task, so the
+/// envelope pends PendSV and the caller yields. It is woken when
+/// [`on_sys_tick`] advances `tick_count` past the deadline.
+///
+/// `ticks == 0` is a plain yield (the model raises `resched` without blocking).
+///
+/// # Safety
+/// MUST be called from **task context**. `kernel::init()` MUST have run.
+#[cfg(target_arch = "arm")]
+pub fn task_delay(ticks: u32) {
+    // SAFETY: task-context single-entry to the envelope; see fn doc.
+    unsafe {
+        let event = Event {
+            name: EventName::TaskDelay,
+            data: EventData::TaskDelay {
+                ticks: ticks as i64,
+            },
+            from_tid: None,
+        };
+        let _ = run_envelope(&event);
+    }
+}
+
+/// Give a semaphore from **ISR context** (§5.5). Dispatches the existing
+/// `sem.give_from_isr{sid}` model event under the envelope; if a task was
+/// waiting on the sem the macrostep unblocks it and `sched.run` may promote it
+/// to `current`. PendSV is pended iff `current` changed.
+///
+/// **Returns the yield hint** — `true` iff a higher-priority task was made
+/// ready (i.e. `current` changed across the macrostep). This is the SOS mirror
+/// of the analyzer's `AudioSemaphore::give_from_isr() -> bool`: the ISR uses it
+/// to decide whether a `portYIELD_FROM_ISR`-equivalent is warranted. Because
+/// the envelope already pends PendSV on the same predicate, the hint is
+/// advisory for the caller; the switch is requested regardless.
+///
+/// # Safety
+/// MUST be called from **ISR context** (a kernel-aware IRQ at `≥ 0xA0`,
+/// SOS-00 §6.1 — e.g. the host's HSEM doorbell ISR). `kernel::init()` MUST
+/// have run. `sem.give_from_isr` does not consult `current`, so it is safe
+/// when no task is running.
+#[cfg(target_arch = "arm")]
+pub fn sem_give_from_isr(sid: u8) -> bool {
+    // SAFETY: ISR-context single-entry to the envelope; see fn doc.
+    unsafe {
+        let event = Event {
+            name: EventName::SemGiveFromIsr,
+            data: EventData::SemOp {
+                sid: sid as i16,
+                timeout: 0, // ignored by sem.give_from_isr
+            },
+            from_tid: None,
+        };
+        run_envelope(&event).pend_pendsv
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host unit tests — the PURE frame-layout math (PCDN-002) + envelope
+// decision (PCDN-003).
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -462,6 +706,52 @@ mod tests {
         let raw_top = base + size2 as u32; // 0x2000_006A
         let aligned_top = raw_top & !0x7u32; // 0x2000_0068
         assert_eq!(p.psp, aligned_top - BASIC_FRAME_BYTES as u32);
+    }
+
+    // ----- PCDN-003 envelope decision (pure) -----
+
+    #[test]
+    fn envelope_no_switch_when_current_unchanged() {
+        // sem available / give with no waiter / take that succeeds: current
+        // does not move → no PendSV, yield hint false.
+        let o = envelope_outcome(2, 2);
+        assert!(!o.pend_pendsv, "unchanged current must not pend PendSV");
+    }
+
+    #[test]
+    fn envelope_switch_when_current_changes() {
+        // A higher-prio task unblocked and was promoted to current: pend
+        // PendSV, record outgoing/incoming TIDs.
+        let o = envelope_outcome(0, 1);
+        assert!(o.pend_pendsv, "changed current must pend PendSV");
+        assert_eq!(o.outgoing, 0, "outgoing is the pre-macrostep current");
+        assert_eq!(o.incoming, 1, "incoming is the post-macrostep current");
+    }
+
+    #[test]
+    fn envelope_yield_hint_equals_pend_predicate() {
+        // sem_give_from_isr returns `pend_pendsv` as the yield hint: the two
+        // are the SAME predicate by construction (see EnvelopeOutcome doc).
+        for prev in -1i32..4 {
+            for new in -1i32..4 {
+                let o = envelope_outcome(prev, new);
+                assert_eq!(
+                    o.pend_pendsv,
+                    new != prev,
+                    "pend/yield-hint must be exactly (current changed)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn envelope_blocking_take_switches_away() {
+        // A task that blocks on sem.take: macrostep blocks the caller and
+        // promotes the next task; current 1 -> 0 (idle) say → switch away.
+        let o = envelope_outcome(1, 0);
+        assert!(o.pend_pendsv);
+        assert_eq!(o.outgoing, 1);
+        assert_eq!(o.incoming, 0);
     }
 
     #[test]

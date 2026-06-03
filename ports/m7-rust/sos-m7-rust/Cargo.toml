@@ -41,6 +41,17 @@ sos-m7-rust-trace = { path = "../sos-m7-rust-trace" }
 # (compiled-in static smoke vector) per PCDN-SOS-04-004.
 standalone-smoke = []
 
+# SOS-04-B §8(d): the two-task host-app acceptance example. When ON, the
+# conformance `#[entry]` is replaced by `two_task_example::main` (one worker
+# task looping on `sem_take`, an IRQ-style `sem_give_from_isr` site, a
+# `SysTick` that calls `on_sys_tick`, boot doing `create_sem` +
+# `create_task` + `start_scheduler`). It enables the kernel's
+# `host-exceptions` so the host owns the `SysTick` symbol. Default OFF — the
+# conformance build path is byte-for-byte unchanged (INV-S-EMBED-1). This
+# example need only BUILD for thumbv7em-none-eabihf; running it exercises the
+# PendSV asm and is bench-gated.
+two-task-example = ["sos-m7-rust-kernel/host-exceptions"]
+
 # Note: the release / dev profile choices required by SOS-04-CONCEPTS.md
 # §6.1 (`lto = "fat"`, `codegen-units = 1`, `opt-level = "s"`,
 # `panic = "abort"`) belong at the workspace root because cargo ignores

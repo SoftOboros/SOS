@@ -18,6 +18,10 @@
 use core::arch::asm;
 use cortex_m_rt::exception;
 
+// Only the conformance-mode `SysTick` no-op touches `KERNEL_STATE` here; it
+// is dropped under `host-exceptions` (a host supplies its own SysTick), so
+// gate the import to match and keep the host build warning-clean.
+#[cfg(not(feature = "host-exceptions"))]
 use crate::kernel::KERNEL_STATE;
 
 /// PendSV — context-switch primitive. NVIC priority `0xE0` per
@@ -199,6 +203,16 @@ fn PendSV() {
 /// The reference for the phase 3b body is `sos-sim`'s `scripts.rs`
 /// `script_tick_idle_sys_tick_0` — the canonical transliteration of the
 /// chart's `<transition event="sys.tick">` body.
+///
+/// SOS-04-B note: a real-execution host (the §5.5 embeddable front-end)
+/// supplies its own `SysTick` body that calls [`crate::embed::on_sys_tick`]
+/// to drive the macrostep + pend PendSV. To let the host own the `SysTick`
+/// exception symbol without a duplicate-definition link error, this
+/// conformance no-op is dropped under the `host-exceptions` feature (default
+/// OFF — the conformance bin builds with the feature off and gets this body
+/// unchanged; INV-S-EMBED-1). The feature gates **only** which crate defines
+/// `SysTick`; PendSV / SVCall are unaffected.
+#[cfg(not(feature = "host-exceptions"))]
 #[exception]
 fn SysTick() {
     // EOQ-005 (2026-05-21): in Conformance mode, "time" is driven by

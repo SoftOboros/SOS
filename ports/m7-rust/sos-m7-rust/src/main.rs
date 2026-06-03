@@ -36,6 +36,13 @@ mod json_parser;
 mod trace;
 mod transport;
 
+// SOS-04-B §8(d) — the two-task host-app acceptance example. Feature-gated
+// so it never participates in the default conformance build (INV-S-EMBED-1);
+// when ON it owns `#[entry]` + the `SysTick` exception in place of the
+// conformance `main`.
+#[cfg(feature = "two-task-example")]
+mod two_task_example;
+
 /// RX scratch buffer size. Matches `transport::RX_RING_CAPACITY` so the
 /// parser can hold a full wrapped vector input in the worst case (one
 /// full ring's worth of bytes between two parse steps).
@@ -160,6 +167,11 @@ fn record_macrostep_cycles(delta: u32) {
     }
 }
 
+// SOS-04-B §8(d): under the `two-task-example` feature the conformance
+// `#[entry]` is replaced by `two_task_example::main` (which owns `#[entry]`
+// + the `SysTick` exception). The conformance build path (feature OFF, the
+// default) is unchanged (INV-S-EMBED-1).
+#[cfg(not(feature = "two-task-example"))]
 #[entry]
 fn main() -> ! {
     // §6.8 step 1–9: clock tree (PCDN-SOS-04-013), peripheral clock

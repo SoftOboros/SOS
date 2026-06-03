@@ -27,6 +27,16 @@ publish = false
 name = "sos_m7_rust_kernel"
 path = "src/lib.rs"
 
+[features]
+# SOS-04-B §8(d): when a real-execution host (the §5.5 embeddable
+# front-end) supplies its own `SysTick` exception body — calling
+# `embed::on_sys_tick` to drive the macrostep + pend PendSV — it enables
+# this feature so the kernel's conformance-mode no-op `SysTick` is dropped,
+# avoiding a duplicate-symbol link error. Default OFF: the conformance bin
+# builds without it and keeps the unchanged no-op SysTick (INV-S-EMBED-1).
+# PendSV / SVCall are NOT gated.
+host-exceptions = []
+
 [dependencies]
 # Cortex-M intrinsics: `cortex_m::asm::{bkpt, wfi}` in the SVCall handler
 # body; `core::arch::asm!` drives the PendSV save/restore inline asm.
