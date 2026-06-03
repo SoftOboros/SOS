@@ -327,8 +327,15 @@ pub struct Datamodel {
 // per §6.7); every mutation of `KERNEL_STATE` happens under it.
 // -----------------------------------------------------------------------
 
+// PCDN-SOS-04-B-001 extraction: the conformance bin (`sos-m7-rust`)
+// accesses `KERNEL_STATE.0.get()` directly from the macrostep dispatch
+// loop. Before the kernel core was extracted into this lib, the bin and
+// kernel were one crate and `pub(crate)` sufficed. With the bin now a
+// separate crate, the field is `pub` so the bin retains the identical
+// access it had pre-extraction (behaviour-preserving — INV-S-EMBED-1).
+// This is the existing field the bin already used, not a new §5.5 API.
 #[doc(hidden)]
-pub struct KernelStateWrapper(pub(crate) UnsafeCell<Option<Datamodel>>);
+pub struct KernelStateWrapper(pub UnsafeCell<Option<Datamodel>>);
 
 // Safety: All access to the inner `Datamodel` is gated by the BASEPRI
 // raise/lower wrappers per SOS-04 §6.7 and SOS-00 §6.5. The wrapper is

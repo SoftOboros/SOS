@@ -524,6 +524,7 @@ dependencies = [
  "cortex-m-rt",
  "heapless",
  "panic-halt",
+ "sos-m7-rust-kernel",
  "sos-m7-rust-trace",
  "stm32h7",
 ]
@@ -537,6 +538,15 @@ dependencies = [
  "serde",
  "serde_json",
  "serialport",
+]
+
+[[package]]
+name = "sos-m7-rust-kernel"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "heapless",
 ]
 
 [[package]]

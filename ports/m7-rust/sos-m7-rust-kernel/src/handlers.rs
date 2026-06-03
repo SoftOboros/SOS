@@ -17,10 +17,8 @@
 
 use core::arch::asm;
 use cortex_m_rt::exception;
-use stm32h7::stm32h747cm7::interrupt;
 
 use crate::kernel::KERNEL_STATE;
-use crate::transport;
 
 /// PendSV — context-switch primitive. NVIC priority `0xE0` per
 /// SOS-00 §6.2 (programmed in `disco_bsp::init_nvic_priorities()`).
@@ -277,18 +275,4 @@ fn SVCall() {
     loop {
         cortex_m::asm::wfi();
     }
-}
-
-/// USART1 — RX ingress. NVIC priority `0xA0` per SOS-00 §6.2
-/// (`*_from_isr` kernel-aware band); programmed in
-/// `transport::start()` together with the NVIC unmask. The body
-/// delegates to `transport::usart1_isr_body()` which drains the
-/// hardware FIFO into the static RX ring; the macrostep loop in
-/// `main.rs` consumes from the ring via `transport::try_read_byte()`.
-///
-/// At v1 this ISR is the only `*_from_isr`-class kernel-aware handler
-/// the firmware installs (per INV-S-PORT-4: minimal peripherals).
-#[interrupt]
-fn USART1() {
-    transport::usart1_isr_body();
 }

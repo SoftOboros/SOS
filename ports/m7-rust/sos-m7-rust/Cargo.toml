@@ -25,6 +25,12 @@ cortex-m-rt = "0.7"
 panic-halt = "1"
 stm32h7 = { version = "0.15", features = ["stm32h747cm7"] }
 heapless = "0.8"
+# PCDN-SOS-04-B-001 = (B): the kernel core (kernel/event/scripts/handlers)
+# was extracted into this dependency-light no_std lib. The conformance bin
+# links it and drives it via the same module paths it used pre-extraction
+# (behaviour-preserving — INV-S-EMBED-1). Importing the lib's `handlers`
+# module keeps the PendSV/SysTick/SVCall `#[exception]` symbols linked.
+sos-m7-rust-kernel = { path = "../sos-m7-rust-kernel" }
 # Pure-logic JSONL writer (PCDN-SOS-04-008 + PCDN-SOS-04-018). Lives in
 # a sibling `no_std` crate so the host-side `sos-m7-rust-tests` crate
 # can exercise the writer without dragging in cortex-m / cortex-m-rt.

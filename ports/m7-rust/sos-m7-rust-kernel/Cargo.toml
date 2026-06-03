@@ -1,0 +1,40 @@
+# sos-m7-rust-kernel — the embeddable SOS-04 M7 kernel core (no_std lib).
+#
+# Per SOS-04-B-EMBEDDABLE-KERNEL.md PCDN-SOS-04-B-001 = (B), ratified
+# 2026-06-03: the kernel core is extracted out of the bin-only
+# `sos-m7-rust` crate into this dependency-light `no_std` library so the
+# conformance bin and host apps both link one kernel core (INV-S-EMBED-2).
+#
+# Wave 1 (PCDN-001) is a behaviour-preserving extraction (INV-S-EMBED-1):
+# kernel/event/scripts/handlers relocated unchanged. The §5.5 host-app
+# API surface and PCDN-002/003 land in later waves.
+#
+# Dependency-light by design: only what the relocated kernel-core modules
+# actually use. The bin's `json_parser` / `transport` / `stm32h7` /
+# `panic-halt` deps are NOT pulled in here — they belong to the
+# conformance front-end that stays in `sos-m7-rust`.
+
+[package]
+name = "sos-m7-rust-kernel"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Embeddable SOS-04 M7 kernel core (no_std lib; thumbv7em-none-eabihf)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "sos_m7_rust_kernel"
+path = "src/lib.rs"
+
+[dependencies]
+# Cortex-M intrinsics: `cortex_m::asm::{bkpt, wfi}` in the SVCall handler
+# body; `core::arch::asm!` drives the PendSV save/restore inline asm.
+cortex-m = "0.7"
+# `#[exception]` attribute for the PendSV / SysTick / SVCall handler
+# symbols (SOS-04 §6.4/§6.6/§6.5). cortex-m-rt picks these up at link
+# time when the host bin links this lib.
+cortex-m-rt = "0.7"
+# Fixed-capacity collections backing the kernel pools (`Datamodel.ready`,
+# per-sem/queue waiter lists, queue buffers).
+heapless = "0.8"

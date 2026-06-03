@@ -20,13 +20,19 @@
 
 use cortex_m_rt::entry;
 use panic_halt as _;
+use stm32h7::stm32h747cm7::interrupt;
+
+// PCDN-SOS-04-B-001 = (B): the kernel core (kernel/event/scripts/handlers)
+// now lives in the `sos-m7-rust-kernel` lib. Re-export its modules under
+// the bin crate root so the conformance front-end keeps driving them via
+// the same `crate::kernel::…` / `kernel::…` paths it used before the
+// extraction (behaviour-preserving — INV-S-EMBED-1). Importing `handlers`
+// keeps cortex-m-rt's `#[exception]` symbols (PendSV/SysTick/SVCall)
+// linked into the firmware image.
+pub use sos_m7_rust_kernel::{event, handlers as _kernel_handlers, kernel, scripts};
 
 mod disco_bsp;
-mod event;
-mod handlers;
 mod json_parser;
-mod kernel;
-mod scripts;
 mod trace;
 mod transport;
 
@@ -53,6 +59,24 @@ static mut DIAG_PARSE_KIND: u32 = 0;
 static mut DIAG_BYTES_RX: u32 = 0;
 #[no_mangle]
 pub(crate) static mut DIAG_BYTES_TX: u32 = 0;
+
+/// USART1 — RX ingress. NVIC priority `0xA0` per SOS-00 §6.2
+/// (`*_from_isr` kernel-aware band); programmed in `transport::start()`
+/// together with the NVIC unmask. The body delegates to
+/// `transport::usart1_isr_body()` which drains the hardware FIFO into the
+/// static RX ring; the macrostep loop below consumes from the ring via
+/// `transport::try_read_byte()`.
+///
+/// This is the conformance front-end's RX path, so it stays in the bin
+/// (it depends on `transport`, which is bin-local). The kernel-core
+/// exception bodies (PendSV/SysTick/SVCall) live in
+/// `sos_m7_rust_kernel::handlers`. At v1 this ISR is the only
+/// `*_from_isr`-class kernel-aware handler the firmware installs
+/// (per INV-S-PORT-4: minimal peripherals).
+#[interrupt]
+fn USART1() {
+    transport::usart1_isr_body();
+}
 
 /// Emit the adapter-filtered done sentinel per PCDN-SOS-04-005 +
 /// INV-S-PORT-12. The sentinel is **not** a `TraceRecord` (no
