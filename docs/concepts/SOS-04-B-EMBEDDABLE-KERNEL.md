@@ -263,6 +263,17 @@ REQ-SOS-1/2.
 
 ## 15. Change log
 
+- **2026-06-03 (follow-up gap — REQ-SOS-4 per-task stacks not yet wired)** — Surfaced when the
+  disco-analyzer DAA-08-B build consumed the §5.5 API: `create_task` primes the frame inside the
+  **fixed uniform** `kernel::TASK_STACKS` pool (`TASK_STACK_BYTES = 2 KiB × MAX_TASKS`); it takes
+  no per-task `stack_words`/`stack_region` parameter, so a host cannot give one task 8 KiB in a
+  named D1-AXI-SRAM section. The SOS-04-A `port_config` surface + emitter already *describe*
+  heterogeneous per-task stacks (REQ-SOS-3/4), but the SOS-04-B embeddable `create_task` does not
+  yet *consume* them. **Follow-up (SOS-owned, before any host's real task bodies run at the bench):**
+  extend `create_task`/the kernel stack model to honour the SOS-04-A `port_config` per-task
+  `stack_words` + `stack_region` (REQ-SOS-4). Tracked here; DAA-08-C (the analyzer parity run)
+  depends on it (its render task needs >2 KiB). No §5.5 signature change is forced — the stack
+  source can move behind the existing `create_task`/`port_config` seam.
 - **2026-06-03 (implementation complete)** — SOS-04-B implemented in three waves on branch
   `daa08-amp-proposals` (Claude subagents; orchestrator-reviewed; each wave gated on the 7-vector
   conformance suite staying byte-equal, INV-S-EMBED-1):
