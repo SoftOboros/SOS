@@ -263,6 +263,28 @@ REQ-SOS-1/2.
 
 ## 15. Change log
 
+- **2026-06-03 (implementation complete)** — SOS-04-B implemented in three waves on branch
+  `daa08-amp-proposals` (Claude subagents; orchestrator-reviewed; each wave gated on the 7-vector
+  conformance suite staying byte-equal, INV-S-EMBED-1):
+  - **Wave 1 (PCDN-001), `c444a29`** — extracted the kernel core into the `sos-m7-rust-kernel`
+    `no_std` lib crate (kernel/handlers/scripts/event); the conformance bin re-wires to it. Pure
+    refactor; conformance 7/7 byte-equal.
+  - **Wave 2 (PCDN-002), `7eb3a7d`** — `embed` module: `create_task` (PSP exception-return-frame
+    priming + `TASK_PSPS` init), `create_sem`, `start_scheduler` (first switch via the existing
+    `OUTGOING_TID=-1` sentinel — no PendSV asm change), `on_sys_tick`, `task_exit_trap`; pure
+    `compute_primed_frame` helper with host unit tests.
+  - **Wave 3 (PCDN-003), `f757551`** — syscall/ISR front-end: `sem_take`, `task_delay`,
+    `sem_give_from_isr` via the DirectCallBasepri `run_envelope` (task-context) / direct pend
+    (ISR-context); shared pure `envelope_outcome` for the pend predicate + the give-from-isr yield
+    hint. §8(d) two-task example under the default-OFF `two-task-example` feature builds for
+    thumbv7em-none-eabihf.
+  §5.5 API is now fully present. **Host-verified** (compiles embedded; conformance 7/7 byte-equal;
+  kernel host tests 8; example builds). **Bench-gated (open, on-target):** actual context-switch
+  execution (Cortex-M asm) is unvalidated on host — gate §8(d)'s "runs on the port" needs a bench
+  round. Two flagged bench-review items: give-from-isr yield-hint at equal priority (pick_next vs
+  FreeRTOS), and the give-from-isr BASEPRI behaviour for a host HSEM ISR pinned at 0xA0. **DAA-08-B
+  is now unblocked** (the §5.5 API exists); next: bump the parent SOS submodule pin, then wire
+  `analyzer-cm7`'s `sos` feature against `sos-m7-rust-kernel`.
 - **2026-06-03 (ratification)** — SOS-04-B **ratified** by owner (Ira). All three PCDNs resolved:
   **PCDN-001 = (B)** extract a `sos-m7-rust-kernel` `no_std` lib crate (kernel core + the §5.5 API),
   consumed by both the conformance bin and host apps, extraction behaviour-preserving for the
