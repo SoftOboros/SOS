@@ -15,8 +15,15 @@ Entries are permanent. Resolved entries stay as institutional memory; mark statu
 
 Open questions tied to errata entries appear here for at-a-glance visibility. Format: `EOQ-NNN-ERRATA-MMM`. See parent CLAUDE.md "EOQ identifiers" for the rule.
 
-*(none open — ERRATA-001 through ERRATA-008 all resolved. EOQ-001-ERRATA-008 resolved
-2026-06-02 via path (a) integer-only formatting + `--gc-sections`; see ERRATA-008.)*
+- **EOQ-009-ERRATA-009**: SOS-04-B context switch on silicon, **Layer 2 (FPU INVPC)**. The idle-frame
+  INVSTATE (Layer 1) is fixed (`99c82c6`); now switching into an FP-using task INVPCs because the kernel
+  primes/first-switches tasks as **basic 8-word** frames while the M7 FPU (CPACR/FPCCR ASPEN+LSPEN on) uses
+  the **extended 26-word** frame (`EXC_RETURN=0xFFFFFFED`). Which SOS-side fix: (a) disable lazy FP stacking
+  (`FPCCR.LSPEN=0`) ± automatic preservation; (b) correct PendSV FP save/restore across a task's first FP use
+  (basic→extended); (c) prime FP tasks with an extended frame / init `CONTROL.FPCA`? Likely an SOS-04-B §15
+  amendment. See [ERRATA-009](#errata-009--sos-04-b-first-context-switch-faults-on-silicon-l1-idle-frame-unprimed--fixed-l2-fpu-invpc--open).
+
+*(EOQ-001-ERRATA-008 resolved 2026-06-02 via path (a) integer-only formatting + `--gc-sections`; see ERRATA-008.)*
 
 ## Status of this log
 
@@ -34,6 +41,7 @@ ERRATA is now actively used. SOS-00 ratified 2026-05-19; every subsequent phase 
 | ERRATA-006 | 🟢 | `VectorCategory.Boundary` name collision (SOS-03 legacy edge-case vs SOS-12 dispatch-boundary) — overload is intentional at v1, disambiguated by directory + subtype | 2026-05-27 | SOS-03 |
 | ERRATA-007 | 🟢 | SOS-09-G MPU install-function name drift (`sos_mpu_install` vs `apply_mpu_config`) reconciled to canonical `apply_mpu_config()` | 2026-05-27 | SOS-09-G |
 | ERRATA-008 | 🟢 | SOS-04 m7-rust port overflows 1 MiB FLASH (.text ≈ 1.44 MB) — float/u128 `core::fmt` + PAC `Debug` bloat from the JSON trace/parser layer; workspace `[profile.release]` also missing | 2026-06-02 | SOS-04 |
+| ERRATA-009 | 🟡 | SOS-04-B first context switch faults on silicon (DAA-08-C bench). L1 idle-frame-unprimed INVSTATE — **fixed** (`99c82c6`, prime a `wfi` idle frame). L2 FP-using task INVPC — **open** (kernel primes basic 8-word frames; M7 FPU uses extended 26-word frames). | 2026-06-03 | SOS-04-B |
 
 ## ERRATA-001 — SOS-09-B implementation cite mismatch (stealth rename)
 
@@ -446,6 +454,40 @@ phantom "the Rust port never linked" defect.
   (`-Clink-arg=-fuse-ld=mold`) also breaks this cross-compile (`rust-lld: unknown argument
   '-fuse-ld=mold'`) and clobbers the crate-local target rustflags; build with `RUSTFLAGS`
   unset. Not part of this errata's fix scope.
+
+## ERRATA-009 — SOS-04-B first context switch faults on silicon (L1 idle frame unprimed — fixed; L2 FPU INVPC — open)
+
+**Status:** 🟡 diagnosed, two-layer — **Layer 1 (idle INVSTATE) resolved** (commit `99c82c6`); **Layer 2 (FPU INVPC) open**.
+**First seen:** 2026-06-03 (HEAD at first sighting: `09083e2`; branch `daa08-amp-proposals`).
+**Owning phase:** SOS-04-B (embeddable kernel context switch / PendSV FP handling).
+
+First on-silicon exercise of the SOS-04-B embeddable kernel, via the disco-analyzer DAA-08-C bench (STM32H747I-DISCO, `STM32H747XIHx`, probe-rs 0.29.1 + arm-none-eabi-gdb). DAA owns the verification; SOS owns the fix (INV-D8/D27 — DAA must not fork SOS). The DAA-side record is disco-analyzer `ERRATA-015`; this is the SOS-side canonical record (the fix lands here).
+
+**Methodology note:** under the M7 D-cache, **probe-rs raw SRAM reads are stale** (a probe-rs read of `TASK_PSPS` showed all-zero, which was wrong). Use **gdb halt-reads** (cache-coherent) for kernel side-tables / stack frames. DTCM (`0x2000_xxxx`) is uncached so probe-rs reads there are reliable; AXI SRAM (`0x2400_xxxx`) is not.
+
+### Layer 1 — idle task frame unprimed → INVSTATE (RESOLVED)
+
+**Symptom.** `--features sos` analyzer boots to first render, then PendSV's first switch HardFaults: `CFSR=0x0002_0000` (INVSTATE), HFSR FORCED, SysTick live. gdb: faulting `PC=0`; `CURRENT_TID=0` (idle), `OUTGOING_TID=1` (render); the restored idle frame at `TASK_PSPS[0]=0x20017b40` (DTCM `TASK_STACKS[0]`) is all-zeros → `PC=0 / xPSR.T=0`. (`TASK_PSPS[1,2]` *were* correctly AXI-primed — `create_task_with_stack` + the `init()` pre-stage both worked.)
+
+**Root cause.** `kernel::init()` reserves idle as TCB[0] and pre-stages its `TASK_PSPS[0]` *pointer*, but never primes an idle *frame*. The scheduler (`pick_next`) promotes idle whenever every real task is blocked (render `task_delay`, audio `sem_take`), which happens within the first ticks → PendSV switches into an unprimed idle frame. The chart reserves idle TCB[0] (FreeRTOS-shaped), but the embed layer never gave idle a runnable body+frame (FreeRTOS supplies `prvIdleTask`).
+
+**Fix.** Commit `99c82c6`: `embed::idle_entry` (kernel-owned `wfi`-loop idle body) + `embed::prime_idle_task` (primes a basic frame at idle's slot-0 stack, sets `TASK_PSPS[0]`), called from `start_scheduler` before the first PendSV. Arm-gated; INV-S-EMBED-1 held; no `handlers.rs` asm change; SOS-04-B §15 dated entry added. **Verification:** host kernel tests 10/10, thumbv7em builds, conformance structurally unchanged (7/7 — arm-gated code the host bin never compiles); **bench: INVSTATE gone, boots past first render, several context switches occur.**
+
+### Layer 2 — FP-using task context switch → INVPC (OPEN, EOQ-009-ERRATA-009)
+
+**Symptom.** After the L1 fix, switching into the FP-using **audio** task HardFaults: `CFSR=0x0004_0000` (**INVPC** — invalid-PC/EXC_RETURN integrity), HFSR FORCED. `CURRENT_TID=2` (audio), `OUTGOING_TID=0` (idle); the audio saved frame looks valid (PC/xPSR sane) but the return INVPCs. FPU enabled: `CPACR=0x00f0_0000`, `FPCCR=0xc000_0018` (ASPEN+LSPEN — automatic + lazy FP state preservation on).
+
+**Root cause (high-confidence class).** An FP-using task's hardware exception frame is the **extended 26-word** form (`EXC_RETURN=0xFFFFFFED`), but the kernel primes (`compute_primed_frame`, 8 words, `INITIAL_XPSR` only) and first-switches (`EXC_RETURN=0xFFFFFFFD`) tasks as the **basic 8-word** frame. The PendSV asm *does* branch on `EXC_RETURN[4]` for save/restore, so the precise failing interaction — lazy-stacking interacting with PendSV's own `vstm/vldm`, the FPSCR/S0-S15 area, or the basic→extended transition on a task's *first* FP use — needs an isolated bench pass. **This is the host-untestable c-frame/FPU divergence** (the r-frame conformance model has no FPU; SOS-04-B §3 explicitly bench-gates context-switch execution).
+
+**Fix prescription (SOS-side; needs decision — EOQ-009-ERRATA-009).** Candidates: (a) disable lazy FP stacking (`FPCCR.LSPEN=0`) ± automatic preservation to simplify; (b) make PendSV's FP save/restore correct across a task's first FP use (basic→extended); (c) prime FP-using tasks with an extended frame / initialise `CONTROL.FPCA` per task. Likely an SOS-04-B §15 amendment to the FP context-switch contract.
+
+### Verification (Layer 2, when fixed)
+
+Rebuild `--features sos`, flash, reset → boots to `0xA11C_0009` AND HSEM6 ISR `0x3800_06C8` advancing at the FreeRTOS-comparable rate (~150-200/s), no INVPC/HardFault (CFSR/HFSR=0). Then DAA-08-A §3 A/B parity (`freertos` vs `sos`, ±5%).
+
+### Tracking
+
+DAA-side record: disco-analyzer `ERRATA-015` (+ EOQ-009-ERRATA-015). SOS-04-B §15 (idle-priming entry, 2026-06-03). Files: `sos-m7-rust-kernel/src/embed.rs` (`idle_entry`, `prime_idle_task`, `start_scheduler`; L2 will touch FP handling in `embed.rs`/`handlers.rs`). Closes part of the SOS-04-B wave-2/3 "context-switch execution is bench-only" gate.
 
 ## How to add an entry
 

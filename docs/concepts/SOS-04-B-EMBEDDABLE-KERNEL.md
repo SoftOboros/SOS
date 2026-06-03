@@ -284,6 +284,28 @@ REQ-SOS-1/2.
 
 ## 15. Change log
 
+- **2026-06-03 (idle-task frame priming — `embed::idle_entry` + `prime_idle_task`; Specification
+  Required §5.4; SOS commit `99c82c6`)** — On-silicon DAA-08-C bring-up (disco-analyzer ERRATA-015,
+  SOS ERRATA-009) found the first context switch HardFaulting **INVSTATE**: the scheduler promotes
+  the idle task (TCB[0]) the instant every real task blocks (the analyzer's render `task_delay` +
+  audio `sem_take`), but `kernel::init()` only pre-staged idle's `TASK_PSPS[0]` *pointer* over an
+  all-zero frame — it never primed an idle frame — so PendSV restored `PC=0 / xPSR.T=0`. The chart
+  reserves idle as TCB[0] (FreeRTOS-shaped) but the embed layer never gave it a runnable frame.
+  **Fix:** `start_scheduler` now calls `prime_idle_task`, which primes a basic exception-return
+  frame (entry = `embed::idle_entry`, a `wfi` loop; `LR = task_exit_trap`) at idle's default-pool
+  slot 0 and sets `TASK_PSPS[0]`, before pending the first PendSV. Pure arm-gated port-layer
+  additions; INV-S-EMBED-1 held (no model/`Tcb`/trace/macrostep change), no `handlers.rs` asm
+  change, conformance structurally unchanged (the additions are `#[cfg(target_arch="arm")]` — the
+  host conformance bin never compiles them; 7/7 byte-equal). Host: kernel tests 10/10, thumbv7em
+  builds. **Bench-verified:** INVSTATE gone; boots past first render; several context switches occur.
+  **Open follow-up (bench, SOS ERRATA-009 Layer 2 / EOQ-009):** switching into the **FP-using** audio
+  task then HardFaults **INVPC** — the M7 FPU is enabled (CPACR/FPCCR ASPEN+LSPEN) so FP-using tasks
+  use the **extended 26-word** frame (`EXC_RETURN=0xFFFFFFED`), but `compute_primed_frame`/the first
+  switch use the **basic 8-word** frame. The PendSV asm branches on `EXC_RETURN[4]`, so the precise
+  failing interaction (lazy-stacking `vstm/vldm`, FPSCR/S0-S15 area, or the basic→extended first-FP-use
+  transition) needs an isolated bench pass + likely a follow-up §15 amendment to the FP context-switch
+  contract. This is the host-untestable FPU path (conformance has no FPU).
+
 - **2026-06-03 (REQ-SOS-4 per-task-stack mechanism — `create_task_with_stack`; Specification
   Required §5.4)** — Resolves the "follow-up gap" entry below. Added the §5.5 API
   `create_task_with_stack(id, prio, entry, stack: &'static mut [u32])`: the host supplies the task's
