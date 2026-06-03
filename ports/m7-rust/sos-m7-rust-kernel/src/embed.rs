@@ -180,6 +180,55 @@ pub const fn envelope_outcome(prev_current: i32, new_current: i32) -> EnvelopeOu
     }
 }
 
+/// Prime a host-provided (or default-pool) stack slice in place and return the
+/// resulting PSP.
+///
+/// Writes the basic exception-return frame ([`compute_primed_frame`]) at the
+/// TOP of `stack` (8-byte aligned, one basic frame below the aligned top) using
+/// `core::ptr::write_volatile`, and returns the PSP (address of `frame[0]`).
+/// This is the pure-data half of [`create_task_with_stack`] /
+/// [`create_task`] — it touches only the caller's slice, no `static`, no asm —
+/// so the priming computation is host-unit-testable against an arbitrary slice
+/// (including one LARGER than the default 2 KiB pool, exercising REQ-SOS-4
+/// heterogeneous stacks).
+///
+/// `entry` / `exit_trap` are raw `u32` addresses (caller converts a fn pointer
+/// via `as *const () as usize as u32`); both are stored with bit 0 set per the
+/// Thumb ABI inside [`compute_primed_frame`].
+///
+/// # Panics / preconditions
+/// `stack` MUST be at least [`BASIC_FRAME_WORDS`] words *after* top-alignment
+/// (i.e. ≥ the minimum frame size). The caller is responsible for sizing — see
+/// the [`create_task_with_stack`] safety contract. A slice too small to hold one
+/// frame below its aligned top yields a PSP below `stack`'s base; callers MUST
+/// NOT pass such a slice. (Host tests assert the frame stays within the slice.)
+///
+/// Pure relative to global state: the only mutation is through the supplied
+/// slice. INV-S-EMBED-1: no model/trace state touched.
+pub fn prime_stack_slice(stack: &mut [u32], entry: u32, exit_trap: u32) -> u32 {
+    let base_ptr = stack.as_mut_ptr();
+    let base = base_ptr as usize as u32;
+    let bytes = stack.len() * core::mem::size_of::<u32>();
+    let primed = compute_primed_frame(base, bytes, entry, exit_trap);
+
+    // Write the 8 frame words at the primed PSP (top of the region). Compute the
+    // PSP as a BYTE OFFSET from the slice base rather than reconstructing an
+    // absolute pointer from `primed.psp` (which is truncated to `u32` and so
+    // cannot be turned back into a valid pointer on a 64-bit host). On-target
+    // (`base` is a real ≤32-bit address) `base + offset == primed.psp` exactly.
+    let psp_offset = (primed.psp - base) as usize;
+    debug_assert_eq!(psp_offset % core::mem::size_of::<u32>(), 0);
+    let frame_ptr = unsafe { base_ptr.add(psp_offset / core::mem::size_of::<u32>()) };
+    for (i, &w) in primed.frame.iter().enumerate() {
+        // SAFETY: `primed.psp` lies within `stack` provided the caller sized it
+        // ≥ one basic frame (see fn precondition); `frame_ptr.add(i)` for
+        // `i < BASIC_FRAME_WORDS` stays inside the slice. Volatile so the
+        // priming store is not elided ahead of the first context switch.
+        unsafe { core::ptr::write_volatile(frame_ptr.add(i), w) };
+    }
+    primed.psp
+}
+
 // ---------------------------------------------------------------------------
 // task_exit_trap — the LR target for a primed task (PCDN-002).
 // ---------------------------------------------------------------------------
@@ -258,16 +307,91 @@ pub unsafe fn create_sem(id: u8, initial: u32, max: u32) {
     dispatch(&event);
 }
 
-/// Create a task with a real entry function (PCDN-002).
+/// Create a task with a real entry function on a **host-provided stack**
+/// (PCDN-002 + REQ-SOS-4 per-task-stack mechanism, §5.5 / §15 2026-06-03).
+///
+/// Identical to [`create_task`] except the task's stack memory comes from the
+/// caller's `stack` slice rather than the fixed-uniform `kernel::TASK_STACKS`
+/// pool. This is the SOS-owned **mechanism** that lets a host give one task a
+/// larger stack in a linker section *it* chose (e.g. the analyzer's render task:
+/// `#[link_section = ".sos_task_stacks"] static mut RENDER_STACK: [u32; 2048]`,
+/// 8 KiB in D1-AXI-SRAM). SOS owns the priming; the host owns the section and
+/// size — the kernel crate declares no linker section.
 ///
 /// Three effects, in order:
 ///   1. **Prime the PSP frame** — write the basic exception-return frame
-///      ([`compute_primed_frame`]) to the TOP of `TASK_STACKS[id]` so the
-///      first PendSV switch "returns" into `entry`.
+///      ([`compute_primed_frame`] via [`prime_stack_slice`]) to the TOP of
+///      `stack` (8-byte aligned) so the first PendSV switch "returns" into
+///      `entry`.
 ///   2. **Set `TASK_PSPS[id]`** to the primed PSP (overriding the benign
 ///      placeholder `kernel::init()` staged).
-///   3. **Dispatch `task.create{id, prio}`** — the unchanged model event;
-///      `entry`/PSP are port-layer and NOT serialised (INV-S-EMBED-1).
+///   3. **Dispatch `task.create{id, prio}`** — the **same unchanged** model
+///      event [`create_task`] dispatches; `entry`/PSP/stack are port-layer and
+///      NOT serialised (INV-S-EMBED-1). The stack provenance never reaches the
+///      model.
+///
+/// `entry` is `extern "C" fn() -> !` (PCDN-002 = (A)); a returning task reaches
+/// [`task_exit_trap`].
+///
+/// # Safety
+/// - Call at boot, before [`start_scheduler`], after `kernel::init()`.
+/// - `id` MUST be a valid task slot (`0..MAX_TASKS`); the model event rejects
+///   out-of-range ids (`rc = Inval`) but the `TASK_PSPS[id]` write below indexes
+///   the side-table directly, so an out-of-range `id` is UB.
+/// - `stack` MUST be **exclusively owned** by this task for the lifetime of the
+///   program: it lives `'static`, no other task or DMA aliases it, and nothing
+///   else writes to it after this call (the kernel will use it as the task's
+///   live PSP region while RUNNING and as its saved-frame region while not).
+/// - `stack` MUST be large enough to hold at least one basic exception-return
+///   frame after top-alignment ([`BASIC_FRAME_WORDS`] = 8 words / 32 bytes);
+///   for a real task it MUST be sized for the task's actual worst-case call
+///   depth + the FPU-extended frame. SOS does **not** enforce a minimum at
+///   runtime — sizing is the host's responsibility (see §5.5 / SOS-04-A
+///   `stack_words`). A slice smaller than one frame is UB.
+#[cfg(target_arch = "arm")]
+pub unsafe fn create_task_with_stack(
+    id: TaskId,
+    prio: u8,
+    entry: extern "C" fn() -> !,
+    stack: &'static mut [u32],
+) {
+    debug_assert!(id >= 0 && (id as usize) < MAX_TASKS);
+    debug_assert!(
+        stack.len() >= BASIC_FRAME_WORDS,
+        "task stack slice must hold at least one basic frame"
+    );
+
+    // (1) Prime the PSP frame at the top of the host-provided slice, and (2)
+    // record the resulting PSP. `prime_stack_slice` is the pure (host-tested)
+    // priming math; it touches only `stack`.
+    let psp = prime_stack_slice(
+        stack,
+        entry as *const () as usize as u32,
+        task_exit_trap as *const () as usize as u32,
+    );
+    // Saved callee-registers start zeroed (SavedFrame::new); the first
+    // restore reads R4-R11/S16-S31 as 0, which is correct for a task that
+    // has never run. Set TASK_PSPS[id] to the primed frame's SP.
+    kernel::TASK_PSPS[id as usize] = psp;
+
+    // (3): the unchanged model event. Entry/PSP/stack are not part of it.
+    let event = Event {
+        name: EventName::TaskCreate,
+        data: EventData::TaskCreate { id, prio },
+        from_tid: None,
+    };
+    dispatch(&event);
+}
+
+/// Create a task with a real entry function using the **default stack pool**
+/// (PCDN-002). The §5.5 default-pool convenience.
+///
+/// Byte-for-byte equivalent to [`create_task_with_stack`] with
+/// `stack = &mut kernel::TASK_STACKS[id]` reinterpreted as a `[u32]` slice — it
+/// simply delegates, supplying the fixed-uniform `TASK_STACK_BYTES`-sized slot
+/// from `kernel::TASK_STACKS`. Use this when a task is content with the default
+/// 2 KiB pool stack; use [`create_task_with_stack`] when a task needs a larger
+/// stack or a specific linker section (REQ-SOS-4).
 ///
 /// `entry` is `extern "C" fn() -> !` (PCDN-002 = (A)); a returning task
 /// reaches [`task_exit_trap`].
@@ -275,43 +399,26 @@ pub unsafe fn create_sem(id: u8, initial: u32, max: u32) {
 /// # Safety
 /// Call at boot, before [`start_scheduler`], after `kernel::init()`.
 /// `id` MUST be a valid task slot (`0..MAX_TASKS`); the model event rejects
-/// out-of-range ids (`rc = Inval`) but the PSP priming below indexes the
+/// out-of-range ids (`rc = Inval`) but the default-pool slice below indexes the
 /// static stack pool directly, so an out-of-range `id` is UB.
 #[cfg(target_arch = "arm")]
 pub unsafe fn create_task(id: TaskId, prio: u8, entry: extern "C" fn() -> !) {
     debug_assert!(id >= 0 && (id as usize) < MAX_TASKS);
 
-    // (1)+(2): prime PSP frame and set TASK_PSPS[id]. Address the static
-    // stack pool via raw pointers (avoids a shared ref to `static mut`,
-    // matching kernel::init()'s addr_of! pattern / Rust 2024 lint).
-    let stack_base = {
-        let base = core::ptr::addr_of!(kernel::TASK_STACKS) as *const StackRegion;
-        let slot = base.add(id as usize) as *const u8;
-        slot as u32
+    // The default-pool slice: `TASK_STACKS[id]` (a `StackRegion`, i.e.
+    // `[u8; TASK_STACK_BYTES]`, `repr(C, align(8))`) viewed as a `[u32]`.
+    // Address it via a raw pointer (avoids a shared ref to `static mut`,
+    // matching kernel::init()'s addr_of! pattern / Rust 2024 lint). The region
+    // is 8-byte aligned (StackRegion is `align(8)`) so the u32 reinterpret is
+    // sound; `TASK_STACK_BYTES` is a multiple of 4.
+    let slot_ptr = {
+        let base = core::ptr::addr_of_mut!(kernel::TASK_STACKS) as *mut StackRegion;
+        base.add(id as usize) as *mut u32
     };
-    let primed = compute_primed_frame(
-        stack_base,
-        TASK_STACK_BYTES,
-        entry as *const () as usize as u32,
-        task_exit_trap as *const () as usize as u32,
-    );
-    // Write the 8 frame words at the primed PSP (top of the region).
-    let frame_ptr = primed.psp as *mut u32;
-    for (i, &w) in primed.frame.iter().enumerate() {
-        core::ptr::write_volatile(frame_ptr.add(i), w);
-    }
-    // Saved callee-registers start zeroed (SavedFrame::new); the first
-    // restore reads R4-R11/S16-S31 as 0, which is correct for a task that
-    // has never run. Set TASK_PSPS[id] to the primed frame's SP.
-    kernel::TASK_PSPS[id as usize] = primed.psp;
+    let stack: &'static mut [u32] =
+        core::slice::from_raw_parts_mut(slot_ptr, TASK_STACK_BYTES / core::mem::size_of::<u32>());
 
-    // (3): the unchanged model event. Entry/PSP are not part of it.
-    let event = Event {
-        name: EventName::TaskCreate,
-        data: EventData::TaskCreate { id, prio },
-        from_tid: None,
-    };
-    dispatch(&event);
+    create_task_with_stack(id, prio, entry, stack);
 }
 
 /// Start the scheduler: select the highest-priority READY task and trigger
@@ -752,6 +859,85 @@ mod tests {
         assert!(o.pend_pendsv);
         assert_eq!(o.outgoing, 1);
         assert_eq!(o.incoming, 0);
+    }
+
+    // ----- REQ-SOS-4 per-task-stack mechanism (host-provided slice) -----
+
+    #[test]
+    fn prime_into_host_slice_larger_than_default_pool() {
+        // A host gives the render task a stack LARGER than the default 2 KiB
+        // pool — 2048 words = 8 KiB (the DAA-08 REQ-SOS-4 render case). Prime
+        // into it and assert the frame + PSP land correctly *inside the slice*.
+        const WORDS: usize = 2048; // 8 KiB > TASK_STACK_BYTES (2 KiB / 512 words)
+        assert!(
+            WORDS > TASK_STACK_BYTES / core::mem::size_of::<u32>(),
+            "this test must use a slice larger than the default pool"
+        );
+        let mut stack = [0u32; WORDS];
+        let base = stack.as_ptr() as u32;
+        let entry = fake_entry as extern "C" fn() -> !;
+        let entry_addr = entry as *const () as usize as u32;
+        let exit_addr = task_exit_trap as *const () as usize as u32;
+
+        let psp = prime_stack_slice(&mut stack, entry_addr, exit_addr);
+
+        // PSP is 8-byte aligned and one basic frame below the aligned top.
+        assert_eq!(psp & 0x7, 0, "PSP must be 8-byte aligned");
+        let raw_top = base + (WORDS * 4) as u32;
+        let aligned_top = raw_top & !0x7u32;
+        assert_eq!(
+            psp,
+            aligned_top - BASIC_FRAME_BYTES as u32,
+            "PSP must be one basic frame below the aligned top of the host slice"
+        );
+
+        // The whole frame lies INSIDE the host-provided slice.
+        assert!(psp >= base, "frame must start inside the slice");
+        assert!(
+            psp + BASIC_FRAME_BYTES as u32 <= raw_top,
+            "frame must end inside the slice"
+        );
+
+        // The frame bytes were actually written into the slice at the PSP.
+        let psp_word_idx = ((psp - base) / 4) as usize;
+        let written = &stack[psp_word_idx..psp_word_idx + BASIC_FRAME_WORDS];
+        assert_eq!(written[7], INITIAL_XPSR, "xPSR (T bit) written into slice");
+        assert_eq!(written[6], entry_addr | 1, "PC = entry|1 written into slice");
+        assert_eq!(written[5], exit_addr | 1, "LR = exit_trap|1 written into slice");
+        for &r in &written[0..5] {
+            assert_eq!(r, 0, "R0..R3/R12 zeroed in slice");
+        }
+    }
+
+    #[test]
+    fn default_pool_delegation_matches_old_priming_math() {
+        // `create_task`'s default-pool delegation builds a slice of
+        // `TASK_STACK_BYTES/4` words over `TASK_STACKS[id]` and calls
+        // `prime_stack_slice`. The on-target `create_task` is arm-gated, but
+        // the priming computation it now delegates to MUST produce the SAME
+        // PSP/frame the OLD inline `compute_primed_frame(stack_base,
+        // TASK_STACK_BYTES, ...)` produced. Mirror that here over a host slice
+        // sized exactly like the default pool slot.
+        const POOL_WORDS: usize = TASK_STACK_BYTES / 4;
+        let mut pool_slot = [0u32; POOL_WORDS];
+        let base = pool_slot.as_ptr() as u32;
+        let entry = fake_entry as extern "C" fn() -> !;
+        let entry_addr = entry as *const () as usize as u32;
+        let exit_addr = task_exit_trap as *const () as usize as u32;
+
+        // New path: prime via the slice helper (what create_task delegates to).
+        let new_psp = prime_stack_slice(&mut pool_slot, entry_addr, exit_addr);
+
+        // Old path: the inline math create_task used before the refactor.
+        let old = compute_primed_frame(base, TASK_STACK_BYTES, entry_addr, exit_addr);
+
+        assert_eq!(new_psp, old.psp, "delegated PSP must equal the old inline PSP");
+        let psp_word_idx = ((new_psp - base) / 4) as usize;
+        let written = &pool_slot[psp_word_idx..psp_word_idx + BASIC_FRAME_WORDS];
+        assert_eq!(
+            written, &old.frame,
+            "delegated frame bytes must equal the old inline frame (byte-for-byte create_task)"
+        );
     }
 
     #[test]

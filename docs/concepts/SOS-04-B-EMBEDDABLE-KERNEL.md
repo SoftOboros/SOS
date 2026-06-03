@@ -184,9 +184,14 @@ semantics cite the kernel core they drive. `TaskId = i16` (SOS-04 §6.3).
 ```rust
 // Construction (boot context, before the scheduler runs):
 pub unsafe fn create_sem(id: u8, initial: u32, max: u32);          // → sem.create model event
-pub unsafe fn create_task(id: TaskId, prio: u8,                    // primes PSP frame (PCDN-002),
-                          entry: extern "C" fn() -> !);            //   sets TASK_PSPS[id],
+pub unsafe fn create_task_with_stack(                              // REQ-SOS-4 per-task-stack mechanism:
+    id: TaskId, prio: u8, entry: extern "C" fn() -> !,            //   primes PSP frame (PCDN-002) on the
+    stack: &'static mut [u32]);                                   //   HOST-PROVIDED stack (host owns size +
+                                                                   //   linker section), sets TASK_PSPS[id],
                                                                    //   → task.create{id,prio} model event
+pub unsafe fn create_task(id: TaskId, prio: u8,                    // default-pool convenience: delegates to
+                          entry: extern "C" fn() -> !);            //   create_task_with_stack with the fixed
+                                                                   //   TASK_STACKS[id] slot (byte-equivalent)
 pub unsafe fn start_scheduler() -> !;                             // first PendSV → highest-prio task; never returns
 
 // Task context (DirectCallBasepri → macrostep → pend PendSV, PCDN-003):
@@ -201,6 +206,22 @@ pub fn on_sys_tick();                                            // SysTick hand
 pub unsafe extern "C" fn sos_pendsv();                           // SOS-04 §6.4 save/restore body
 pub unsafe extern "C" fn sos_systick();                          // wraps on_sys_tick()
 ```
+
+**Per-task stack mechanism (REQ-SOS-4 — added 2026-06-03, Specification Required §5.4).**
+`create_task_with_stack` is the SOS-owned **mechanism** that lets a host place a task's stack at any
+size in any linker section *it* chose; SOS primes the exception-return frame at the top of the
+caller's `&'static mut [u32]` slice and sets `TASK_PSPS[id]`, otherwise driving the **same unchanged**
+`task.create{id,prio}` model event (INV-S-EMBED-1 — stack provenance is port-layer, never serialised).
+`create_task(id, prio, entry)` is the default-pool convenience: it delegates to
+`create_task_with_stack` supplying the fixed-uniform `kernel::TASK_STACKS[id]` slot
+(`TASK_STACK_BYTES = 2 KiB`), so its behaviour is byte-for-byte unchanged. **SOS does not own the
+section or size** — the host declares e.g.
+`#[link_section = ".sos_task_stacks"] static mut RENDER_STACK: [u32; 2048]` (8 KiB in D1-AXI-SRAM)
+and passes `&mut RENDER_STACK`. SOS enforces no runtime minimum beyond one basic frame
+([`BASIC_FRAME_WORDS`] = 8 words); sizing for the task's real worst-case depth + FPU-extended frame is
+the host's responsibility (the SOS-04-A `port_config` `stack_words` source can target this seam — no
+coupling to the Python emitter is implied). This discharges the §15 2026-06-03 "follow-up gap"
+(REQ-SOS-4): the mechanism now exists; placement is the host's.
 
 **Consumer mapping (informative — disco-analyzer `analyzer-rtos`):**
 `scheduler::init(audio_entry, render_entry)` ≡ `create_sem` + `create_task(render)` +
@@ -263,7 +284,30 @@ REQ-SOS-1/2.
 
 ## 15. Change log
 
-- **2026-06-03 (follow-up gap — REQ-SOS-4 per-task stacks not yet wired)** — Surfaced when the
+- **2026-06-03 (REQ-SOS-4 per-task-stack mechanism — `create_task_with_stack`; Specification
+  Required §5.4)** — Resolves the "follow-up gap" entry below. Added the §5.5 API
+  `create_task_with_stack(id, prio, entry, stack: &'static mut [u32])`: the host supplies the task's
+  stack memory at any size in any linker section it chose, and the kernel primes the
+  exception-return frame at the top of that slice + sets `TASK_PSPS[id]`, otherwise dispatching the
+  **same unchanged** `task.create{id,prio}` model event. `create_task(id, prio, entry)` is now the
+  default-pool **convenience** that delegates to `create_task_with_stack` with the fixed
+  `kernel::TASK_STACKS[id]` slot, so `create_task`'s behaviour is **byte-for-byte unchanged**. The
+  pure priming helper `prime_stack_slice` (host-unit-tested against a slice LARGER than the default
+  pool — 2048 words / 8 KiB, the DAA-08 render case — and against the default-pool delegation
+  producing the same PSP/frame the old inline math produced) is the host-testable surface.
+  **SOS owns the mechanism; the host owns placement (section + size).** No linker section is added to
+  the kernel crate; no coupling to the SOS-04-A Python emitter (it can target this seam later via
+  `stack_words`/`stack_region`). This is a §5.5 addition → *Specification Required* (§5.4); no SOS-00
+  amendment (existing kernel pools/semantics unchanged). **Conformance stayed byte-equal** (7/7),
+  INV-S-EMBED-1 held (no model/`Tcb`/trace/macrostep change — `task.create` is the same event), no
+  `handlers.rs` asm change. Host-verified: kernel host tests 10/10 (8 prior + 2 new priming tests),
+  conformance 7/7 byte-equal + 6 sos-conformance + 8 sos-m7-rust-tests, embedded builds clean
+  (`sos-m7-rust-kernel` thumbv7em, `sos-m7-rust` release ± `two-task-example`). **Bench-gated
+  (open):** on-target context-switch INTO a host-provided >2 KiB stack is unvalidated on host — the
+  actual restore is the PendSV asm, exercisable only at the bench (same gate as the wave-2/3
+  priming). **DAA-08-C unblocked** (its render task can now take an 8 KiB `.sos_task_stacks` slice).
+- **2026-06-03 (follow-up gap — REQ-SOS-4 per-task stacks not yet wired)** — *Resolved by the
+  2026-06-03 `create_task_with_stack` entry above.* Surfaced when the
   disco-analyzer DAA-08-B build consumed the §5.5 API: `create_task` primes the frame inside the
   **fixed uniform** `kernel::TASK_STACKS` pool (`TASK_STACK_BYTES = 2 KiB × MAX_TASKS`); it takes
   no per-task `stack_words`/`stack_region` parameter, so a host cannot give one task 8 KiB in a
