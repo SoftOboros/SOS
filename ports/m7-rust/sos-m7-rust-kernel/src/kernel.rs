@@ -228,23 +228,42 @@ pub static mut TASK_PSPS: [u32; MAX_TASKS] = [0u32; MAX_TASKS];
 pub static mut TASK_SAVED_FRAMES: [SavedFrame; MAX_TASKS] =
     [const { SavedFrame::new() }; MAX_TASKS];
 
-/// Outgoing TID at the moment PendSV is pended. The `DirectCallBasepri`
-/// syscall path stashes the old `current` here BEFORE updating
-/// `Datamodel.current` to the new id, then pends PendSV. PendSV reads
-/// `OUTGOING_TID` to know which TCB slot's saved-frame to write.
+/// The TID whose register context is currently **loaded** on the CPU —
+/// i.e. the task PendSV most recently switched *into* (or `-1` at boot,
+/// before the first switch). **PendSV is the sole writer:** on each switch
+/// it saves the interrupted context into `TASK_PSPS[LOADED_TID]` /
+/// `TASK_SAVED_FRAMES[LOADED_TID]`, then sets `LOADED_TID = CURRENT_TID`
+/// after restoring the incoming task.
+///
+/// This is the ERRATA-009 Layer 3 fix (SOS-04-B §6.4, EOQ-010). The pend
+/// sources (`on_sys_tick`, `run_envelope`, `start_scheduler`) used to also
+/// write an `OUTGOING_TID` global naming the task to save — but three
+/// preemptible pend sources (SysTick `0xC0`, HSEM `0xA0`, task context)
+/// raced on it: HSEM could preempt SysTick between its `OUTGOING` write and
+/// PendSV running, so PendSV saved the interrupted frame into the wrong
+/// slot → frame corruption. Deriving the outgoing slot from this
+/// PendSV-private `LOADED_TID` (which only PendSV mutates) makes the
+/// save-target race-free by construction: whatever task is live *is* the
+/// one PendSV loaded last, regardless of how many pend sources fired.
 ///
 /// `i32` rather than `TaskId` (`i16`) so the PendSV asm can load a full
 /// word without sign-extension fuss. `-1` is the boot-path sentinel
-/// meaning "no outgoing task" — PendSV skips the save side when it
-/// reads this value.
+/// meaning "nothing loaded yet" — PendSV skips the save side when it reads
+/// this value (the first switch has no outgoing context).
 #[no_mangle]
-pub static mut OUTGOING_TID: i32 = -1;
+pub static mut LOADED_TID: i32 = -1;
 
-/// Incoming TID at the moment PendSV runs. Set by the syscall path
-/// after the scheduler picks the next task; PendSV reads this to know
-/// which TCB slot to restore from.
+/// Incoming TID at the moment PendSV runs — the task PendSV must switch
+/// *into*. Set by every pend source to the macrostep's `current` (the
+/// single source of truth: `pick_next` always promotes the highest-priority
+/// READY task) after the scheduler picks; PendSV reads this to know which
+/// TCB slot to restore from, then copies it into `LOADED_TID`.
 ///
-/// `i32` for the same reason as `OUTGOING_TID`. Initialised to `0` so
+/// Racing writers are benign: each pend source writes the latest
+/// `current`, and PendSV (lowest priority) runs only after all pending
+/// kernel-aware ISRs drain, so it observes the final `current`.
+///
+/// `i32` for the same reason as `LOADED_TID`. Initialised to `0` so
 /// PendSV's first-ever invocation targets the idle task (TCB[0]).
 #[no_mangle]
 pub static mut CURRENT_TID: i32 = 0;

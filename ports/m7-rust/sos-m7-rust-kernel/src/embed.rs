@@ -154,9 +154,10 @@ pub const fn compute_primed_frame(
 pub struct EnvelopeOutcome {
     /// Whether PendSV must be pended (the running task changed).
     pub pend_pendsv: bool,
-    /// The outgoing task id to record in `OUTGOING_TID` when `pend_pendsv`
-    /// (the task that was running before the macrostep). Meaningless when
-    /// `!pend_pendsv`.
+    /// The task that was `current` before the macrostep. Retained for the
+    /// host tests + as informational context; since the ERRATA-009 L3 fix the
+    /// pend sources NO LONGER write this to a global — PendSV derives the
+    /// outgoing slot from its own `LOADED_TID`. Meaningless when `!pend_pendsv`.
     pub outgoing: i32,
     /// The incoming task id to record in `CURRENT_TID` when `pend_pendsv`
     /// (the task selected by the macrostep). Meaningless when `!pend_pendsv`.
@@ -590,14 +591,14 @@ fn prime_idle_task() {
 /// the first PendSV to context-switch INTO its primed PSP frame. Never
 /// returns.
 ///
-/// **First-switch handling.** PendSV's save side keys off `OUTGOING_TID`:
-/// when it is `-1` (the boot sentinel, [`kernel::OUTGOING_TID`]'s
+/// **First-switch handling.** PendSV's save side keys off `LOADED_TID`:
+/// when it is `-1` (the boot sentinel, [`kernel::LOADED_TID`]'s
 /// initialiser) PendSV skips the save half entirely (`handlers.rs`
 /// `cmp r3,#0; blt 2f`). So the very first switch has no outgoing context
-/// to corrupt — we leave `OUTGOING_TID = -1` and only set `CURRENT_TID` to
-/// the chosen task. The currently-executing MSP boot context is simply
-/// discarded; nothing is saved for it. This is exactly the sentinel the
-/// PendSV body was written to honour, so **no PendSV asm change is needed.**
+/// to corrupt — we leave `LOADED_TID = -1` and only set `CURRENT_TID` to
+/// the chosen task; PendSV sets `LOADED_TID = CURRENT_TID` once the switch
+/// completes and owns it thereafter. The currently-executing MSP boot
+/// context is simply discarded; nothing is saved for it.
 ///
 /// Effects:
 ///   1. Run the model's scheduler microstep (`sched.run`) so `current` is
@@ -606,7 +607,7 @@ fn prime_idle_task() {
 ///      already exercised at create; here we force one explicit `pick_next`
 ///      to be certain `current` is selected even if no `resched` was left
 ///      pending).
-///   2. Set `CURRENT_TID = current`, leave `OUTGOING_TID = -1`.
+///   2. Set `CURRENT_TID = current`, leave `LOADED_TID = -1`.
 ///   3. Pend PendSV and enable interrupts; the switch happens on the
 ///      PendSV tail-chain. Spin in `wfi` until it fires (it fires
 ///      immediately once PendSV is unmasked).
@@ -661,9 +662,11 @@ pub unsafe fn start_scheduler() -> ! {
         }
     };
 
-    // (2) Wire the PendSV TIDs. OUTGOING stays -1 (first switch: nothing to
-    // save). CURRENT_TID is the task PendSV restores into.
-    kernel::OUTGOING_TID = -1;
+    // (2) Wire the PendSV TIDs. LOADED_TID stays -1 (first switch: nothing
+    // loaded yet → PendSV skips the save half). CURRENT_TID is the task
+    // PendSV restores into; PendSV sets LOADED_TID = CURRENT_TID afterward,
+    // and owns it from then on (ERRATA-009 L3 / SOS-04-B §6.4).
+    kernel::LOADED_TID = -1;
     kernel::CURRENT_TID = selected;
 
     // (3) Pend PendSV; unmask; let the tail-chain switch into the task.
@@ -692,10 +695,11 @@ pub unsafe fn start_scheduler() -> ! {
 /// tick advance + conditional context-switch request.
 ///
 /// First-switch / re-entry note: when the tick unblocks a higher-priority
-/// task the macrostep updates `current`; we then record the outgoing task
-/// in `OUTGOING_TID`, the incoming in `CURRENT_TID`, and pend PendSV so the
-/// switch happens on PendSV exit (SOS-04 §6.4). When `current` is unchanged
-/// no PendSV is pended (avoids the spurious-pend HardFault EOQ-004 fixed).
+/// task the macrostep updates `current`; we then publish the incoming task
+/// in `CURRENT_TID` and pend PendSV so the switch happens on PendSV exit
+/// (SOS-04 §6.4). PendSV derives the outgoing slot from its own `LOADED_TID`
+/// (ERRATA-009 L3 — no racy `OUTGOING_TID`). When `current` is unchanged no
+/// PendSV is pended (avoids the spurious-pend HardFault EOQ-004 fixed).
 ///
 /// # Safety context
 /// Runs from SysTick ISR context. `KERNEL_STATE` access is sound because
@@ -732,11 +736,13 @@ pub fn on_sys_tick() {
         // BASEPRI bracket is needed here — the ISR context is the mask.
         let outcome = envelope_outcome(prev_current, new_current);
         if outcome.pend_pendsv {
-            // Record the switch endpoints for PendSV and request it. The
-            // outgoing task is the one that was running; PendSV saves its
-            // live frame, restores the incoming. -1 ↔ valid transitions are
-            // handled by PendSV's OUTGOING_TID sentinel check.
-            kernel::OUTGOING_TID = outcome.outgoing;
+            // Publish only the incoming task and request the switch. PendSV
+            // derives the outgoing slot from its own `LOADED_TID` (the task it
+            // last loaded), so this pend source no longer writes an outgoing
+            // global — the ERRATA-009 L3 race (HSEM preempting SysTick between
+            // an OUTGOING write and PendSV) cannot occur. CURRENT_TID racing
+            // is benign: PendSV (lowest prio) runs after all ISRs drain and
+            // sees the final `current`.
             kernel::CURRENT_TID = outcome.incoming;
             cortex_m::peripheral::SCB::set_pendsv();
         }
@@ -818,8 +824,10 @@ unsafe fn run_envelope(event: &Event) -> EnvelopeOutcome {
 
     // Pend PendSV iff `current` changed; the actual save/restore happens on
     // PendSV exit (SOS-04 §6.4) once BASEPRI is below 0xE0 (just lifted).
+    // Only the incoming task is published; PendSV derives the outgoing slot
+    // from its own `LOADED_TID` (ERRATA-009 L3 / SOS-04-B §6.4 — no racy
+    // OUTGOING global).
     if outcome.pend_pendsv {
-        kernel::OUTGOING_TID = outcome.outgoing;
         kernel::CURRENT_TID = outcome.incoming;
         cortex_m::peripheral::SCB::set_pendsv();
     }

@@ -37,14 +37,18 @@ use crate::kernel::KERNEL_STATE;
 ///        PSP (standard + S0-S15 + FPSCR + padding). The OS MUST also
 ///        save/restore S16-S31 (callee-saved FP registers).
 ///
-/// 2. If `OUTGOING_TID >= 0`, save R4-R11 (+ S16-S31 if extended) to
-///    `TASK_SAVED_FRAMES[OUTGOING_TID]`, record the current PSP into
-///    `TASK_PSPS[OUTGOING_TID]`, and set `had_fp_frame` to the
-///    EXC_RETURN[4] state of the outgoing frame. `OUTGOING_TID == -1`
-///    is the boot-path sentinel: no outgoing task; skip the save half.
+/// 2. If `LOADED_TID >= 0`, save R4-R11 (+ S16-S31 if extended) to
+///    `TASK_SAVED_FRAMES[LOADED_TID]`, record the current PSP into
+///    `TASK_PSPS[LOADED_TID]`, and set `had_fp_frame` to the
+///    EXC_RETURN[4] state of the outgoing frame. `LOADED_TID == -1`
+///    is the boot-path sentinel: nothing loaded yet; skip the save half.
+///    `LOADED_TID` is PendSV-private (only this handler writes it), so the
+///    save target is race-free regardless of how many pend sources fired
+///    (ERRATA-009 Layer 3 / SOS-04-B §6.4 — replaces the racy `OUTGOING_TID`).
 ///
 /// 3. Load `TASK_PSPS[CURRENT_TID]` into PSP. Restore R4-R11 (+ S16-S31
-///    if `had_fp_frame`) from `TASK_SAVED_FRAMES[CURRENT_TID]`.
+///    if `had_fp_frame`) from `TASK_SAVED_FRAMES[CURRENT_TID]`, then set
+///    `LOADED_TID = CURRENT_TID` (this handler is now the task that is live).
 ///
 /// 4. Reconstruct the EXC_RETURN sentinel for the incoming task:
 ///    `0xFFFFFFFD` (return to thread mode, PSP, no FP frame) or
@@ -86,20 +90,20 @@ pub unsafe extern "C" fn PendSV() {
         naked_asm!(
             // ---- Outgoing save side ---------------------------------
             //
-            // r3 := OUTGOING_TID (i32). If -1, skip the save block.
-            "ldr   r3, ={outgoing_tid}",
+            // r3 := LOADED_TID (i32). If -1, skip the save block.
+            "ldr   r3, ={loaded_tid}",
             "ldr   r3, [r3]",
             "cmp   r3, #0",
-            "blt   2f",                  // OUTGOING_TID < 0 ⇒ skip save
+            "blt   2f",                  // LOADED_TID < 0 ⇒ skip save
             //
             // r0 := PSP of outgoing task.
             "mrs   r0, psp",
             //
-            // r1 := &TASK_PSPS[OUTGOING_TID]; store outgoing PSP there.
+            // r1 := &TASK_PSPS[LOADED_TID]; store outgoing PSP there.
             "ldr   r1, ={task_psps}",
             "str   r0, [r1, r3, lsl #2]",
             //
-            // r1 := &TASK_SAVED_FRAMES[OUTGOING_TID]. Each SavedFrame is
+            // r1 := &TASK_SAVED_FRAMES[LOADED_TID]. Each SavedFrame is
             // 100 bytes: regs[8] = 32, fp_regs[16] = 64, had_fp_frame
             // (bool, 1 byte; aligned/padded to 4 = 4 total trailing).
             // Layout: 0..32 = regs, 32..96 = fp_regs, 96 = had_fp_frame.
@@ -171,13 +175,21 @@ pub unsafe extern "C" fn PendSV() {
             //
             "4:",                        // ---- Exception return ------
             //
+            // LOADED_TID = CURRENT_TID: this handler is now the task whose
+            // context is live, so the NEXT PendSV saves into this slot. r3
+            // still holds CURRENT_TID (preserved across the restore); r1 is
+            // free. This single PendSV-owned write is what makes the
+            // save-target race-free (ERRATA-009 L3 / SOS-04-B §6.4).
+            "ldr   r1, ={loaded_tid}",
+            "str   r3, [r1]",
+            //
             // Install incoming PSP, fence, return-from-exception.
             "msr   psp, r0",
             "dsb",
             "isb",
             "bx    lr",
             //
-            outgoing_tid       = sym crate::kernel::OUTGOING_TID,
+            loaded_tid         = sym crate::kernel::LOADED_TID,
             current_tid        = sym crate::kernel::CURRENT_TID,
             task_psps          = sym crate::kernel::TASK_PSPS,
             task_saved_frames  = sym crate::kernel::TASK_SAVED_FRAMES,
