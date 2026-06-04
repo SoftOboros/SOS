@@ -284,6 +284,57 @@ REQ-SOS-1/2.
 
 ## 15. Change log
 
+- **2026-06-04 (on-silicon context-switch faults — PendSV priority + naked PendSV + FPCCR eager;
+  Specification Required §5.4 + §6.4; SOS commit `64ff4ef`)** — Resolves the "Layer 2 INVPC" open
+  follow-up below, and **corrects its diagnosis**. The bench INVPC was **not** an FPU lazy-stacking
+  problem; it was two implementation gaps in the context-switch primitive, found by DAA-08-C
+  read-only fault capture (disco-analyzer ERRATA-015, SOS ERRATA-009):
+
+  1. **PendSV at the highest priority (root cause of the INVPC).** On reset every exception priority
+     is `0x00`. The embed path never lowered PendSV/SysTick, so on bench `SHPR3 = 0x0000_0000`. The
+     envelope (`run_envelope`), the tick path (`on_sys_tick`), and `sem_give_from_isr` all *pend*
+     PendSV from inside a kernel-aware ISR (e.g. the host HSEM doorbell at `0xA0`). PendSV is meant
+     to **tail-chain** after that ISR — but at priority `0x00` it **preempts** the still-active ISR
+     and its exception-return `bx lr` targets thread mode while another exception is still active,
+     failing the ARMv7-M return integrity check (`ExceptionActiveBitCount() != 1`) → **INVPC**
+     (`CFSR=0x0004_0000`). Signature: the first switch (from thread, `start_scheduler`) succeeds; the
+     first ISR-triggered switch (idle→audio) faults. **Fix:** new `embed::configure_exception_priorities`
+     programs **PendSV = `0xE0`, SysTick = `0xC0`** (SOS-00 §6.2) as step (0a) of `start_scheduler`.
+
+  2. **PendSV was not naked → `lr` ≠ `EXC_RETURN` (caused the cascade INVSTATE + the FType
+     mis-detection).** `#[exception] fn PendSV` is wrapped by cortex-m-rt in a trampoline
+     (`push {r7,lr}; bl body; pop {r7,pc}`), so inside the body `lr` was the **`bl` return address**,
+     not `EXC_RETURN`. The save side's `tst lr,#0x10` therefore read clear for *every* frame → the
+     extended-FP path was always taken → every task (even the no-FP idle) was marked `had_fp=1`, and
+     the resulting basic/extended mismatch corrupted the restored frame (`PC=0`/`xPSR.T=0` →
+     INVSTATE). The trampoline `push` also leaked 8 bytes of MSP per switch (the body
+     exception-returns via `bx lr`, never reaching the `pop`). **Fix:** PendSV is now a
+     `#[unsafe(naked)] #[unsafe(no_mangle)] pub unsafe extern "C" fn PendSV` with `naked_asm!` (body
+     unchanged) — the vector points straight at the asm, `lr` *is* `EXC_RETURN`, no prologue/leak.
+     This mirrors the FreeRTOS M7 naked `xPortPendSVHandler`.
+
+  3. **FPCCR lazy stacking left at reset default (defensive).** `FPCCR=0xc000_0018` (ASPEN+LSPEN).
+     New `embed::configure_fp_context_switch` clears **LSPEN** (eager FP stacking, ASPEN kept) as step
+     (0b) of `start_scheduler`, so PendSV's own `vstm/vldm {s16-s31}` no longer race the lazy
+     FPCAR/LSPACT machinery. (Not the INVPC cause, but removes a class of FP-frame nondeterminism.)
+
+  **Bench-verified (DAA-08-C, 2026-06-04):** with (1)+(2), no INVPC/INVSTATE on ISR-triggered
+  switches; `had_fp` now correctly differentiated (`idle=0, render=0, audio=1`); `SHPR3=0xc0e00000`,
+  `FPCCR=0x80000018`; the analyzer runs sustained. Host: kernel tests pass, thumbv7em builds,
+  conformance arm-gated-unchanged. All three additions are `#[cfg(target_arch="arm")]` port-layer;
+  INV-S-EMBED-1 held (no model/`Tcb`/trace/macrostep change).
+
+  **Open follow-up (bench, SOS ERRATA-009 Layer 3 / EOQ-010).** Once the kernel tick is live (the
+  analyzer must enable SysTick `TICKINT` — a BSP responsibility the FreeRTOS port does in
+  `vPortSetupTimerInterrupt`; the SOS embed kernel does not own SysTick hardware setup) and all three
+  pend sources are active concurrently, a **switch-endpoint race** surfaces: `OUTGOING_TID`/
+  `CURRENT_TID` are plain globals written by `on_sys_tick` (SysTick `0xC0`), `sem_give_from_isr`/
+  `run_envelope` (HSEM `0xA0`), and task context. HSEM can preempt SysTick between its TID write and
+  PendSV running, so PendSV may save the interrupted frame into the wrong task's `TASK_PSPS` slot →
+  frame corruption (`PC=0`, garbage `xPSR`) on a render↔audio switch. Needs a design fix to the
+  switch-endpoint hand-off (e.g. derive `OUTGOING` from the actual interrupted context, or
+  atomic/critical-section the TID pair) — a likely §6.4 amendment.
+
 - **2026-06-03 (idle-task frame priming — `embed::idle_entry` + `prime_idle_task`; Specification
   Required §5.4; SOS commit `99c82c6`)** — On-silicon DAA-08-C bring-up (disco-analyzer ERRATA-015,
   SOS ERRATA-009) found the first context switch HardFaulting **INVSTATE**: the scheduler promotes
