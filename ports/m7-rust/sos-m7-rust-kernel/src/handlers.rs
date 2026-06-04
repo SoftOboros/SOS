@@ -15,7 +15,7 @@
 //!   * SVCall stays the catch-bug stub per PCDN-SOS-00-002 (v1 transport
 //!     is `DirectCallBasepri`; SVC is reserved for a future migration).
 
-use core::arch::asm;
+use core::arch::naked_asm;
 use cortex_m_rt::exception;
 
 // Only the conformance-mode `SysTick` no-op touches `KERNEL_STATE` here; it
@@ -60,13 +60,30 @@ use crate::kernel::KERNEL_STATE;
 /// frame — it stays where hardware put it; the exception return on
 /// `bx lr` pops it from the NEW PSP back into the registers.
 ///
-/// The body is a single `asm!` block with `options(noreturn)` so the
-/// Rust compiler emits no epilogue (the `bx lr` at the end of the asm
-/// is the exception return).
-#[exception]
-fn PendSV() {
-    unsafe {
-        asm!(
+/// ## Why this is a `#[naked]` handler (ERRATA-009 Layer 2 root cause)
+///
+/// PendSV's correctness depends on **`lr` holding the `EXC_RETURN` value on
+/// entry** — the save side keys the basic-vs-extended (FP) frame discriminator
+/// off `EXC_RETURN[4]` (`tst lr, #0x10`). A normal `#[exception] fn` is *not*
+/// naked: cortex-m-rt wraps it in a trampoline (`push {r7, lr}; bl body;
+/// pop {r7, pc}`), so inside the body `lr` is the **`bl` return address**, not
+/// `EXC_RETURN`. On DAA-08-C bench that made `tst lr, #0x10` test the wrong
+/// value — it read clear for *every* frame, so the save side always took the
+/// extended-FP path and marked every task (even the no-FP idle) `had_fp = 1`;
+/// the resulting basic/extended mismatch corrupted the restored frame
+/// (`PC = 0` / `xPSR.T = 0` → INVSTATE). The trampoline's `push` also leaked
+/// 8 bytes of MSP per switch, since the body exception-returns via `bx lr` and
+/// never reaches the trampoline's `pop`. Making PendSV naked points the vector
+/// straight at this asm: `lr` *is* `EXC_RETURN`, there is no prologue to leak,
+/// and `bx lr` is the clean exception return. This mirrors the FreeRTOS M7
+/// port's naked `xPortPendSVHandler`.
+///
+/// The body is a single `naked_asm!` block (implicitly diverging — the `bx lr`
+/// at the end is the exception return; the compiler emits no prologue/epilogue).
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn PendSV() {
+        naked_asm!(
             // ---- Outgoing save side ---------------------------------
             //
             // r3 := OUTGOING_TID (i32). If -1, skip the save block.
@@ -164,9 +181,7 @@ fn PendSV() {
             current_tid        = sym crate::kernel::CURRENT_TID,
             task_psps          = sym crate::kernel::TASK_PSPS,
             task_saved_frames  = sym crate::kernel::TASK_SAVED_FRAMES,
-            options(noreturn),
         );
-    }
 }
 
 /// SysTick — tick service. NVIC priority `0xC0` per SOS-00 §6.2.

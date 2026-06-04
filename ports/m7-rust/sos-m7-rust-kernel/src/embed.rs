@@ -441,6 +441,115 @@ pub unsafe fn create_task(id: TaskId, prio: u8, entry: extern "C" fn() -> !) {
     create_task_with_stack(id, prio, entry, stack);
 }
 
+/// Program the system-handler priorities the context-switch primitive depends
+/// on: **PendSV = `0xE0` (lowest), SysTick = `0xC0`** (SOS-00 §6.2).
+///
+/// ## Why (ERRATA-009 Layer 2 root cause / SOS-04-B §15 2026-06-04)
+///
+/// On reset every exception priority is `0x00` (the *highest*). FreeRTOS — the
+/// reference port the analyzer ran under — lowers PendSV/SysTick during its
+/// bring-up; the SOS embed path never did, so on bench `SHPR3 = 0x0000_0000`
+/// (PendSV and SysTick both at `0x00`).
+///
+/// PendSV at the highest priority is fatal for an ISR-triggered context switch.
+/// The DirectCallBasepri envelope ([`run_envelope`]) and the SysTick path
+/// ([`on_sys_tick`]) and the ISR `give` path ([`sem_give_from_isr`]) all *pend*
+/// PendSV from inside a higher-priority handler (e.g. the host's HSEM doorbell
+/// ISR). PendSV is meant to **tail-chain** after that handler returns — but at
+/// priority `0x00` it instead **preempts the still-active ISR**, runs the
+/// switch, and its exception-return `bx lr` targets thread mode while another
+/// exception is *still active*. That fails the ARMv7-M exception-return
+/// integrity check (`ExceptionActiveBitCount() != 1` on a return-to-thread) →
+/// **INVPC UsageFault** (`CFSR = 0x0004_0000`) → HardFault.
+///
+/// This is exactly the DAA-08-C bench signature: the **first** switch
+/// (triggered from thread context by [`start_scheduler`], no other exception
+/// active) succeeds, but the first **ISR-triggered** switch (idle → audio on an
+/// HSEM `sem_give_from_isr`) INVPCs. Setting PendSV to the lowest priority
+/// makes it tail-chain after every kernel-aware ISR, so its return-to-thread
+/// always runs with exactly one exception active.
+///
+/// SysTick is lowered to `0xC0` for the same family of reasons (SOS-00 §6.2):
+/// it must sit below the `*_from_isr` IRQ band (`0xA0`) the host programs and
+/// above PendSV. The `*_from_isr` IRQ priorities themselves (`0xA0`) are the
+/// host/BSP's responsibility (it owns those vectors); the kernel only owns the
+/// two system handlers that drive context switching.
+///
+/// Must run once, at boot, before interrupts are enabled / the first PendSV is
+/// pended — called as the first step of [`start_scheduler`]. Idempotent.
+#[cfg(target_arch = "arm")]
+fn configure_exception_priorities() {
+    // SHPR3 — System Handler Priority Register 3 (ARMv7-M B3.2.11),
+    // PPB @ 0xE000_ED20: bits 23:16 = PendSV priority, bits 31:24 = SysTick
+    // priority. (Bits 15:0 are PRI_8/PRI_9, reserved on this profile —
+    // preserved by the read-modify-write.) STM32H7 implements the high 4
+    // priority bits, so 0xE0 / 0xC0 land in distinct, correctly-ordered
+    // groups (PendSV strictly below SysTick strictly below the 0xA0 IRQ band).
+    const SHPR3: *mut u32 = 0xE000_ED20 as *mut u32;
+    const PENDSV_PRIO: u32 = 0xE0 << 16;
+    const SYSTICK_PRIO: u32 = 0xC0 << 24;
+    // SAFETY: boot-context single writer (start_scheduler), before interrupts
+    // are enabled; a single PPB read-modify-write fenced with DSB/ISB so the
+    // priorities are in effect before the first PendSV is pended.
+    unsafe {
+        let v = core::ptr::read_volatile(SHPR3) & 0x0000_FFFF;
+        core::ptr::write_volatile(SHPR3, v | PENDSV_PRIO | SYSTICK_PRIO);
+        cortex_m::asm::dsb();
+        cortex_m::asm::isb();
+    }
+}
+
+/// Configure the FPU for deterministic context switching: **disable lazy FP
+/// state preservation** (`FPCCR.LSPEN = 0`), keep automatic preservation
+/// (`FPCCR.ASPEN = 1`).
+///
+/// ## Why (ERRATA-009 Layer 2 / SOS-04-B §15 2026-06-04)
+///
+/// The M7 FPU comes out of reset with `FPCCR = 0xC000_0018` — **both** ASPEN
+/// (bit 31, automatic FP-context preservation) and **LSPEN** (bit 30, *lazy*
+/// stacking) set. Nothing in the embed path reconfigured it, so the first
+/// on-silicon FP context switch ran with lazy stacking on. The PendSV body
+/// ([`crate::handlers`]) itself executes FP instructions (`vstm/vldm
+/// {s16-s31}`) to save/restore the callee-saved FP registers. Under lazy
+/// stacking those handler-side FP instructions interact with the deferred
+/// lazy-push machinery (`FPCAR` / `FPCCR.LSPACT`): on bench every task frame —
+/// including the pure-`wfi` idle task that uses no FP — ended up flagged
+/// FP-extended (`had_fp_frame = 1` for all of tasks 0/1/2) with `FPCAR` left
+/// dangling at a task's frame, and the exception return into an FP-using task
+/// failed the FP integrity check → **INVPC UsageFault** (`CFSR = 0x0004_0000`),
+/// escalated to HardFault. (DAA-08-C bench, 2026-06-04: `CPACR=0x00f0_0000`,
+/// `FPCCR=0xc000_0018`, `FPCAR=0x2401_8700` = audio frame S0.)
+///
+/// Clearing LSPEN makes FP stacking **eager**: on exception entry hardware
+/// pushes the full `S0-S15`/`FPSCR` immediately (no deferral, no `FPCAR`
+/// indirection), so PendSV's own `vstm/vldm` no longer race the lazy-push and
+/// `EXC_RETURN[4]` (the FType bit the PendSV save/restore keys off) reliably
+/// reflects each frame's true layout. ASPEN stays set so the hardware still
+/// auto-manages `CONTROL.FPCA` / `EXC_RETURN[4]` per the SOS-04 §6.4 contract;
+/// only the *lazy* optimisation is dropped. This is the conventional robust M7
+/// RTOS configuration (the FreeRTOS reference port the analyzer ran under
+/// behaves equivalently).
+///
+/// Must run once, at boot, before the first FP context switch (i.e. before the
+/// first PendSV) — called as step (0) of [`start_scheduler`]. Idempotent.
+#[cfg(target_arch = "arm")]
+fn configure_fp_context_switch() {
+    // FPCCR — Floating-Point Context Control Register (ARMv7-M B3.2.20),
+    // PPB @ 0xE000_EF34. Bit 30 = LSPEN (lazy state preservation enable),
+    // bit 31 = ASPEN (automatic state preservation enable).
+    const FPCCR: *mut u32 = 0xE000_EF34 as *mut u32;
+    const LSPEN: u32 = 1 << 30;
+    // SAFETY: boot-context single writer (start_scheduler), before the first
+    // PendSV / any task FP use; a single PPB read-modify-write fenced with
+    // DSB/ISB so the new FP-stacking mode is in effect before the first switch.
+    unsafe {
+        let v = core::ptr::read_volatile(FPCCR);
+        core::ptr::write_volatile(FPCCR, v & !LSPEN);
+        cortex_m::asm::dsb();
+        cortex_m::asm::isb();
+    }
+}
+
 /// Prime the idle task (TCB[0]) exception-return frame.
 ///
 /// `kernel::init()` reserves TCB[0] as idle and pre-stages `TASK_PSPS[0]` to
@@ -507,7 +616,22 @@ fn prime_idle_task() {
 /// and `kernel::init()`. Never returns.
 #[cfg(target_arch = "arm")]
 pub unsafe fn start_scheduler() -> ! {
-    // (0) Prime the IDLE task (TCB[0]) frame. The model promotes idle
+    // (0a) Program PendSV (lowest) + SysTick priorities. On reset both are at
+    // 0x00 (highest); PendSV at the highest priority preempts the kernel-aware
+    // ISR that pends it instead of tail-chaining, and its return-to-thread then
+    // faults INVPC because another exception is still active. This is the
+    // ERRATA-009 Layer 2 root cause; MUST precede enabling interrupts / the
+    // first PendSV. See [`configure_exception_priorities`].
+    configure_exception_priorities();
+
+    // (0b) Configure the FPU for deterministic context switching: disable lazy
+    // FP stacking (`FPCCR.LSPEN=0`), keep automatic preservation. The M7 boots
+    // with lazy stacking on, which races PendSV's own `vstm/vldm`
+    // (ERRATA-009 Layer 2 / SOS-04-B §15 2026-06-04). Must precede the first
+    // PendSV. See [`configure_fp_context_switch`].
+    configure_fp_context_switch();
+
+    // (0c) Prime the IDLE task (TCB[0]) frame. The model promotes idle
     // whenever every real task is blocked (render's `task_delay`, audio's
     // `sem_take`), which happens within the first few ticks — so PendSV WILL
     // switch into idle. `kernel::init()` only pre-staged idle's PSP *pointer*
