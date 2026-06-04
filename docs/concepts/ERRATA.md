@@ -15,16 +15,10 @@ Entries are permanent. Resolved entries stay as institutional memory; mark statu
 
 Open questions tied to errata entries appear here for at-a-glance visibility. Format: `EOQ-NNN-ERRATA-MMM`. See parent CLAUDE.md "EOQ identifiers" for the rule.
 
-- **EOQ-010-ERRATA-009**: SOS-04-B context switch on silicon, **Layer 3 (switch-endpoint race → frame
-  corruption)**. Layers 1+2 are fixed (idle-frame priming `99c82c6`; PendSV priority `0xE0` + naked PendSV
-  `64ff4ef` — the L2 INVPC was *not* an FPU issue, it was PendSV at reset-default priority `0x00`
-  preempting the ISR that pends it, plus the cortex-m-rt PendSV trampoline making `lr` ≠ `EXC_RETURN`). With
-  the kernel tick now live, `OUTGOING_TID`/`CURRENT_TID` are plain globals written by three preemptible pend
-  sources (SysTick `0xC0`, HSEM `0xA0`, task context); HSEM can preempt SysTick between its TID write and
-  PendSV running → PendSV saves the interrupted frame into the wrong task's slot → render↔audio frame
-  corruption (`PC=0`). Which fix: (a) derive `OUTGOING` inside PendSV from the actual interrupted context;
-  (b) write/read the `(OUTGOING,CURRENT)` pair under a BASEPRI critical section in every pend source;
-  (c) a pend-generation counter? Likely an SOS-04-B §6.4 amendment. See [ERRATA-009](#errata-009--sos-04-b-context-switch-faults-on-silicon-l1-idle-frame--fixed-l2-pendsv-priority--non-naked-handler--fixed-l3-switch-endpoint-race--open).
+- *(EOQ-010-ERRATA-009 resolved 2026-06-04 via path (a) — derive the outgoing slot inside PendSV from a
+  private `LOADED_TID` only PendSV writes (FreeRTOS single-`pxCurrentTCB` model), eliminating the racy
+  `OUTGOING_TID` global. SOS `d8fbfb2`. 30s soak / ~18,500 switches, zero faults; audio 168/s. See
+  ERRATA-009 Layer 3.)*
 
 - *(EOQ-009-ERRATA-009 resolved 2026-06-04 — the "FPU INVPC" was misdiagnosed; actual L2 root cause was
   PendSV priority + the non-naked PendSV trampoline. Fixed via `configure_exception_priorities` + naked
@@ -48,7 +42,7 @@ ERRATA is now actively used. SOS-00 ratified 2026-05-19; every subsequent phase 
 | ERRATA-006 | 🟢 | `VectorCategory.Boundary` name collision (SOS-03 legacy edge-case vs SOS-12 dispatch-boundary) — overload is intentional at v1, disambiguated by directory + subtype | 2026-05-27 | SOS-03 |
 | ERRATA-007 | 🟢 | SOS-09-G MPU install-function name drift (`sos_mpu_install` vs `apply_mpu_config`) reconciled to canonical `apply_mpu_config()` | 2026-05-27 | SOS-09-G |
 | ERRATA-008 | 🟢 | SOS-04 m7-rust port overflows 1 MiB FLASH (.text ≈ 1.44 MB) — float/u128 `core::fmt` + PAC `Debug` bloat from the JSON trace/parser layer; workspace `[profile.release]` also missing | 2026-06-02 | SOS-04 |
-| ERRATA-009 | 🟡 | SOS-04-B context switch faults on silicon (DAA-08-C bench). L1 idle-frame-unprimed INVSTATE — **fixed** (`99c82c6`). L2 ISR-switch INVPC — **fixed** (`64ff4ef`): *not* an FPU bug (misdiagnosed) — PendSV at reset-default priority `0x00` preempted the ISR that pends it, and the non-naked `#[exception]` PendSV trampoline made `lr` ≠ `EXC_RETURN`; fixed by `configure_exception_priorities` (PendSV `0xE0`) + naked PendSV. L3 switch-endpoint race → frame corruption — **open** (EOQ-010). | 2026-06-03 | SOS-04-B |
+| ERRATA-009 | 🟢 | SOS-04-B context switch faults on silicon (DAA-08-C bench), three layers ALL fixed. L1 idle-frame-unprimed INVSTATE (`99c82c6`). L2 ISR-switch INVPC (`64ff4ef`): *not* an FPU bug (misdiagnosed) — PendSV at reset-default priority `0x00` preempted the ISR that pends it + the non-naked `#[exception]` trampoline made `lr` ≠ `EXC_RETURN`; fixed by `configure_exception_priorities` (PendSV `0xE0`) + naked PendSV. L3 switch-endpoint race → frame corruption (`d8fbfb2`): racy `OUTGOING_TID` replaced by PendSV-private `LOADED_TID`. Bench: 30s/~18.5k switches, 0 faults, audio 168/s. | 2026-06-03 | SOS-04-B |
 
 ## ERRATA-001 — SOS-09-B implementation cite mismatch (stealth rename)
 
@@ -462,9 +456,9 @@ phantom "the Rust port never linked" defect.
   '-fuse-ld=mold'`) and clobbers the crate-local target rustflags; build with `RUSTFLAGS`
   unset. Not part of this errata's fix scope.
 
-## ERRATA-009 — SOS-04-B context switch faults on silicon (L1 idle frame — fixed; L2 PendSV priority + non-naked handler — fixed; L3 switch-endpoint race — open)
+## ERRATA-009 — SOS-04-B context switch faults on silicon (L1 idle frame, L2 PendSV priority + non-naked handler, L3 switch-endpoint race — all fixed)
 
-**Status:** 🟡 three-layer — **Layer 1 (idle INVSTATE) resolved** (`99c82c6`); **Layer 2 (ISR-switch INVPC — PendSV priority + non-naked PendSV; original "FPU" diagnosis corrected) resolved** (`64ff4ef`); **Layer 3 (switch-endpoint race → frame corruption) open** (EOQ-010-ERRATA-009).
+**Status:** 🟢 resolved (three-layer) — **Layer 1 (idle INVSTATE)** (`99c82c6`); **Layer 2 (ISR-switch INVPC — PendSV priority + non-naked PendSV; original "FPU" diagnosis corrected)** (`64ff4ef`); **Layer 3 (switch-endpoint race → frame corruption — PendSV-owned `LOADED_TID`)** (`d8fbfb2`). Bench-verified 2026-06-04: 30s soak / ~18,500 switches, zero faults, audio 168/s. (Render rate ~1/s is a DAA-side priority/perf matter for DAA-08-A §3 parity, not a context-switch fault.)
 **First seen:** 2026-06-03 (HEAD at first sighting: `09083e2`; branch `daa08-amp-proposals`).
 **Owning phase:** SOS-04-B (embeddable kernel context switch / PendSV).
 
@@ -493,19 +487,19 @@ First on-silicon exercise of the SOS-04-B embeddable kernel, via the disco-analy
 
 **Fix (SOS commit `64ff4ef`; SOS-04-B §15 2026-06-04).** `embed::configure_exception_priorities` (PendSV=`0xE0`, SysTick=`0xC0`, SOS-00 §6.2) + PendSV converted to `#[unsafe(naked)]` with `naked_asm!` (body unchanged — vector points straight at the asm so `lr` *is* `EXC_RETURN`, no MSP leak) + `embed::configure_fp_context_switch` (FPCCR.LSPEN=0, defensive). All step-(0) of `start_scheduler`. **Bench-verified (DAA-08-C):** no INVPC/INVSTATE on ISR-triggered switches; `had_fp` correctly differentiated (`idle=0, render=0, audio=1`); `SHPR3=0xc0e00000`, `FPCCR=0x80000018`; analyzer runs sustained past first render.
 
-### Layer 3 — switch-endpoint race → frame corruption (OPEN, EOQ-010-ERRATA-009)
+### Layer 3 — switch-endpoint race → frame corruption (RESOLVED 2026-06-04, SOS `d8fbfb2`)
 
-**Symptom.** With L1+L2 fixed AND the kernel tick live, all three PendSV-pend sources active concurrently, a render↔audio switch corrupts the incoming saved frame (`PC=0`, garbage `xPSR=0x00000002`, R-slots holding stack-relative junk) → INVPC/INVSTATE. Audio reaches thousands of cycles then faults (vs faulting immediately, pre-L2-fix).
+**Symptom.** With L1+L2 fixed AND the kernel tick live, all three PendSV-pend sources active concurrently, a render↔audio switch corrupted the incoming saved frame (`PC=0`, garbage `xPSR=0x00000002`, R-slots holding stack-relative junk) → INVPC/INVSTATE. Audio reached thousands of cycles then faulted (vs faulting immediately, pre-L2-fix).
 
-**Root cause (suspected).** `OUTGOING_TID`/`CURRENT_TID` are plain globals written by `on_sys_tick` (SysTick `0xC0`), `sem_give_from_isr`/`run_envelope` (HSEM `0xA0`), and task context. HSEM (`0xA0`) can preempt SysTick (`0xC0`) **between** SysTick's TID write and PendSV running → PendSV saves the interrupted frame into the wrong task's `TASK_PSPS` slot.
+**Root cause.** `OUTGOING_TID`/`CURRENT_TID` were plain globals written by `on_sys_tick` (SysTick `0xC0`), `sem_give_from_isr`/`run_envelope` (HSEM `0xA0`), and task context. HSEM (`0xA0`) preempts SysTick (`0xC0`) **between** SysTick's `OUTGOING` write and PendSV running → PendSV saved the interrupted frame into the wrong task's `TASK_PSPS` slot.
 
 **Prerequisite surfaced (DAA-side, not SOS).** The SOS embed kernel does not own SysTick hardware setup. The FreeRTOS build configures SysTick (1 kHz, TICKINT) in `vPortSetupTimerInterrupt`; the analyzer's SOS path left `TICKINT=0` → kernel tick frozen → render starved on its first `task_delay(16)` → display/IPC pipeline never drains → audio backs up (~1 HSEM/s). Fixed DAA-side (analyzer `main.rs` enables SysTick TICKINT at 1 kHz for the `sos` build; disco-analyzer ERRATA-015). Enabling it *exposed* Layer 3.
 
-**Fix prescription (SOS-side; needs decision — EOQ-010-ERRATA-009).** Race-free switch-endpoint hand-off: (a) derive `OUTGOING` inside PendSV from the actual interrupted context rather than a pre-written global; (b) write/read the `(OUTGOING,CURRENT)` pair under a BASEPRI critical section in every pend source; or (c) a pend-generation counter PendSV reconciles. Likely an SOS-04-B §6.4 amendment.
+**Fix (SOS `d8fbfb2`, SOS-04-B §6.4 — the "derive OUTGOING in PendSV" path).** Replaced the racy `OUTGOING_TID` with a **PendSV-private `LOADED_TID`** that only PendSV writes: PendSV saves the interrupted context into `TASK_PSPS[LOADED_TID]` (the task it last loaded — race-free by construction), restores `TASK_PSPS[CURRENT_TID]`, then sets `LOADED_TID = CURRENT_TID`. Pend sources publish ONLY `CURRENT_TID` (= the macrostep's `current`, single source of truth) + pend PendSV; `CURRENT_TID` racing is benign since PendSV (lowest prio) runs after all ISRs drain and observes the final `current`. This is the FreeRTOS single-`pxCurrentTCB` model. **Bench-verified:** 30s soak, ~18,500 context switches, ZERO faults; audio HSEM sustained 168/s (FreeRTOS-comparable ~175/s).
 
-### Verification (full, when Layer 3 fixed)
+### Verification
 
-Rebuild `--features sos`, flash, reset → boots to `0xA11C_0009` AND HSEM6 ISR `0x3800_06C8` advancing at the FreeRTOS-comparable rate (~150-200/s) AND render wake `0x3800_06D0` advancing at ~60/s, no INVPC/INVSTATE/HardFault (CFSR/HFSR=0) sustained. Then DAA-08-A §3 A/B parity (`freertos` vs `sos`, ±5%).
+L1+L2+L3 all bench-confirmed 2026-06-04: 30s soak / ~18,500 switches, no INVPC/INVSTATE/HardFault (CFSR/HFSR=0); audio HSEM `0x3800_06C8` at 168/s. **Remaining (DAA-side, not a context-switch fault):** render wake `0x3800_06D0` advances at only ~1/s (audio prio-4 at 170/s vs render prio-1) — a priority/perf matter to quantify via DAA-08-A §3 A/B parity (`freertos` vs `sos`, ±5%), not a kernel correctness bug.
 
 ### Tracking
 

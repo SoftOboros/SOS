@@ -324,16 +324,25 @@ REQ-SOS-1/2.
   conformance arm-gated-unchanged. All three additions are `#[cfg(target_arch="arm")]` port-layer;
   INV-S-EMBED-1 held (no model/`Tcb`/trace/macrostep change).
 
-  **Open follow-up (bench, SOS ERRATA-009 Layer 3 / EOQ-010).** Once the kernel tick is live (the
-  analyzer must enable SysTick `TICKINT` — a BSP responsibility the FreeRTOS port does in
-  `vPortSetupTimerInterrupt`; the SOS embed kernel does not own SysTick hardware setup) and all three
-  pend sources are active concurrently, a **switch-endpoint race** surfaces: `OUTGOING_TID`/
-  `CURRENT_TID` are plain globals written by `on_sys_tick` (SysTick `0xC0`), `sem_give_from_isr`/
-  `run_envelope` (HSEM `0xA0`), and task context. HSEM can preempt SysTick between its TID write and
-  PendSV running, so PendSV may save the interrupted frame into the wrong task's `TASK_PSPS` slot →
-  frame corruption (`PC=0`, garbage `xPSR`) on a render↔audio switch. Needs a design fix to the
-  switch-endpoint hand-off (e.g. derive `OUTGOING` from the actual interrupted context, or
-  atomic/critical-section the TID pair) — a likely §6.4 amendment.
+- **2026-06-04 (switch-endpoint race fix — PendSV-owned `LOADED_TID` replaces `OUTGOING_TID`;
+  Specification Required §6.4; SOS commit `d8fbfb2`)** — Resolves the Layer 3 follow-up noted in the
+  entry above (SOS ERRATA-009 L3 / EOQ-010). Once the kernel tick was live (the analyzer enabled
+  SysTick `TICKINT` — a BSP responsibility the FreeRTOS port does in `vPortSetupTimerInterrupt`; the
+  SOS embed kernel does not own SysTick hardware) all three pend sources ran concurrently and raced on
+  the `OUTGOING_TID` global: HSEM (`0xA0`) preempts SysTick (`0xC0`) between its `OUTGOING` write and
+  PendSV running, so PendSV saved the interrupted frame into the wrong task's `TASK_PSPS` slot →
+  render↔audio frame corruption (`PC=0`) after thousands of switches. **Fix:** `OUTGOING_TID` (written
+  by every pend source) is replaced by a PendSV-private `LOADED_TID` that **only PendSV writes** — it
+  saves the interrupted context into `TASK_PSPS[LOADED_TID]` (the task it last loaded — race-free by
+  construction), restores `TASK_PSPS[CURRENT_TID]`, then sets `LOADED_TID = CURRENT_TID`. Pend sources
+  publish only `CURRENT_TID` (= the macrostep's `current`); racing on it is benign because PendSV
+  (lowest prio) runs after all ISRs drain and sees the final `current`. This is the FreeRTOS
+  single-`pxCurrentTCB` model. **Bench-verified (DAA-08-C):** 30 s soak / ~18,500 context switches,
+  zero faults (CFSR/HFSR=0), audio HSEM sustained 168/s (FreeRTOS-comparable). Host kernel tests 10/10;
+  thumbv7em builds; conformance arm-gated-unchanged. With L1+L2+L3 fixed the analyzer-on-SOS runs
+  sustained and fault-free with audio at full rate; the remaining render-rate gap (~1/s, audio prio-4
+  starving render prio-1) is a DAA-side priority/perf matter for DAA-08-A §3 A/B parity, not a
+  context-switch fault.
 
 - **2026-06-03 (idle-task frame priming — `embed::idle_entry` + `prime_idle_task`; Specification
   Required §5.4; SOS commit `99c82c6`)** — On-silicon DAA-08-C bring-up (disco-analyzer ERRATA-015,
