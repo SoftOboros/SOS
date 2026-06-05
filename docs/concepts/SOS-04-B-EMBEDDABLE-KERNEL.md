@@ -284,6 +284,21 @@ REQ-SOS-1/2.
 
 ## 15. Change log
 
+- **2026-06-05 (naked-PendSV FP save/restore won't assemble without `.fpu` — build fix +
+  ERRATA-009 verification correction; Specification Required §6.4; ERRATA-010)** — The Layer-2
+  naked PendSV (`64ff4ef`) emits `vstm`/`vldm {s16-s31}` for the extended-frame FP save/restore,
+  but a `#[unsafe(naked)]` fn carries no FP target-feature and the pinned `stable` toolchain
+  (rustc 1.94.1) does not inherit one into `naked_asm!` — so the block fails to assemble
+  ("instruction requires: fp registers") on the hard-float target. **Consequence:** cargo silently
+  linked the last-good *pre-fix* kernel object, so every disco-analyzer `--features sos` binary
+  flashed 2026-06-04 ran the OLD racy context switch. The L2/L3 fixes were therefore **never actually
+  exercised on silicon** until now, and DAA's "I-cache HardFaults IBUSERR" finding was the
+  speedup exposing that OLD race (not an MPU/cache hazard). **Fix:** `.fpu fpv5-d16` at the top of
+  the PendSV `naked_asm!` block (`handlers.rs`) — assembler-context only, no emitted-instruction
+  change, behaviour-preserving. **First trustworthy on-silicon verification of L1+L2+L3** (against a
+  freshly-compiled fixed kernel, ELF-disassembly-confirmed): ~15.5 min I-cache-ON soak,
+  magic/CFSR/HFSR=0 throughout, no fault. See ERRATA-010; DAA-side disco-analyzer ERRATA-016.
+
 - **2026-06-04 (on-silicon context-switch faults — PendSV priority + naked PendSV + FPCCR eager;
   Specification Required §5.4 + §6.4; SOS commit `64ff4ef`)** — Resolves the "Layer 2 INVPC" open
   follow-up below, and **corrects its diagnosis**. The bench INVPC was **not** an FPU lazy-stacking

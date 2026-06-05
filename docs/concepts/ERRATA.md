@@ -42,7 +42,8 @@ ERRATA is now actively used. SOS-00 ratified 2026-05-19; every subsequent phase 
 | ERRATA-006 | 🟢 | `VectorCategory.Boundary` name collision (SOS-03 legacy edge-case vs SOS-12 dispatch-boundary) — overload is intentional at v1, disambiguated by directory + subtype | 2026-05-27 | SOS-03 |
 | ERRATA-007 | 🟢 | SOS-09-G MPU install-function name drift (`sos_mpu_install` vs `apply_mpu_config`) reconciled to canonical `apply_mpu_config()` | 2026-05-27 | SOS-09-G |
 | ERRATA-008 | 🟢 | SOS-04 m7-rust port overflows 1 MiB FLASH (.text ≈ 1.44 MB) — float/u128 `core::fmt` + PAC `Debug` bloat from the JSON trace/parser layer; workspace `[profile.release]` also missing | 2026-06-02 | SOS-04 |
-| ERRATA-009 | 🟢 | SOS-04-B context switch faults on silicon (DAA-08-C bench), three layers ALL fixed. L1 idle-frame-unprimed INVSTATE (`99c82c6`). L2 ISR-switch INVPC (`64ff4ef`): *not* an FPU bug (misdiagnosed) — PendSV at reset-default priority `0x00` preempted the ISR that pends it + the non-naked `#[exception]` trampoline made `lr` ≠ `EXC_RETURN`; fixed by `configure_exception_priorities` (PendSV `0xE0`) + naked PendSV. L3 switch-endpoint race → frame corruption (`d8fbfb2`): racy `OUTGOING_TID` replaced by PendSV-private `LOADED_TID`. Bench: 30s/~18.5k switches, 0 faults, audio 168/s. | 2026-06-03 | SOS-04-B |
+| ERRATA-009 | 🟢 | SOS-04-B context switch faults on silicon (DAA-08-C bench), three layers ALL fixed. L1 idle-frame-unprimed INVSTATE (`99c82c6`). L2 ISR-switch INVPC (`64ff4ef`): *not* an FPU bug (misdiagnosed) — PendSV at reset-default priority `0x00` preempted the ISR that pends it + the non-naked `#[exception]` trampoline made `lr` ≠ `EXC_RETURN`; fixed by `configure_exception_priorities` (PendSV `0xE0`) + naked PendSV. L3 switch-endpoint race → frame corruption (`d8fbfb2`): racy `OUTGOING_TID` replaced by PendSV-private `LOADED_TID`. **Verification corrected by ERRATA-010**: the 2026-06-04 on-silicon run linked a STALE kernel (the fixed PendSV didn't compile); first trustworthy verification is 2026-06-05 (~15.5 min icache-on soak, CFSR/HFSR=0). | 2026-06-03 | SOS-04-B |
+| ERRATA-010 | 🟢 | Kernel naked-PendSV FP save/restore (`vstm`/`vldm {s16-s31}`) fails to assemble under the pinned `stable` toolchain (rustc 1.94.1) — a naked fn carries no FP target-feature, so the integrated assembler rejects FP instructions ("instruction requires: fp registers") with no `.fpu` directive. Cargo silently linked the last-good PRE-fix kernel object, masking the ERRATA-009 L2/L3 fixes; the disco-analyzer I-cache enable then exposed the OLD race (DAA ERRATA-016). Fixed by `.fpu fpv5-d16` at the top of the `naked_asm!` block. | 2026-06-05 | SOS-04-B |
 
 ## ERRATA-001 — SOS-09-B implementation cite mismatch (stealth rename)
 
@@ -499,11 +500,52 @@ First on-silicon exercise of the SOS-04-B embeddable kernel, via the disco-analy
 
 ### Verification
 
-L1+L2+L3 all bench-confirmed 2026-06-04: 30s soak / ~18,500 switches, no INVPC/INVSTATE/HardFault (CFSR/HFSR=0); audio HSEM `0x3800_06C8` at 168/s. **Remaining (DAA-side, not a context-switch fault):** render wake `0x3800_06D0` advances at only ~1/s (audio prio-4 at 170/s vs render prio-1) — a priority/perf matter to quantify via DAA-08-A §3 A/B parity (`freertos` vs `sos`, ±5%), not a kernel correctness bug.
+> **Provenance correction (2026-06-05, ERRATA-010).** The 2026-06-04 bench run below
+> linked a **stale cached kernel object**: the L2/L3-fixed `handlers.rs` (naked PendSV
+> with `vstm`/`vldm {s16-s31}`) does **not** assemble under the pinned `stable` toolchain
+> (rustc 1.94.1) without a `.fpu` directive, so cargo silently linked the last-good
+> pre-fix object. The 06-04 "30s/~18.5k switch zero-fault" result therefore did *not*
+> exercise the real fixed kernel. The fixes are nonetheless **correct** and are now
+> verified for the first time on 2026-06-05 against a freshly-compiled fixed kernel
+> (`.fpu fpv5-d16` added — ERRATA-010): ELF disassembly confirms naked PendSV + FP
+> save/restore + `LOADED_TID`-before-`msr psp`; **~15.5 min I-cache-ON soak, magic/CFSR/
+> HFSR=0 throughout, no fault** (≫ the ~16.8k-switch threshold at which the stale-kernel
+> build faulted). DAA-side record: disco-analyzer ERRATA-016.
+
+L1+L2+L3 all bench-confirmed 2026-06-04 *(against a stale kernel — see provenance correction above; re-verified 2026-06-05)*: 30s soak / ~18,500 switches, no INVPC/INVSTATE/HardFault (CFSR/HFSR=0); audio HSEM `0x3800_06C8` at 168/s. **Remaining (DAA-side, not a context-switch fault):** render wake `0x3800_06D0` advances at only ~1/s (audio prio-4 at 170/s vs render prio-1) — a priority/perf matter to quantify via DAA-08-A §3 A/B parity (`freertos` vs `sos`, ±5%), not a kernel correctness bug.
 
 ### Tracking
 
 DAA-side record: disco-analyzer `ERRATA-015` (+ EOQ-009/EOQ-010-ERRATA-015). SOS-04-B §15: idle-priming entry (2026-06-03) + context-switch-faults entry (2026-06-04). Files: `sos-m7-rust-kernel/src/handlers.rs` (naked PendSV), `sos-m7-rust-kernel/src/embed.rs` (`configure_exception_priorities`, `configure_fp_context_switch`, `idle_entry`, `prime_idle_task`, `start_scheduler`). Closes the SOS-04-B wave-2/3 "context-switch execution is bench-only" gate for L1+L2; L3 + DAA-08-A parity remain.
+
+## ERRATA-010 — naked-PendSV FP save/restore won't assemble without a `.fpu` directive (masked the L2/L3 fixes behind a stale object)
+
+**Status:** 🟢 resolved (2026-06-05).
+**First seen:** 2026-06-05 (HEAD `f749343`, branch `daa08-amp-proposals`), surfaced while rebuilding the disco-analyzer `--features sos` CM7 binary for the DAA-08-C I-cache bring-up.
+**Owning phase:** SOS-04-B (embeddable kernel context switch / PendSV).
+
+**Symptom.** A clean rebuild of `sos-m7-rust-kernel` (forced because `handlers.rs` was touched) fails:
+
+```
+error: <inline asm>:22:1: instruction requires: fp registers
+vstm  r2, {s16-s31}
+^
+error: could not compile `sos-m7-rust-kernel` (lib)
+```
+
+The two FP instructions in the naked PendSV — `vstm r2, {s16-s31}` (extended-frame save) and `vldm r2, {s16-s31}` (restore), added with the Layer-2 naked-PendSV conversion (`64ff4ef`) — refuse to assemble even on the hard-float `thumbv7em-none-eabihf` target with `-C target-cpu=cortex-m7`.
+
+**Root cause.** A `#[unsafe(naked)]` function carries **no FP target-feature of its own**, and the integrated assembler in the pinned `stable` toolchain (rustc 1.94.1, `SOS/rust-toolchain.toml` → `channel = "stable"`) does not inherit the crate/target FP feature into a `naked_asm!` block. With no `.fpu` directive in scope it rejects every VFP instruction. This is reproducible: `git stash` the directive → build fails identically; restore → builds clean.
+
+**The compounding failure (why this was invisible).** Because the fixed `handlers.rs` would not compile, **cargo silently linked the last-good cached kernel object** — the PRE-naked-PendSV build, i.e. the kernel *without* the ERRATA-009 L2/L3 fixes. Every disco-analyzer `--features sos` binary flashed on 2026-06-04 therefore ran the OLD, racy context switch. Two false conclusions followed:
+- ERRATA-009's "L2/L3 bench-verified 2026-06-04" verified a stale kernel (see the provenance correction in ERRATA-009 → Verification).
+- DAA's "enabling the I-cache HardFaults IBUSERR after ~2 min" (DAA ERRATA-016) was the I-cache's speedup exposing the OLD race in that stale object — **not** a cache-region/MPU hazard.
+
+**Fix.** Add `.fpu  fpv5-d16` as the first line of the PendSV `naked_asm!` block (`handlers.rs`). FPv5-D16 is the STM32H747 CM7 FPU; the directive enables the VFP subtarget for the asm so `vstm`/`vldm {s16-s31}` assemble. No emitted-instruction change — purely an assembler-context fix. Behaviour-preserving; not a §15 amendment (it makes already-ratified code compile), but SOS-04-B §15 carries a dated pointer to this errata because it materially corrects the ERRATA-009 verification record.
+
+**Verification.** `cargo build --release --target thumbv7em-none-eabihf -p analyzer-cm7 --features sos` → Finished clean. `rust-objdump -d` of the resulting ELF confirms the real fixed PendSV is now linked: naked entry, `tst.w lr, #0x10` FP-frame discriminator, the two VFP ops at the `add r2, r1, #0x20` (offset-32 `fp_regs`) sites, `mvn lr, #0x12`/`#0x2` (EXC_RETURN 0xFFFFFFED/0xFFFFFFFD), and `str r3, [r1]`→`LOADED_TID` immediately before `msr psp` (L3). Bench: with the I-cache ON, **~15.5 min soak (3.5 min + 12 min windows), magic/CFSR/HFSR=0 throughout**, HSEM6 monotonic — no fault, vs the stale-kernel build faulting at ~16.8k switches.
+
+**Tracking.** DAA-side: disco-analyzer ERRATA-016 (I-cache enable, resolved by this) + the I-cache `enable_icache()` in `analyzer-cm7/src/main.rs`. SOS-04-B §15: 2026-06-05 entry. Corrects ERRATA-009 verification provenance. Follow-up consideration: the conformance/host kernel build does not hit this (no embedded FP asm path compiled), so CI on host targets would not have caught it — an embedded-target build check would.
 
 ## How to add an entry
 

@@ -88,6 +88,13 @@ use crate::kernel::KERNEL_STATE;
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn PendSV() {
         naked_asm!(
+            // Enable the FPv5-D16 FPU in the integrated-assembler context so
+            // the S16-S31 save/restore (`vstm`/`vldm`) below assemble. A naked
+            // function carries no FP target-feature of its own, so without this
+            // directive rustc/LLVM rejects the FP instructions with
+            // "instruction requires: fp registers" even on a hard-float target
+            // (surfaced by the rustc 1.94.1 integrated assembler).
+            ".fpu  fpv5-d16",
             // ---- Outgoing save side ---------------------------------
             //
             // r3 := LOADED_TID (i32). If -1, skip the save block.
