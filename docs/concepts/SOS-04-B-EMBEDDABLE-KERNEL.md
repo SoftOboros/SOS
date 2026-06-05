@@ -284,6 +284,23 @@ REQ-SOS-1/2.
 
 ## 15. Change log
 
+- **2026-06-05 (`on_sys_tick` macrostep must run in the DirectCallBasepri envelope —
+  ISR-concurrency fix; Specification Required §5.5 / §6.5; ERRATA-011)** — `embed::on_sys_tick`
+  ran its `dispatch_event` macrostep + PendSV-pend **without** the `BASEPRI = 0xA0` mask the
+  syscall/ISR-give front-ends use, on the (false) premise that "SysTick `0xC0` context is the
+  mask." The HSEM `*_from_isr` band (`0xA0`) **outranks** SysTick (`0xC0`), so an HSEM
+  `sem_give_from_isr` preempts the tick mid-macrostep and the interleaved non-atomic RMWs on
+  `current`/`tcb[].state`/`ready[]` corrupt `KERNEL_STATE` — bench-observed (DAA-08-C) as the
+  prio-4 audio task left `state=Running` but not `current` and absent from every queue, leaked by
+  `pick_next` → permanent wedge after minutes (DAA ERRATA-017). This is the deeper root of the
+  same concurrency class **Layer 3 (2026-06-04)** began on: L3 made the *outgoing slot* race-free
+  (`LOADED_TID`); this makes the *whole tick macrostep* atomic. **Fix:** route `on_sys_tick`
+  through `run_envelope(&Event::sys_tick())` so the tick uses the identical envelope (mask `0xA0`
+  → macrostep → unmask → pend iff `current` changed) — pure port-layer, no model/trace change
+  (INV-S-EMBED-1). **Bench-verified:** race detector `0` over 16 min (HSEM never preempts the tick
+  again) and audio sustained past the wedge point; clean production build re-soaked fault-free;
+  host kernel tests 10/10. See ERRATA-011; DAA-side ERRATA-017.
+
 - **2026-06-05 (naked-PendSV FP save/restore won't assemble without `.fpu` — build fix +
   ERRATA-009 verification correction; Specification Required §6.4; ERRATA-010)** — The Layer-2
   naked PendSV (`64ff4ef`) emits `vstm`/`vldm {s16-s31}` for the extended-frame FP save/restore,

@@ -709,43 +709,27 @@ pub unsafe fn start_scheduler() -> ! {
 /// DirectCallBasepri envelope.
 #[cfg(target_arch = "arm")]
 pub fn on_sys_tick() {
-    // SAFETY: ISR-context single-access to KERNEL_STATE; see fn doc. The
-    // dispatch reuses the unchanged macrostep (INV-S-EMBED-1).
+    // The tick macrostep MUST run inside the DirectCallBasepri envelope, the
+    // same one the syscall/ISR-give front-ends use ([`run_envelope`]). SysTick
+    // runs at NVIC `0xC0`, but the HSEM `*_from_isr` band (`0xA0`) OUTRANKS it,
+    // so an HSEM `sem_give_from_isr` can preempt this handler MID-macrostep; the
+    // two then perform non-atomic read-modify-writes on the shared
+    // `KERNEL_STATE` (`current`, `tcb[].state`, the `ready[]`/waiter lists),
+    // which corrupts the scheduler — observed on DAA-08-C bench as the audio
+    // task being left `state == Running` but not `current` and absent from every
+    // queue, so `pick_next` (which only ever re-queues `current`) leaks it and
+    // it never runs again (permanent wedge after minutes). Routing through
+    // `run_envelope` brackets the macrostep with `BASEPRI = 0xA0`, deferring the
+    // give until the tick completes, so the macrostep is atomic. The previous
+    // hand-rolled body skipped the mask on the false premise that "SysTick
+    // context is the mask" — but `0xA0 < 0xC0`, so it is not. (ERRATA-017 /
+    // SOS-04-B §15 2026-06-05.) `run_envelope` already reads `current` straddling
+    // the macrostep and pends PendSV iff it changed; the sys_tick event has no
+    // payload, so the yield-hint return is unused here.
+    //
+    // SAFETY: ISR-context entry; `kernel::init()` has run before any tick.
     unsafe {
-        let prev_current: i32 = {
-            let cell = &*kernel::KERNEL_STATE.0.get();
-            match cell.as_ref() {
-                Some(dm) => dm.current as i32,
-                None => return,
-            }
-        };
-
-        dispatch(&Event::sys_tick());
-
-        let new_current: i32 = {
-            let cell = &*kernel::KERNEL_STATE.0.get();
-            match cell.as_ref() {
-                Some(dm) => dm.current as i32,
-                None => return,
-            }
-        };
-
-        // Same pend predicate the PCDN-003 syscall envelope uses (factored
-        // into the host-tested `envelope_outcome`): pend PendSV iff `current`
-        // changed. SysTick already runs at `0xC0` (≥ kernel-aware), so no
-        // BASEPRI bracket is needed here — the ISR context is the mask.
-        let outcome = envelope_outcome(prev_current, new_current);
-        if outcome.pend_pendsv {
-            // Publish only the incoming task and request the switch. PendSV
-            // derives the outgoing slot from its own `LOADED_TID` (the task it
-            // last loaded), so this pend source no longer writes an outgoing
-            // global — the ERRATA-009 L3 race (HSEM preempting SysTick between
-            // an OUTGOING write and PendSV) cannot occur. CURRENT_TID racing
-            // is benign: PendSV (lowest prio) runs after all ISRs drain and
-            // sees the final `current`.
-            kernel::CURRENT_TID = outcome.incoming;
-            cortex_m::peripheral::SCB::set_pendsv();
-        }
+        let _ = run_envelope(&Event::sys_tick());
     }
 }
 
