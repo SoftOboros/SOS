@@ -11,6 +11,7 @@ ports/m7-c/sos-m7-c-host-driver/build/
 .idea/
 *.swp
 .DS_Store
+.mcp.json
 
 # Python caches inside tools/
 **/__pycache__/
