@@ -15,6 +15,8 @@ Entries are permanent. Resolved entries stay as institutional memory; mark statu
 
 Open questions tied to errata entries appear here for at-a-glance visibility. Format: `EOQ-NNN-ERRATA-MMM`. See parent CLAUDE.md "EOQ identifiers" for the rule.
 
+- **EOQ-011-ERRATA-012**: The as-flashed analyzer (an SOS build) freezes→recovers the FFT every few minutes (operator-observed; not yet caught live). Is this a *recovering* variant of the ERRATA-011 tick-macrostep/HSEM concurrency wedge (the flashed binary may predate the `d5f5193` fix, or carry an incompletely-covered residual), the documented SOS macrostep-overhead starvation, or the secondary `embedded-alloc` heap-RefCell corruption? **First action:** confirm whether the flashed `--features sos` binary actually contains `d5f5193`. **Decisive test:** FreeRTOS A/B soak (in progress) — if FreeRTOS is clean on the same window, ERRATA-012 is SOS-specific and owned here; if FreeRTOS also freezes, it is variant-independent and owned by the DAA freertos baseline (DAA ERRATA-018). See ERRATA-012 / disco-analyzer ERRATA-018.
+
 - *(EOQ-010-ERRATA-009 resolved 2026-06-04 via path (a) — derive the outgoing slot inside PendSV from a
   private `LOADED_TID` only PendSV writes (FreeRTOS single-`pxCurrentTCB` model), eliminating the racy
   `OUTGOING_TID` global. SOS `d8fbfb2`. 30s soak / ~18,500 switches, zero faults; audio 168/s. See
@@ -44,6 +46,7 @@ ERRATA is now actively used. SOS-00 ratified 2026-05-19; every subsequent phase 
 | ERRATA-008 | 🟢 | SOS-04 m7-rust port overflows 1 MiB FLASH (.text ≈ 1.44 MB) — float/u128 `core::fmt` + PAC `Debug` bloat from the JSON trace/parser layer; workspace `[profile.release]` also missing | 2026-06-02 | SOS-04 |
 | ERRATA-009 | 🟢 | SOS-04-B context switch faults on silicon (DAA-08-C bench), three layers ALL fixed. L1 idle-frame-unprimed INVSTATE (`99c82c6`). L2 ISR-switch INVPC (`64ff4ef`): *not* an FPU bug (misdiagnosed) — PendSV at reset-default priority `0x00` preempted the ISR that pends it + the non-naked `#[exception]` trampoline made `lr` ≠ `EXC_RETURN`; fixed by `configure_exception_priorities` (PendSV `0xE0`) + naked PendSV. L3 switch-endpoint race → frame corruption (`d8fbfb2`): racy `OUTGOING_TID` replaced by PendSV-private `LOADED_TID`. **Verification corrected by ERRATA-010**: the 2026-06-04 on-silicon run linked a STALE kernel (the fixed PendSV didn't compile); first trustworthy verification is 2026-06-05 (~15.5 min icache-on soak, CFSR/HFSR=0). | 2026-06-03 | SOS-04-B |
 | ERRATA-010 | 🟢 | Kernel naked-PendSV FP save/restore (`vstm`/`vldm {s16-s31}`) fails to assemble under the pinned `stable` toolchain (rustc 1.94.1) — a naked fn carries no FP target-feature, so the integrated assembler rejects FP instructions ("instruction requires: fp registers") with no `.fpu` directive. Cargo silently linked the last-good PRE-fix kernel object, masking the ERRATA-009 L2/L3 fixes; the disco-analyzer I-cache enable then exposed the OLD race (DAA ERRATA-016). Fixed by `.fpu fpv5-d16` at the top of the `naked_asm!` block. | 2026-06-05 | SOS-04-B |
+| ERRATA-012 | 🔴 | **Periodic FFT freeze→recovery every few minutes on a `--features sos` analyzer build** (DAA-08-C bench, operator-observed). The as-flashed disco-analyzer was an SOS build (ELF carries `sos_m7_rust_kernel` symbols; audio cadence ~48/s = SOS range vs FreeRTOS ~189/s); FFT (`SPECTRUM_FRAME_COUNT`) ran ~21/s when healthy (half the FreeRTOS ~43/s) and intermittently stalls then resumes. Candidate classes: recovering variant of ERRATA-011's tick-macrostep/HSEM-band concurrency (flashed binary may predate `d5f5193`), SOS macrostep-overhead starvation, or the secondary `embedded-alloc` heap-RefCell corruption (DAA ERRATA-018). FreeRTOS A/B in progress to confirm SOS-specificity. Not yet caught live (2.5-min soak clean). | 2026-06-07 | SOS-04-B |
 | ERRATA-011 | 🟢 | `embed::on_sys_tick` ran its macrostep WITHOUT the DirectCallBasepri `0xA0` mask (false premise: "SysTick `0xC0` context is the mask"). But the HSEM `*_from_isr` band (`0xA0`) OUTRANKS SysTick (`0xC0`), so an HSEM `sem_give_from_isr` preempts the tick MID-macrostep; the two non-atomic RMWs on `KERNEL_STATE` (`current`/`tcb.state`/`ready[]`) corrupt the scheduler — observed (DAA-08-C) as the prio-4 audio task left `state=Running` but not `current` and absent from every queue → `pick_next` leaks it → permanent wedge after minutes. The deeper root of the same class ERRATA-009 L3 partially addressed (that fix made the *outgoing slot* race-free via `LOADED_TID`; this makes the *whole tick macrostep* atomic). Fixed by routing `on_sys_tick` through `run_envelope` (BASEPRI `0xA0` bracket). | 2026-06-05 | SOS-04-B |
 
 ## ERRATA-001 — SOS-09-B implementation cite mismatch (stealth rename)
@@ -567,6 +570,44 @@ The two FP instructions in the naked PendSV — `vstm r2, {s16-s31}` (extended-f
 **Verification (DAA-08-C bench).** With the race detector + datamodel snapshot still in place: **16 min, `race-cum = 0` throughout** (HSEM never preempts the tick macrostep again) and **audio sustained ~3800/min** (≫ past the ~7-min wedge point), `semc` never saturates, no fault. Then the diagnostics were stripped and the clean production build re-soaked (audio sustained, `CFSR/HFSR = 0`). Host kernel tests 10/10 (the change is arm-gated; conformance drives `dispatch_event` directly and is unaffected).
 
 **Tracking.** DAA-side bench record: disco-analyzer ERRATA-017 (+ EOQ-011 closed). SOS-04-B §15: 2026-06-05 entry. Sibling of ERRATA-009 L3 (same SysTick-vs-HSEM concurrency class). Files: `sos-m7-rust-kernel/src/embed.rs` (`on_sys_tick`).
+
+## ERRATA-012 — periodic FFT freeze→recovery every few minutes on a `--features sos` analyzer build (DAA-08-C bench) — recovering-variant / macrostep-overhead candidate, under investigation
+
+**Status:** 🔴 open — symptom reproduced by operator observation, not yet caught live on probe-rs; root cause and SOS-specificity pending the FreeRTOS A/B comparison (in progress).
+**First seen:** 2026-06-07 (HEAD `eca6d9f`, branch `daa08-amp-proposals`; disco-analyzer HEAD `e3581ca`), surfaced by an operator freeze report on the as-built/as-flashed disco-analyzer.
+**Owning phase:** SOS-04-B (embeddable kernel — scheduler/macrostep concurrency & overhead). Placement assigned here per operator direction 2026-06-07 ("place the errata found in SOS"); SOS-specificity still to be confirmed by the A/B.
+
+### Symptom
+
+Operator (DAA-08-C bench): "the FFT dances, stops every few minutes, then picks back up when left." The analyzer, as flashed, periodically stalls FFT updates and resumes on its own over minutes.
+
+DAA-side read-only probe-rs triage (2026-06-07; full detail in disco-analyzer ERRATA-018):
+- The flashed firmware was an **SOS build** (`--features sos`/`sos-native`): the on-disk CM7 ELF carried `sos_m7_rust_kernel::embed::*` symbols + the `"sos-native render task: RENDER_STATE_PTR is null"` string, and live audio-task-wake cadence (`0x3800_06D4`) measured ~48/s — the **SOS range** (~64/s), not the FreeRTOS baseline (~189/s).
+- `SPECTRUM_FRAME_COUNT` (`0x3800_0214`, the "FFT dances" signal) ran ~21/s when healthy — **half** the FreeRTOS rate (~43/s measured after reflashing the FreeRTOS baseline).
+- A **stale `embedded-alloc` "already borrowed" panic** record (`lib.rs:86`) sat in the panic buffer (`0x3800_2200`) — a secondary lead (heap-RefCell corruption class; cannot self-recover, so if involved the "recovery" is operator/NRST-driven). Cleared to arm fresh-capture.
+- A 2.5-min soak after clearing showed SPEC steady ~21/s, no freeze, panic/hf staying 0 — the freeze is intermittent on a >2.5-min period and was **not caught live**.
+
+### Root cause
+
+Not yet diagnosed. Candidate classes, in order of suspicion:
+
+1. **Recovering variant of ERRATA-011's tick-macrostep/HSEM-band concurrency.** ERRATA-011 (fixed `d5f5193`, routing `on_sys_tick` through `run_envelope`'s `0xA0` BASEPRI bracket) produced a *permanent* prio-4 audio wedge after minutes. A *periodic-recover* form is consistent with either (a) the flashed binary **predating `d5f5193`** (every pre-fix `--features sos` build was wedge-prone, and several stale-kernel-linkage hazards are documented — ERRATA-010), or (b) an incompletely-covered residual where a task starves transiently then is re-queued. **First action: confirm whether the flashed binary actually contains `d5f5193`.**
+2. **SOS macrostep overhead.** The documented ~3× audio-throughput gap (SOS sem_give/sem_take each run a full `dispatch_event` macrostep + the 1 kHz `on_sys_tick` macrostep) could, under load, periodically starve the FFT-input path enough to stall visible FFT updates, self-clearing as load eases. This is the DAA-09 / SOS macrostep-optimization territory (performance, not a fault).
+3. **Secondary: `embedded-alloc` heap-RefCell corruption** (DAA ERRATA-014 class). Cannot self-recover; would imply the observed "recovery" is operator/NRST-driven rather than autonomous.
+
+### Fix
+
+None yet — pending root cause. If class (1): port-layer fix in `sos-m7-rust-kernel/src/embed.rs` (ensure the flashed binary carries `d5f5193`; harden any residual macrostep non-atomicity). If class (2): the SOS macrostep-optimization follow-up (cheaper macrostep / lighter syscall / lower tick rate) — DAA-09. If class (3): DAA-side heap/stack-aliasing hardening (not SOS).
+
+### Verification
+
+n/a (not yet fixed). Next bench round — on freeze, sweep in one pass: `SPECTRUM_FRAME_COUNT` (`0x3800_0214`), `AUDIO_TASK_WAKE` (`0x3800_06D4`), `RENDER_TASK_WAKE` (`0x3800_06D0`), `CM4_DRAIN_ATOMIC` (`0x3800_06F8`), `FLL1_LOCK_STATUS` (`0x3800_02BC`), panic magic (`0x3800_2200`), hardfault magic (`0x3800_2280`). Discriminator: audio-wake frozen + CM4-drain alive ⇒ audio-task wedge (class 1); panic set ⇒ alloc corruption (class 3); FLL lock lost ⇒ codec (out of scope); all alive but SPEC frozen ⇒ render/spectrum-task stall (class 2). The **FreeRTOS A/B** (reflash `--features freertos`, soak ≥ the freeze period under the same stimulus) decides SOS-specificity: FreeRTOS clean ⇒ ERRATA-012 is SOS-owned; FreeRTOS also freezes ⇒ variant-independent, re-home to DAA ERRATA-018.
+
+**A/B result (2026-06-07).** Reflashed the FreeRTOS baseline (`--features cmsis-dsp,freertos`; ELF confirmed 0 `sos_m7_rust_kernel` symbols, FreeRTOS markers present) onto CM7+CM4 and soaked **14 min** (08:01:51→08:15:59, 180 samples @ 4 s). **0 freezes**: `SPECTRUM_FRAME_COUNT` steady ~43/s throughout (≈2× the SOS ~21/s), `panic`/`hardfault` magics stayed 0, `FLL1_LOCK_STATUS` stable at `0x0231_0000`, audio-wake ~211/s / render-wake ~50/s (FreeRTOS baseline cadence). A 14-min clean FreeRTOS window vs the operator's "freezes every few minutes" on the SOS build **supports SOS-specificity** → ERRATA-012 stays SOS-owned. Caveat: the SOS arm was only soaked 2.5 min (not caught live); a fair-rigor follow-up reflashes the `--features sos` binary and soaks ≥14 min to **capture the freeze signature live** (which of classes 1/2/3) — gated on a bench-round authorization, and deliberately deferred because the board is intentionally left on the clean FreeRTOS baseline the operator expected.
+
+### Tracking
+
+DAA-side bench record: disco-analyzer **ERRATA-018** (+ **EOQ-012-ERRATA-018**). SOS-side open question: **EOQ-011-ERRATA-012**. Sibling of **ERRATA-011** (same tick-macrostep/HSEM concurrency class) and **ERRATA-009 L3**. Related performance follow-up: SOS macrostep optimization (disco-analyzer DAA-09). FreeRTOS A/B comparison pending — placement here is provisional until it confirms SOS-specificity.
 
 ## How to add an entry
 
