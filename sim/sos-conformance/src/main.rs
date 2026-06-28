@@ -230,7 +230,11 @@ fn run_cmd(
 ) -> u8 {
     // Pre-flight: suite must exist.
     if !suite.exists() {
-        let _ = writeln!(io::stderr(), "suite directory does not exist: {}", suite.display());
+        let _ = writeln!(
+            io::stderr(),
+            "suite directory does not exist: {}",
+            suite.display()
+        );
         return EXIT_SETUP;
     }
     // Pre-flight: port (if specified) must exist and be a file.
@@ -261,8 +265,20 @@ fn run_cmd(
 
     // Render the report to the requested sink.
     let render_result = match format {
-        OutputFormat::Human => render_human(&report, &suite, port.as_deref(), filter.as_deref(), out.as_deref()),
-        OutputFormat::Json => render_json(&report, &suite, port.as_deref(), filter.as_deref(), out.as_deref()),
+        OutputFormat::Human => render_human(
+            &report,
+            &suite,
+            port.as_deref(),
+            filter.as_deref(),
+            out.as_deref(),
+        ),
+        OutputFormat::Json => render_json(
+            &report,
+            &suite,
+            port.as_deref(),
+            filter.as_deref(),
+            out.as_deref(),
+        ),
     };
     if let Err(e) = render_result {
         let _ = writeln!(io::stderr(), "I/O error rendering report: {e}");
@@ -295,7 +311,12 @@ fn render_human(
         Some(p) => p.display().to_string(),
         None => "<in-process sos-sim>".to_string(),
     };
-    writeln!(w, "SOS-CONFORMANCE  suite: {}  port: {}", suite.display(), port_disp)?;
+    writeln!(
+        w,
+        "SOS-CONFORMANCE  suite: {}  port: {}",
+        suite.display(),
+        port_disp
+    )?;
     writeln!(w, "Filter: {}", filter.unwrap_or("**/*.json"))?;
     writeln!(
         w,

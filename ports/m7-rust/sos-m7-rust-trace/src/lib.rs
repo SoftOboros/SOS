@@ -318,11 +318,7 @@ pub fn write_record_from_input(
     w.pos
 }
 
-fn emit_record(
-    w: &mut Writer<'_>,
-    input: &TraceInput<'_>,
-    after_input_idx: i64,
-) -> WriteResult {
+fn emit_record(w: &mut Writer<'_>, input: &TraceInput<'_>, after_input_idx: i64) -> WriteResult {
     w.write_str("{\"after_input_idx\":")?;
     w.write_i64(after_input_idx)?;
 

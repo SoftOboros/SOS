@@ -5,7 +5,7 @@ use std::io::{self, Write};
 
 use serde::{Deserialize, Serialize};
 
-use crate::datamodel::{Datamodel, Msg, Queue, Sem, Tcb, TaskId, TaskState};
+use crate::datamodel::{Datamodel, Msg, Queue, Sem, TaskId, TaskState, Tcb};
 
 /// An ordered sequence of [`TraceRecord`]s. Owns the on-disk
 /// serialisation per SOS-02 §7.
@@ -33,8 +33,7 @@ impl Trace {
             .collect();
 
         let sems: Vec<SemSnapshot> = dm.sems.iter().map(SemSnapshot::from_sem).collect();
-        let queues: Vec<QueueSnapshot> =
-            dm.queues.iter().map(QueueSnapshot::from_queue).collect();
+        let queues: Vec<QueueSnapshot> = dm.queues.iter().map(QueueSnapshot::from_queue).collect();
 
         TraceRecord {
             after_input_idx,

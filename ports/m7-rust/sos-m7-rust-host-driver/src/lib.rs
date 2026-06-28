@@ -242,9 +242,7 @@ mod tests {
         ));
         assert!(!is_done_sentinel(r#"{"__sos_done": false}"#));
         // Object with extra fields — never matches.
-        assert!(!is_done_sentinel(
-            r#"{"__sos_done": true, "extra": 1}"#
-        ));
+        assert!(!is_done_sentinel(r#"{"__sos_done": true, "extra": 1}"#));
         // Not an object.
         assert!(!is_done_sentinel(r#"true"#));
         // Bad JSON.

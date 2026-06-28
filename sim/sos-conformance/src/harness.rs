@@ -180,16 +180,18 @@ impl HarnessReport {
         let mut grouped: std::collections::BTreeMap<String, Vec<&DiffRecord>> =
             std::collections::BTreeMap::new();
         for d in &self.failed {
-            grouped
-                .entry(d.vector_name.clone())
-                .or_default()
-                .push(d);
+            grouped.entry(d.vector_name.clone()).or_default().push(d);
         }
         grouped.into_iter().collect()
     }
 
     /// Render a serialisable summary suitable for `--format json`.
-    pub fn to_json_value(&self, suite_root: &str, port_binary: &str, filter: &str) -> serde_json::Value {
+    pub fn to_json_value(
+        &self,
+        suite_root: &str,
+        port_binary: &str,
+        filter: &str,
+    ) -> serde_json::Value {
         let failures: Vec<serde_json::Value> = self
             .failures_by_vector()
             .into_iter()

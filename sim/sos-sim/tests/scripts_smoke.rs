@@ -6,8 +6,7 @@
 
 use serde_json::json;
 use sos_sim::{
-    Config, Datamodel, Event, EventName, HandCompiledScripts, ReturnCode, ScriptProvider,
-    TaskState,
+    Config, Datamodel, Event, EventName, HandCompiledScripts, ReturnCode, ScriptProvider, TaskState,
 };
 
 #[test]

@@ -26,9 +26,8 @@ impl Vector {
     /// are tolerated and ignored — sos-sim consumes only the `input` half
     /// and produces the trace itself.
     pub fn from_json(s: &str) -> Result<Self, SimError> {
-        serde_json::from_str::<Vector>(s).map_err(|e| {
-            SimError::VectorParse(format!("vector JSON did not parse: {e}"))
-        })
+        serde_json::from_str::<Vector>(s)
+            .map_err(|e| SimError::VectorParse(format!("vector JSON did not parse: {e}")))
     }
 }
 

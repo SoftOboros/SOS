@@ -28,9 +28,7 @@
 use heapless::Vec as HVec;
 
 use crate::event::{Event, EventData, EventName};
-use crate::kernel::{
-    Datamodel, Msg, ReturnCode, TaskId, TaskState, MAX_PRIO, MAX_TASKS, Q_DEPTH,
-};
+use crate::kernel::{Datamodel, Msg, ReturnCode, TaskId, TaskState, MAX_PRIO, MAX_TASKS, Q_DEPTH};
 
 // ---------------------------------------------------------------------------
 // Error type — port-side replacement for `SimError`.
@@ -312,18 +310,12 @@ pub fn script_boot_onentry_0(dm: &mut Datamodel, _ev: &Event) -> Result<(), Scri
 ///
 /// `<transition event="sched.run" cond="sched_lock == 0">` — only the
 /// cond-true arm carries a script; the harness owns predicate dispatch.
-pub fn script_sched_idle_sched_run_0(
-    dm: &mut Datamodel,
-    _ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sched_idle_sched_run_0(dm: &mut Datamodel, _ev: &Event) -> Result<(), ScriptError> {
     dm.pick_next()
 }
 
 /// Translates rtos_kernel.scxml lines 225-252 (tick_idle / sys.tick).
-pub fn script_tick_idle_sys_tick_0(
-    dm: &mut Datamodel,
-    _ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_tick_idle_sys_tick_0(dm: &mut Datamodel, _ev: &Event) -> Result<(), ScriptError> {
     if dm.irq_nest > 0 || dm.sched_lock > 0 {
         // Cannot mutate ready queue safely; defer.
         dm.pend_ticks += 1;
@@ -358,10 +350,7 @@ pub fn script_tick_idle_sys_tick_0(
 }
 
 /// Translates rtos_kernel.scxml lines 270-286 (transition event="task.create").
-pub fn script_sys_idle_task_create_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_task_create_0(dm: &mut Datamodel, ev: &Event) -> Result<(), ScriptError> {
     let (id, prio) = match ev.data {
         EventData::TaskCreate { id, prio } => (id, prio),
         _ => return Err(ScriptError::WrongDataVariant),
@@ -386,10 +375,7 @@ pub fn script_sys_idle_task_create_0(
 }
 
 /// Translates rtos_kernel.scxml lines 289-300 (transition event="task.delay").
-pub fn script_sys_idle_task_delay_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_task_delay_0(dm: &mut Datamodel, ev: &Event) -> Result<(), ScriptError> {
     let ticks = match ev.data {
         EventData::TaskDelay { ticks } => ticks,
         _ => return Err(ScriptError::WrongDataVariant),
@@ -404,20 +390,14 @@ pub fn script_sys_idle_task_delay_0(
 }
 
 /// Translates rtos_kernel.scxml lines 302-305 (transition event="task.yield").
-pub fn script_sys_idle_task_yield_0(
-    dm: &mut Datamodel,
-    _ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_task_yield_0(dm: &mut Datamodel, _ev: &Event) -> Result<(), ScriptError> {
     dm.resched = true;
     dm.rc = ReturnCode::Ok;
     Ok(())
 }
 
 /// Translates rtos_kernel.scxml lines 308-326 (transition event="task.suspend").
-pub fn script_sys_idle_task_suspend_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_task_suspend_0(dm: &mut Datamodel, ev: &Event) -> Result<(), ScriptError> {
     let id = match ev.data {
         EventData::TaskId { id } => id,
         _ => return Err(ScriptError::WrongDataVariant),
@@ -445,10 +425,7 @@ pub fn script_sys_idle_task_suspend_0(
 }
 
 /// Translates rtos_kernel.scxml lines 329-341 (transition event="task.resume").
-pub fn script_sys_idle_task_resume_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_task_resume_0(dm: &mut Datamodel, ev: &Event) -> Result<(), ScriptError> {
     let id = match ev.data {
         EventData::TaskId { id } => id,
         _ => return Err(ScriptError::WrongDataVariant),
@@ -469,10 +446,7 @@ pub fn script_sys_idle_task_resume_0(
 }
 
 /// Translates rtos_kernel.scxml lines 346-356 (transition event="sem.create").
-pub fn script_sys_idle_sem_create_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_sem_create_0(dm: &mut Datamodel, ev: &Event) -> Result<(), ScriptError> {
     let (id, initial, max) = match ev.data {
         EventData::SemCreate { id, initial, max } => (id, initial, max),
         _ => return Err(ScriptError::WrongDataVariant),
@@ -492,10 +466,7 @@ pub fn script_sys_idle_sem_create_0(
 }
 
 /// Translates rtos_kernel.scxml lines 360-378 (transition event="sem.take").
-pub fn script_sys_idle_sem_take_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_sem_take_0(dm: &mut Datamodel, ev: &Event) -> Result<(), ScriptError> {
     let (sid, timeout) = match ev.data {
         EventData::SemOp { sid, timeout } => (sid, timeout),
         _ => return Err(ScriptError::WrongDataVariant),
@@ -529,10 +500,7 @@ pub fn script_sys_idle_sem_take_0(
 }
 
 /// Translates rtos_kernel.scxml lines 381-398 (transition event="sem.give").
-pub fn script_sys_idle_sem_give_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_sem_give_0(dm: &mut Datamodel, ev: &Event) -> Result<(), ScriptError> {
     let sid = match ev.data {
         EventData::SemOp { sid, .. } => sid,
         _ => return Err(ScriptError::WrongDataVariant),
@@ -582,10 +550,7 @@ pub fn script_sys_idle_sem_give_from_isr_0(
 }
 
 /// Translates rtos_kernel.scxml lines 420-432 (transition event="queue.create").
-pub fn script_sys_idle_queue_create_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_queue_create_0(dm: &mut Datamodel, ev: &Event) -> Result<(), ScriptError> {
     let (id, cap) = match ev.data {
         EventData::QueueCreate { id, cap } => (id, cap),
         _ => return Err(ScriptError::WrongDataVariant),
@@ -612,10 +577,7 @@ pub fn script_sys_idle_queue_create_0(
 }
 
 /// Translates rtos_kernel.scxml lines 435-461 (transition event="queue.send").
-pub fn script_sys_idle_queue_send_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_queue_send_0(dm: &mut Datamodel, ev: &Event) -> Result<(), ScriptError> {
     let (qid, msg, timeout) = match ev.data {
         EventData::QueueSend { qid, msg, timeout } => (qid, msg, timeout),
         _ => return Err(ScriptError::WrongDataVariant),
@@ -660,10 +622,7 @@ pub fn script_sys_idle_queue_send_0(
 }
 
 /// Translates rtos_kernel.scxml lines 464-499 (transition event="queue.receive").
-pub fn script_sys_idle_queue_receive_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_sys_idle_queue_receive_0(dm: &mut Datamodel, ev: &Event) -> Result<(), ScriptError> {
     let (qid, timeout) = match ev.data {
         EventData::QueueReceive { qid, timeout } => (qid, timeout),
         _ => return Err(ScriptError::WrongDataVariant),
@@ -762,19 +721,13 @@ pub fn script_sys_idle_queue_send_from_isr_0(
 }
 
 /// Translates rtos_kernel.scxml lines 532-534 (transition event="crit.enter").
-pub fn script_prot_idle_crit_enter_0(
-    dm: &mut Datamodel,
-    _ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_prot_idle_crit_enter_0(dm: &mut Datamodel, _ev: &Event) -> Result<(), ScriptError> {
     dm.irq_nest += 1;
     Ok(())
 }
 
 /// Translates rtos_kernel.scxml lines 536-541 (transition event="crit.exit").
-pub fn script_prot_idle_crit_exit_0(
-    dm: &mut Datamodel,
-    _ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_prot_idle_crit_exit_0(dm: &mut Datamodel, _ev: &Event) -> Result<(), ScriptError> {
     if dm.irq_nest > 0 {
         dm.irq_nest -= 1;
     }
@@ -796,10 +749,7 @@ pub fn script_prot_idle_sched_suspend_0(
 /// were deferred, flush them: replay deadline checks for each pending
 /// tick, expiring delays and timing out blocked waiters per the chart's
 /// nested loop.
-pub fn script_prot_idle_sched_resume_0(
-    dm: &mut Datamodel,
-    _ev: &Event,
-) -> Result<(), ScriptError> {
+pub fn script_prot_idle_sched_resume_0(dm: &mut Datamodel, _ev: &Event) -> Result<(), ScriptError> {
     if dm.sched_lock > 0 {
         dm.sched_lock -= 1;
     }

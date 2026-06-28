@@ -335,9 +335,7 @@ impl<'de> Deserialize<'de> for Msg {
                 if v <= i64::MAX as u64 {
                     Ok(Msg::Int(v as i64))
                 } else {
-                    Err(E::custom(format!(
-                        "Msg::Int payload {v} exceeds i64::MAX"
-                    )))
+                    Err(E::custom(format!("Msg::Int payload {v} exceeds i64::MAX")))
                 }
             }
 

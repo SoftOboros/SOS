@@ -41,7 +41,10 @@ fn run_vector_single_task_create() {
 
     let baseline = &trace.records[0];
     assert_eq!(baseline.after_input_idx, -1, "baseline.after_input_idx");
-    assert_eq!(baseline.current, 0, "baseline.current — idle running at boot");
+    assert_eq!(
+        baseline.current, 0,
+        "baseline.current — idle running at boot"
+    );
 
     let after_create = &trace.records[1];
     assert_eq!(

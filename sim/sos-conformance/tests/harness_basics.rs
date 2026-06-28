@@ -75,10 +75,8 @@ fn structural_diff_detects_value_mismatch_and_count_mismatch() {
     tweaked[0].current = 99;
     let diffs = structural_diff_traces(&v.expected_trace, &tweaked);
     assert!(!diffs.is_empty(), "tweak must produce a diff");
-    assert!(diffs
-        .iter()
-        .any(|d| d.severity == DiffSeverity::BytesDiffer
-            && d.field_path.as_deref() == Some("[0].current")));
+    assert!(diffs.iter().any(|d| d.severity == DiffSeverity::BytesDiffer
+        && d.field_path.as_deref() == Some("[0].current")));
 
     // Shorter trace produces a record_count_mismatch.
     let truncated: Vec<_> = v.expected_trace.iter().take(2).cloned().collect();

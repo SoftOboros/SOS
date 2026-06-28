@@ -339,14 +339,18 @@ fn main() -> ! {
 
         match parser.try_step(&scratch[..parse_end]) {
             json_parser::ParseStep::NeedMoreInput => {
-                unsafe { core::ptr::write_volatile(&raw mut DIAG_PARSE_KIND, 0); }
+                unsafe {
+                    core::ptr::write_volatile(&raw mut DIAG_PARSE_KIND, 0);
+                }
                 // Parser consumed nothing actionable; wait for more
                 // bytes. The USART1 IRQ wakes us via SysTick or its
                 // own RXNE event (both eventually unmask WFI).
                 cortex_m::asm::wfi();
             }
             json_parser::ParseStep::VectorHeader { header, consumed } => {
-                unsafe { core::ptr::write_volatile(&raw mut DIAG_PARSE_KIND, 1); }
+                unsafe {
+                    core::ptr::write_volatile(&raw mut DIAG_PARSE_KIND, 1);
+                }
                 // Vector-header check: the firmware's compiled-in
                 // dimensions are frozen at build time. A header that
                 // disagrees would invalidate the trace contract per
@@ -366,7 +370,9 @@ fn main() -> ! {
                 scratch_len -= consumed;
             }
             json_parser::ParseStep::Event { event, consumed } => {
-                unsafe { core::ptr::write_volatile(&raw mut DIAG_PARSE_KIND, 2); }
+                unsafe {
+                    core::ptr::write_volatile(&raw mut DIAG_PARSE_KIND, 2);
+                }
                 // Per SOS-00 §7.1 / sim::Simulator::run_vector: inject
                 // `from_tid` into `current` before dispatch when
                 // present; ISR-context events (`sys.tick`, `*_from_isr`)
@@ -406,14 +412,18 @@ fn main() -> ! {
                 scratch_len -= consumed;
             }
             json_parser::ParseStep::EndOfInput { consumed: _ } => {
-                unsafe { core::ptr::write_volatile(&raw mut DIAG_PARSE_KIND, 3); }
+                unsafe {
+                    core::ptr::write_volatile(&raw mut DIAG_PARSE_KIND, 3);
+                }
                 // No further input will be consumed; skip the scratch
                 // shift and proceed straight to the sentinel + park.
                 emit_done_sentinel();
                 park_forever();
             }
             json_parser::ParseStep::Error { .. } => {
-                unsafe { core::ptr::write_volatile(&raw mut DIAG_PARSE_KIND, 4); }
+                unsafe {
+                    core::ptr::write_volatile(&raw mut DIAG_PARSE_KIND, 4);
+                }
                 // Per §6.2 step 4: v1 emits the done sentinel and
                 // halts. The harness sees a truncated trace (records
                 // up to the parse error) and reports a vector failure.

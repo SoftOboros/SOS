@@ -47,9 +47,7 @@
 #[cfg(target_arch = "arm")]
 use crate::event::{Event, EventData, EventName};
 #[cfg(target_arch = "arm")]
-use crate::kernel::{
-    self, Datamodel, StackRegion, TaskId, MAX_TASKS, TASK_STACK_BYTES,
-};
+use crate::kernel::{self, Datamodel, StackRegion, TaskId, MAX_TASKS, TASK_STACK_BYTES};
 
 // ---------------------------------------------------------------------------
 // Pure, host-testable frame-layout math (PCDN-002).
@@ -944,10 +942,18 @@ mod tests {
         assert_eq!(p.frame[7], INITIAL_XPSR);
 
         // PC = entry | 1 (Thumb interworking).
-        assert_eq!(p.frame[6], entry_addr | 1, "PC must be entry with Thumb bit");
+        assert_eq!(
+            p.frame[6],
+            entry_addr | 1,
+            "PC must be entry with Thumb bit"
+        );
 
         // LR = task_exit_trap | 1.
-        assert_eq!(p.frame[5], exit_addr | 1, "LR must be task_exit_trap addr (Thumb)");
+        assert_eq!(
+            p.frame[5],
+            exit_addr | 1,
+            "LR must be task_exit_trap addr (Thumb)"
+        );
 
         // R0..R3 and R12 zeroed (PCDN-002 R0 = 0).
         assert_eq!(p.frame[0], 0, "R0 must be 0");
@@ -988,11 +994,15 @@ mod tests {
         // 8-byte-aligned PSP (round the top DOWN).
         let base: u32 = 0x2000_0004; // base+size will be misaligned
         let size: usize = 100; // top = 0x2000_0068 → already &!7 = 0x68
-        // Pick a size that makes the raw top deliberately misaligned:
+                               // Pick a size that makes the raw top deliberately misaligned:
         let size2: usize = 102; // top = 0x2000_006A, &!7 = 0x68
         let _ = size;
         let p = compute_primed_frame(base, size2, 0x0800_0000, 0x0800_0010);
-        assert_eq!(p.psp & 0x7, 0, "PSP must be 8-byte aligned even for a misaligned top");
+        assert_eq!(
+            p.psp & 0x7,
+            0,
+            "PSP must be 8-byte aligned even for a misaligned top"
+        );
         let raw_top = base + size2 as u32; // 0x2000_006A
         let aligned_top = raw_top & !0x7u32; // 0x2000_0068
         assert_eq!(p.psp, aligned_top - BASIC_FRAME_BYTES as u32);
@@ -1085,8 +1095,16 @@ mod tests {
         let psp_word_idx = ((psp - base) / 4) as usize;
         let written = &stack[psp_word_idx..psp_word_idx + BASIC_FRAME_WORDS];
         assert_eq!(written[7], INITIAL_XPSR, "xPSR (T bit) written into slice");
-        assert_eq!(written[6], entry_addr | 1, "PC = entry|1 written into slice");
-        assert_eq!(written[5], exit_addr | 1, "LR = exit_trap|1 written into slice");
+        assert_eq!(
+            written[6],
+            entry_addr | 1,
+            "PC = entry|1 written into slice"
+        );
+        assert_eq!(
+            written[5],
+            exit_addr | 1,
+            "LR = exit_trap|1 written into slice"
+        );
         for &r in &written[0..5] {
             assert_eq!(r, 0, "R0..R3/R12 zeroed in slice");
         }
@@ -1114,7 +1132,10 @@ mod tests {
         // Old path: the inline math create_task used before the refactor.
         let old = compute_primed_frame(base, TASK_STACK_BYTES, entry_addr, exit_addr);
 
-        assert_eq!(new_psp, old.psp, "delegated PSP must equal the old inline PSP");
+        assert_eq!(
+            new_psp, old.psp,
+            "delegated PSP must equal the old inline PSP"
+        );
         let psp_word_idx = ((new_psp - base) / 4) as usize;
         let written = &pool_slot[psp_word_idx..psp_word_idx + BASIC_FRAME_WORDS];
         assert_eq!(

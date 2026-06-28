@@ -96,8 +96,7 @@ impl Event {
     /// `SimError::VectorParse` because serde rejects unknown
     /// `#[serde(rename = "...")]` discriminants.
     pub fn parse(json: &str) -> Result<Self, SimError> {
-        serde_json::from_str::<Event>(json).map_err(|e| {
-            SimError::VectorParse(format!("event JSON did not parse: {e}"))
-        })
+        serde_json::from_str::<Event>(json)
+            .map_err(|e| SimError::VectorParse(format!("event JSON did not parse: {e}")))
     }
 }

@@ -87,120 +87,120 @@ use crate::kernel::KERNEL_STATE;
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn PendSV() {
-        naked_asm!(
-            // Enable the FPv5-D16 FPU in the integrated-assembler context so
-            // the S16-S31 save/restore (`vstm`/`vldm`) below assemble. A naked
-            // function carries no FP target-feature of its own, so without this
-            // directive rustc/LLVM rejects the FP instructions with
-            // "instruction requires: fp registers" even on a hard-float target
-            // (surfaced by the rustc 1.94.1 integrated assembler).
-            ".fpu  fpv5-d16",
-            // ---- Outgoing save side ---------------------------------
-            //
-            // r3 := LOADED_TID (i32). If -1, skip the save block.
-            "ldr   r3, ={loaded_tid}",
-            "ldr   r3, [r3]",
-            "cmp   r3, #0",
-            "blt   2f",                  // LOADED_TID < 0 ⇒ skip save
-            //
-            // r0 := PSP of outgoing task.
-            "mrs   r0, psp",
-            //
-            // r1 := &TASK_PSPS[LOADED_TID]; store outgoing PSP there.
-            "ldr   r1, ={task_psps}",
-            "str   r0, [r1, r3, lsl #2]",
-            //
-            // r1 := &TASK_SAVED_FRAMES[LOADED_TID]. Each SavedFrame is
-            // 100 bytes: regs[8] = 32, fp_regs[16] = 64, had_fp_frame
-            // (bool, 1 byte; aligned/padded to 4 = 4 total trailing).
-            // Layout: 0..32 = regs, 32..96 = fp_regs, 96 = had_fp_frame.
-            // Size = 100 (with Rust's natural u32 alignment, the struct
-            // is padded to a multiple of 4). Index by r3 * 100.
-            "ldr   r1, ={task_saved_frames}",
-            "movs  r2, #100",            // sizeof(SavedFrame) = 100
-            "mla   r1, r2, r3, r1",      // r1 = base + r3 * 100
-            //
-            // Save R4-R11 → SavedFrame.regs[0..8] (offset 0).
-            "stm   r1, {{r4-r11}}",
-            //
-            // EXC_RETURN[4] discriminator. Bit clear ⇒ extended (FPU)
-            // frame ⇒ save S16-S31 and set had_fp_frame = 1.
-            "tst   lr, #0x10",
-            "bne   1f",                  // bit set ⇒ standard frame
-            //
-            // Extended frame: save S16-S31 → SavedFrame.fp_regs[0..16]
-            // (offset 32 from the SavedFrame base in r1).
-            "add   r2, r1, #32",
-            "vstm  r2, {{s16-s31}}",
-            // Set had_fp_frame = 1 at offset 96.
-            "movs  r2, #1",
-            "strb  r2, [r1, #96]",
-            "b     2f",
-            //
-            "1:",                        // standard frame branch
-            // Clear had_fp_frame at offset 96 so the restore side
-            // doesn't try to pop a non-existent FP block.
-            "movs  r2, #0",
-            "strb  r2, [r1, #96]",
-            //
-            "2:",                        // ---- Incoming restore side -
-            //
-            // r3 := CURRENT_TID (i32). The syscall path guarantees this
-            // is a valid task id at this point (>= 0 and the slot is
-            // active). PendSV does not defend against a bad value —
-            // INV-S5 makes it a port bug if one arrives.
-            "ldr   r3, ={current_tid}",
-            "ldr   r3, [r3]",
-            //
-            // r0 := TASK_PSPS[CURRENT_TID].
-            "ldr   r1, ={task_psps}",
-            "ldr   r0, [r1, r3, lsl #2]",
-            //
-            // r1 := &TASK_SAVED_FRAMES[CURRENT_TID].
-            "ldr   r1, ={task_saved_frames}",
-            "movs  r2, #100",
-            "mla   r1, r2, r3, r1",
-            //
-            // Restore R4-R11 ← SavedFrame.regs.
-            "ldm   r1, {{r4-r11}}",
-            //
-            // Inspect incoming had_fp_frame at offset 96.
-            "ldrb  r2, [r1, #96]",
-            "cmp   r2, #0",
-            "beq   3f",                  // no FP frame on incoming
-            //
-            // Incoming task had an FP frame: restore S16-S31 from
-            // SavedFrame.fp_regs (offset 32), and build EXC_RETURN =
-            // 0xFFFFFFED (return to thread mode, PSP, extended frame).
-            "add   r2, r1, #32",
-            "vldm  r2, {{s16-s31}}",
-            "ldr   lr, =0xFFFFFFED",
-            "b     4f",
-            //
-            "3:",                        // standard-frame incoming
-            "ldr   lr, =0xFFFFFFFD",     // thread mode, PSP, no FP frame
-            //
-            "4:",                        // ---- Exception return ------
-            //
-            // LOADED_TID = CURRENT_TID: this handler is now the task whose
-            // context is live, so the NEXT PendSV saves into this slot. r3
-            // still holds CURRENT_TID (preserved across the restore); r1 is
-            // free. This single PendSV-owned write is what makes the
-            // save-target race-free (ERRATA-009 L3 / SOS-04-B §6.4).
-            "ldr   r1, ={loaded_tid}",
-            "str   r3, [r1]",
-            //
-            // Install incoming PSP, fence, return-from-exception.
-            "msr   psp, r0",
-            "dsb",
-            "isb",
-            "bx    lr",
-            //
-            loaded_tid         = sym crate::kernel::LOADED_TID,
-            current_tid        = sym crate::kernel::CURRENT_TID,
-            task_psps          = sym crate::kernel::TASK_PSPS,
-            task_saved_frames  = sym crate::kernel::TASK_SAVED_FRAMES,
-        );
+    naked_asm!(
+        // Enable the FPv5-D16 FPU in the integrated-assembler context so
+        // the S16-S31 save/restore (`vstm`/`vldm`) below assemble. A naked
+        // function carries no FP target-feature of its own, so without this
+        // directive rustc/LLVM rejects the FP instructions with
+        // "instruction requires: fp registers" even on a hard-float target
+        // (surfaced by the rustc 1.94.1 integrated assembler).
+        ".fpu  fpv5-d16",
+        // ---- Outgoing save side ---------------------------------
+        //
+        // r3 := LOADED_TID (i32). If -1, skip the save block.
+        "ldr   r3, ={loaded_tid}",
+        "ldr   r3, [r3]",
+        "cmp   r3, #0",
+        "blt   2f",                  // LOADED_TID < 0 ⇒ skip save
+        //
+        // r0 := PSP of outgoing task.
+        "mrs   r0, psp",
+        //
+        // r1 := &TASK_PSPS[LOADED_TID]; store outgoing PSP there.
+        "ldr   r1, ={task_psps}",
+        "str   r0, [r1, r3, lsl #2]",
+        //
+        // r1 := &TASK_SAVED_FRAMES[LOADED_TID]. Each SavedFrame is
+        // 100 bytes: regs[8] = 32, fp_regs[16] = 64, had_fp_frame
+        // (bool, 1 byte; aligned/padded to 4 = 4 total trailing).
+        // Layout: 0..32 = regs, 32..96 = fp_regs, 96 = had_fp_frame.
+        // Size = 100 (with Rust's natural u32 alignment, the struct
+        // is padded to a multiple of 4). Index by r3 * 100.
+        "ldr   r1, ={task_saved_frames}",
+        "movs  r2, #100",            // sizeof(SavedFrame) = 100
+        "mla   r1, r2, r3, r1",      // r1 = base + r3 * 100
+        //
+        // Save R4-R11 → SavedFrame.regs[0..8] (offset 0).
+        "stm   r1, {{r4-r11}}",
+        //
+        // EXC_RETURN[4] discriminator. Bit clear ⇒ extended (FPU)
+        // frame ⇒ save S16-S31 and set had_fp_frame = 1.
+        "tst   lr, #0x10",
+        "bne   1f",                  // bit set ⇒ standard frame
+        //
+        // Extended frame: save S16-S31 → SavedFrame.fp_regs[0..16]
+        // (offset 32 from the SavedFrame base in r1).
+        "add   r2, r1, #32",
+        "vstm  r2, {{s16-s31}}",
+        // Set had_fp_frame = 1 at offset 96.
+        "movs  r2, #1",
+        "strb  r2, [r1, #96]",
+        "b     2f",
+        //
+        "1:",                        // standard frame branch
+        // Clear had_fp_frame at offset 96 so the restore side
+        // doesn't try to pop a non-existent FP block.
+        "movs  r2, #0",
+        "strb  r2, [r1, #96]",
+        //
+        "2:",                        // ---- Incoming restore side -
+        //
+        // r3 := CURRENT_TID (i32). The syscall path guarantees this
+        // is a valid task id at this point (>= 0 and the slot is
+        // active). PendSV does not defend against a bad value —
+        // INV-S5 makes it a port bug if one arrives.
+        "ldr   r3, ={current_tid}",
+        "ldr   r3, [r3]",
+        //
+        // r0 := TASK_PSPS[CURRENT_TID].
+        "ldr   r1, ={task_psps}",
+        "ldr   r0, [r1, r3, lsl #2]",
+        //
+        // r1 := &TASK_SAVED_FRAMES[CURRENT_TID].
+        "ldr   r1, ={task_saved_frames}",
+        "movs  r2, #100",
+        "mla   r1, r2, r3, r1",
+        //
+        // Restore R4-R11 ← SavedFrame.regs.
+        "ldm   r1, {{r4-r11}}",
+        //
+        // Inspect incoming had_fp_frame at offset 96.
+        "ldrb  r2, [r1, #96]",
+        "cmp   r2, #0",
+        "beq   3f",                  // no FP frame on incoming
+        //
+        // Incoming task had an FP frame: restore S16-S31 from
+        // SavedFrame.fp_regs (offset 32), and build EXC_RETURN =
+        // 0xFFFFFFED (return to thread mode, PSP, extended frame).
+        "add   r2, r1, #32",
+        "vldm  r2, {{s16-s31}}",
+        "ldr   lr, =0xFFFFFFED",
+        "b     4f",
+        //
+        "3:",                        // standard-frame incoming
+        "ldr   lr, =0xFFFFFFFD",     // thread mode, PSP, no FP frame
+        //
+        "4:",                        // ---- Exception return ------
+        //
+        // LOADED_TID = CURRENT_TID: this handler is now the task whose
+        // context is live, so the NEXT PendSV saves into this slot. r3
+        // still holds CURRENT_TID (preserved across the restore); r1 is
+        // free. This single PendSV-owned write is what makes the
+        // save-target race-free (ERRATA-009 L3 / SOS-04-B §6.4).
+        "ldr   r1, ={loaded_tid}",
+        "str   r3, [r1]",
+        //
+        // Install incoming PSP, fence, return-from-exception.
+        "msr   psp, r0",
+        "dsb",
+        "isb",
+        "bx    lr",
+        //
+        loaded_tid         = sym crate::kernel::LOADED_TID,
+        current_tid        = sym crate::kernel::CURRENT_TID,
+        task_psps          = sym crate::kernel::TASK_PSPS,
+        task_saved_frames  = sym crate::kernel::TASK_SAVED_FRAMES,
+    );
 }
 
 /// SysTick — tick service. NVIC priority `0xC0` per SOS-00 §6.2.
@@ -266,22 +266,22 @@ fn SysTick() {
     // "standalone-smoke")]` to re-enable hardware-tick increment when
     // the firmware is built for Standalone use.
     if false {
-    unsafe {
-        let cell = &mut *KERNEL_STATE.0.get();
-        if let Some(dm) = cell.as_mut() {
-            if dm.irq_nest > 0 || dm.sched_lock > 0 {
-                dm.pend_ticks = dm.pend_ticks.saturating_add(1);
-            } else {
-                dm.tick_count = dm.tick_count.saturating_add(1);
-                // TODO(phase 3b): walk dm.tcb[] for delay/timeout
-                // expiry; deposit RC_OK / RC_TIMEOUT into tcb[id].msg;
-                // move expired tasks to ready_push; set
-                // dm.resched = true if any task unblocked. Reference
-                // implementation: sim/sos-sim/src/scripts.rs
-                // `script_tick_idle_sys_tick_0`.
+        unsafe {
+            let cell = &mut *KERNEL_STATE.0.get();
+            if let Some(dm) = cell.as_mut() {
+                if dm.irq_nest > 0 || dm.sched_lock > 0 {
+                    dm.pend_ticks = dm.pend_ticks.saturating_add(1);
+                } else {
+                    dm.tick_count = dm.tick_count.saturating_add(1);
+                    // TODO(phase 3b): walk dm.tcb[] for delay/timeout
+                    // expiry; deposit RC_OK / RC_TIMEOUT into tcb[id].msg;
+                    // move expired tasks to ready_push; set
+                    // dm.resched = true if any task unblocked. Reference
+                    // implementation: sim/sos-sim/src/scripts.rs
+                    // `script_tick_idle_sys_tick_0`.
+                }
             }
         }
-    }
     } // end if false (EOQ-005 hardware-SysTick-disabled gate)
 
     // EOQ-004 (2026-05-21): the previous unconditional `set_pendsv()`

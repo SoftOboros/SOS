@@ -11,8 +11,8 @@
 //! load-bearing layer (the hand-rolled bytes) directly.
 
 use sos_m7_rust_trace::{
-    write_record_from_input, Msg as TMsg, QueueView, ReturnCode as TRc, SemView,
-    TaskState as TSt, TcbView, TraceInput,
+    write_record_from_input, Msg as TMsg, QueueView, ReturnCode as TRc, SemView, TaskState as TSt,
+    TcbView, TraceInput,
 };
 use sos_sim::{
     datamodel::{Msg as SMsg, ReturnCode as SRc, TaskState as SSt},

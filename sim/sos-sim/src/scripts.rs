@@ -439,7 +439,11 @@ pub fn script_sys_idle_sem_take_0(dm: &mut Datamodel, ev: &Event) -> Result<(), 
     } else if timeout == 0 {
         dm.rc = ReturnCode::Timeout;
     } else {
-        let dl = if timeout < 0 { 0 } else { dm.tick_count + timeout };
+        let dl = if timeout < 0 {
+            0
+        } else {
+            dm.tick_count + timeout
+        };
         let cur = dm.current;
         if cur < 0 {
             return Err(SimError::Runtime(
@@ -476,10 +480,7 @@ pub fn script_sys_idle_sem_give_0(dm: &mut Datamodel, ev: &Event) -> Result<(), 
 }
 
 /// Translates rtos_kernel.scxml lines 401-415 (transition event="sem.give_from_isr").
-pub fn script_sys_idle_sem_give_from_isr_0(
-    dm: &mut Datamodel,
-    ev: &Event,
-) -> Result<(), SimError> {
+pub fn script_sys_idle_sem_give_from_isr_0(dm: &mut Datamodel, ev: &Event) -> Result<(), SimError> {
     let sid = arg_usize(ev, "sid")?;
     if sid >= dm.sems.len() {
         return Ok(());
@@ -537,7 +538,11 @@ pub fn script_sys_idle_queue_send_0(dm: &mut Datamodel, ev: &Event) -> Result<()
     } else if timeout == 0 {
         dm.rc = ReturnCode::Full;
     } else {
-        let dl = if timeout < 0 { 0 } else { dm.tick_count + timeout };
+        let dl = if timeout < 0 {
+            0
+        } else {
+            dm.tick_count + timeout
+        };
         let cur = dm.current;
         if cur < 0 {
             return Err(SimError::Runtime(
@@ -579,8 +584,7 @@ pub fn script_sys_idle_queue_receive_0(dm: &mut Datamodel, ev: &Event) -> Result
                 Msg::Int(v) => v,
                 _ => {
                     return Err(SimError::Runtime(
-                        "queue.receive: blocked sender had no pending Msg::Int payload"
-                            .to_string(),
+                        "queue.receive: blocked sender had no pending Msg::Int payload".to_string(),
                     ))
                 }
             };
@@ -614,7 +618,11 @@ pub fn script_sys_idle_queue_receive_0(dm: &mut Datamodel, ev: &Event) -> Result
     } else if timeout == 0 {
         dm.rc = ReturnCode::Empty;
     } else {
-        let dl = if timeout < 0 { 0 } else { dm.tick_count + timeout };
+        let dl = if timeout < 0 {
+            0
+        } else {
+            dm.tick_count + timeout
+        };
         let cur = dm.current;
         if cur < 0 {
             return Err(SimError::Runtime(
@@ -757,12 +765,7 @@ fn canonical_name(name: &str) -> &str {
 }
 
 impl ScriptProvider for HandCompiledScripts {
-    fn run_script(
-        &self,
-        name: &str,
-        dm: &mut Datamodel,
-        ev: &Event,
-    ) -> Result<(), SimError> {
+    fn run_script(&self, name: &str, dm: &mut Datamodel, ev: &Event) -> Result<(), SimError> {
         match canonical_name(name) {
             "script_boot_onentry_0" => {
                 script_boot_onentry_0(dm, ev);
@@ -787,9 +790,7 @@ impl ScriptProvider for HandCompiledScripts {
             "script_sys_idle_sem_create_0" => script_sys_idle_sem_create_0(dm, ev),
             "script_sys_idle_sem_take_0" => script_sys_idle_sem_take_0(dm, ev),
             "script_sys_idle_sem_give_0" => script_sys_idle_sem_give_0(dm, ev),
-            "script_sys_idle_sem_give_from_isr_0" => {
-                script_sys_idle_sem_give_from_isr_0(dm, ev)
-            }
+            "script_sys_idle_sem_give_from_isr_0" => script_sys_idle_sem_give_from_isr_0(dm, ev),
             "script_sys_idle_queue_create_0" => script_sys_idle_queue_create_0(dm, ev),
             "script_sys_idle_queue_send_0" => script_sys_idle_queue_send_0(dm, ev),
             "script_sys_idle_queue_receive_0" => script_sys_idle_queue_receive_0(dm, ev),

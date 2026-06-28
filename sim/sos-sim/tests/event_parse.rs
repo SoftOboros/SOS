@@ -6,10 +6,8 @@ use sos_sim::{Event, EventName};
 
 #[test]
 fn event_parse_task_create() {
-    let ev = Event::parse(
-        r#"{"event":"task.create","data":{"id":1,"prio":3},"from_tid":0}"#,
-    )
-    .expect("task.create must parse");
+    let ev = Event::parse(r#"{"event":"task.create","data":{"id":1,"prio":3},"from_tid":0}"#)
+        .expect("task.create must parse");
     assert_eq!(ev.name, EventName::TaskCreate);
     assert_eq!(ev.from_tid, Some(0));
     assert_eq!(ev.data["id"].as_i64(), Some(1));

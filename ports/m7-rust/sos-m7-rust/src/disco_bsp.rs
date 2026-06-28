@@ -139,13 +139,18 @@ fn init_clocks(dp: &stm32h7::stm32h747cm7::Peripherals) {
     //    PAC encoding (HPRE_A): Div1 = 0, Div2 = 8.
     //    PAC encoding (D{1..3}PPRE_A): Div1 = 0, Div2 = 4.
     rcc.d1cfgr.modify(|_, w| {
-        w.d1cpre().div1() // D1 CPRE = /1 (CM7 = 400 MHz)
-            .hpre().div2() // HPRE = /2 (HCLK = 200 MHz)
-            .d1ppre().div1() // APB3 = HCLK/1 (= 200 MHz)
+        w.d1cpre()
+            .div1() // D1 CPRE = /1 (CM7 = 400 MHz)
+            .hpre()
+            .div2() // HPRE = /2 (HCLK = 200 MHz)
+            .d1ppre()
+            .div1() // APB3 = HCLK/1 (= 200 MHz)
     });
     rcc.d2cfgr.modify(|_, w| {
-        w.d2ppre1().div1() // APB1 = HCLK/1
-            .d2ppre2().div1() // APB2 = HCLK/1
+        w.d2ppre1()
+            .div1() // APB1 = HCLK/1
+            .d2ppre2()
+            .div1() // APB2 = HCLK/1
     });
     rcc.d3cfgr.modify(|_, w| {
         w.d3ppre().div1() // APB4 = HCLK/1
@@ -193,9 +198,7 @@ fn init_gpio_usart1_pins(dp: &stm32h7::stm32h747cm7::Peripherals) {
 
     // 6. Alternate-function AF7 (USART1) on PA9 and PA10. Both pins
     //    are in the high half-word, so AFRH (afr9 / afr10).
-    gpioa
-        .afrh
-        .modify(|_, w| w.afr9().bits(7).afr10().bits(7));
+    gpioa.afrh.modify(|_, w| w.afr9().bits(7).afr10().bits(7));
 }
 
 /// Configure SysTick per SOS-00 §6.6: clock source = CPU clock,

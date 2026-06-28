@@ -28,7 +28,9 @@ use sos_m7_rust_trace::{
     TcbView, TraceInput,
 };
 
-use crate::kernel::{Datamodel, Msg, ReturnCode, TaskState, TaskId, MAX_PRIO, MAX_SEMS, MAX_QUEUES, MAX_TASKS};
+use crate::kernel::{
+    Datamodel, Msg, ReturnCode, TaskId, TaskState, MAX_PRIO, MAX_QUEUES, MAX_SEMS, MAX_TASKS,
+};
 
 /// Serialise one `TraceRecord` (boot baseline or post-macrostep) into
 /// `buf` and return the number of bytes written. The bytes are exactly

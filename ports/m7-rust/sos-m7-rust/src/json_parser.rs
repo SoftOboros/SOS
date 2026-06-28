@@ -254,8 +254,7 @@ impl VectorStream {
                     byte_offset: cur.pos,
                 }
             }
-            ParserState::InInputArrayExpectElement
-            | ParserState::InInputArrayBetweenElements => {
+            ParserState::InInputArrayExpectElement | ParserState::InInputArrayBetweenElements => {
                 self.step_in_input_array(&mut cur)
             }
             ParserState::AwaitingWrapperClose => self.step_awaiting_wrapper_close(&mut cur),
@@ -546,22 +545,20 @@ impl VectorStream {
                 self.state = ParserState::InWrapperExpectKey;
                 self.step_in_wrapper_expect_key(cur)
             }
-            Some(b'{') => {
-                match parse_event_object(cur) {
-                    Ok(Some(event)) => {
-                        self.state = ParserState::InInputArrayBetweenElements;
-                        ParseStep::Event {
-                            event,
-                            consumed: cur.pos,
-                        }
+            Some(b'{') => match parse_event_object(cur) {
+                Ok(Some(event)) => {
+                    self.state = ParserState::InInputArrayBetweenElements;
+                    ParseStep::Event {
+                        event,
+                        consumed: cur.pos,
                     }
-                    Ok(None) => ParseStep::NeedMoreInput,
-                    Err(e) => ParseStep::Error {
-                        kind: e,
-                        byte_offset: cur.pos,
-                    },
                 }
-            }
+                Ok(None) => ParseStep::NeedMoreInput,
+                Err(e) => ParseStep::Error {
+                    kind: e,
+                    byte_offset: cur.pos,
+                },
+            },
             Some(_) => ParseStep::Error {
                 kind: ParseError::UnexpectedByte,
                 byte_offset: cur.pos,
@@ -1194,49 +1191,58 @@ fn parse_event_data(
     // required keys must be present; no extras allowed.
     let d = match name {
         EventName::TaskCreate => {
-            check_only(&[id_v.is_some(), prio_v.is_some()], &[
-                ticks_v.is_some(),
-                sid_v.is_some(),
-                qid_v.is_some(),
-                msg_v.is_some(),
-                timeout_v.is_some(),
-                cap_v.is_some(),
-                initial_v.is_some(),
-                max_v.is_some(),
-            ])?;
+            check_only(
+                &[id_v.is_some(), prio_v.is_some()],
+                &[
+                    ticks_v.is_some(),
+                    sid_v.is_some(),
+                    qid_v.is_some(),
+                    msg_v.is_some(),
+                    timeout_v.is_some(),
+                    cap_v.is_some(),
+                    initial_v.is_some(),
+                    max_v.is_some(),
+                ],
+            )?;
             EventData::TaskCreate {
                 id: i16_from_i64(require_i64(id_v)?)?,
                 prio: u8_from_i64(require_i64(prio_v)?)?,
             }
         }
         EventName::TaskDelay => {
-            check_only(&[ticks_v.is_some()], &[
-                id_v.is_some(),
-                prio_v.is_some(),
-                sid_v.is_some(),
-                qid_v.is_some(),
-                msg_v.is_some(),
-                timeout_v.is_some(),
-                cap_v.is_some(),
-                initial_v.is_some(),
-                max_v.is_some(),
-            ])?;
+            check_only(
+                &[ticks_v.is_some()],
+                &[
+                    id_v.is_some(),
+                    prio_v.is_some(),
+                    sid_v.is_some(),
+                    qid_v.is_some(),
+                    msg_v.is_some(),
+                    timeout_v.is_some(),
+                    cap_v.is_some(),
+                    initial_v.is_some(),
+                    max_v.is_some(),
+                ],
+            )?;
             EventData::TaskDelay {
                 ticks: require_i64(ticks_v)?,
             }
         }
         EventName::TaskSuspend | EventName::TaskResume => {
-            check_only(&[id_v.is_some()], &[
-                prio_v.is_some(),
-                ticks_v.is_some(),
-                sid_v.is_some(),
-                qid_v.is_some(),
-                msg_v.is_some(),
-                timeout_v.is_some(),
-                cap_v.is_some(),
-                initial_v.is_some(),
-                max_v.is_some(),
-            ])?;
+            check_only(
+                &[id_v.is_some()],
+                &[
+                    prio_v.is_some(),
+                    ticks_v.is_some(),
+                    sid_v.is_some(),
+                    qid_v.is_some(),
+                    msg_v.is_some(),
+                    timeout_v.is_some(),
+                    cap_v.is_some(),
+                    initial_v.is_some(),
+                    max_v.is_some(),
+                ],
+            )?;
             EventData::TaskId {
                 id: i16_from_i64(require_i64(id_v)?)?,
             }
@@ -1290,16 +1296,19 @@ fn parse_event_data(
             }
         }
         EventName::QueueCreate => {
-            check_only(&[id_v.is_some(), cap_v.is_some()], &[
-                prio_v.is_some(),
-                ticks_v.is_some(),
-                sid_v.is_some(),
-                qid_v.is_some(),
-                msg_v.is_some(),
-                timeout_v.is_some(),
-                initial_v.is_some(),
-                max_v.is_some(),
-            ])?;
+            check_only(
+                &[id_v.is_some(), cap_v.is_some()],
+                &[
+                    prio_v.is_some(),
+                    ticks_v.is_some(),
+                    sid_v.is_some(),
+                    qid_v.is_some(),
+                    msg_v.is_some(),
+                    timeout_v.is_some(),
+                    initial_v.is_some(),
+                    max_v.is_some(),
+                ],
+            )?;
             EventData::QueueCreate {
                 id: i16_from_i64(require_i64(id_v)?)?,
                 cap: u32_nonneg(require_i64(cap_v)?)?,
@@ -1332,16 +1341,19 @@ fn parse_event_data(
             }
         }
         EventName::QueueReceive => {
-            check_only(&[qid_v.is_some(), timeout_v.is_some()], &[
-                id_v.is_some(),
-                prio_v.is_some(),
-                ticks_v.is_some(),
-                sid_v.is_some(),
-                msg_v.is_some(),
-                cap_v.is_some(),
-                initial_v.is_some(),
-                max_v.is_some(),
-            ])?;
+            check_only(
+                &[qid_v.is_some(), timeout_v.is_some()],
+                &[
+                    id_v.is_some(),
+                    prio_v.is_some(),
+                    ticks_v.is_some(),
+                    sid_v.is_some(),
+                    msg_v.is_some(),
+                    cap_v.is_some(),
+                    initial_v.is_some(),
+                    max_v.is_some(),
+                ],
+            )?;
             EventData::QueueReceive {
                 qid: i16_from_i64(require_i64(qid_v)?)?,
                 timeout: require_i64(timeout_v)?,

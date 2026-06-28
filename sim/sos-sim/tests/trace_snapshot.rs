@@ -1,8 +1,8 @@
 //! Smoke test for `Trace::snapshot` — builds the boot-baseline datamodel
 //! and asserts the snapshot is the SOS-02 §7.3 canonical baseline shape.
 
-use sos_sim::{Config, Datamodel, TaskState, Trace};
 use sos_sim::trace::{QueueSnapshot, SemSnapshot};
+use sos_sim::{Config, Datamodel, TaskState, Trace};
 
 #[test]
 fn snapshot_boot_baseline() {
@@ -51,9 +51,8 @@ fn snapshot_boot_baseline() {
     // baseline byte sequence: invalid sems/queues collapse to the
     // `{"valid": false}` short form, and field order matches §7.1.
     let json = serde_json::to_string(&rec).expect("snapshot must serialise");
-    assert!(json.starts_with(
-        "{\"after_input_idx\":-1,\"current\":0,\"tick_count\":0,\"rc\":0,\"tcb\":["
-    ));
+    assert!(json
+        .starts_with("{\"after_input_idx\":-1,\"current\":0,\"tick_count\":0,\"rc\":0,\"tcb\":["));
     assert!(json.contains("\"sems\":[{\"valid\":false}"));
     assert!(json.contains("\"queues\":[{\"valid\":false}"));
     assert!(json.ends_with("\"irq_nest\":0,\"sched_lock\":0,\"pend_ticks\":0}"));

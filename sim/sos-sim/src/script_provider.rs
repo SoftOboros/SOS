@@ -16,10 +16,5 @@ pub trait ScriptProvider {
     /// Dispatch to the script body named `name`. Returns `Ok(())` on
     /// successful execution, or [`SimError::Runtime`] / similar for an
     /// invariant violation surfaced from inside the body.
-    fn run_script(
-        &self,
-        name: &str,
-        dm: &mut Datamodel,
-        ev: &Event,
-    ) -> Result<(), SimError>;
+    fn run_script(&self, name: &str, dm: &mut Datamodel, ev: &Event) -> Result<(), SimError>;
 }

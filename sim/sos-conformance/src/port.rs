@@ -84,10 +84,7 @@ impl Port for SubprocessPort {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to spawn port binary {}: {e}",
-                    self.binary.display()
-                )
+                anyhow::anyhow!("failed to spawn port binary {}: {e}", self.binary.display())
             })?;
 
         // Write stdin in a separate thread to avoid deadlocks (port may
